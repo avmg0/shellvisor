@@ -1,8 +1,8 @@
-//! Choosing a shell and starting it with ShellView's integration hooks.
+//! Choosing a shell and starting it with Shellvisor's integration hooks.
 //!
 //! zsh  — started with `ZDOTDIR` pointing at our forwarder files, which source
 //!        the user's own dotfiles and then add `precmd`/`preexec` hooks.
-//! bash — started as `bash --rcfile shellview.bash -i`; the rcfile emulates
+//! bash — started as `bash --rcfile shellvisor.bash -i`; the rcfile emulates
 //!        login startup, then adds `PROMPT_COMMAND` + a DEBUG trap.
 //! other shells run untouched (no hooks).
 
@@ -15,7 +15,7 @@ const ZSH_FILES: [(&str, &str); 4] = [
     (".zshrc", include_str!("../../../shell/zsh/zshrc")),
     (".zlogin", include_str!("../../../shell/zsh/zlogin")),
 ];
-const BASH_RC: &str = include_str!("../../../shell/bash/shellview.bash");
+const BASH_RC: &str = include_str!("../../../shell/bash/shellvisor.bash");
 
 /// Everything needed to start the shell process.
 #[derive(Debug, Clone)]
@@ -99,7 +99,7 @@ pub fn build(choice: Option<&str>, integrate: bool, cache: &Path) -> io::Result<
                 env: vec![
                     ("ZDOTDIR".into(), dir.to_string_lossy().into_owned()),
                     (
-                        "SHELLVIEW_ORIG_ZDOTDIR".into(),
+                        "SHELLVISOR_ORIG_ZDOTDIR".into(),
                         std::env::var("ZDOTDIR").unwrap_or_default(),
                     ),
                 ],
@@ -110,15 +110,15 @@ pub fn build(choice: Option<&str>, integrate: bool, cache: &Path) -> io::Result<
         }
         (true, "bash") => {
             let dir = base.join("bash");
-            install(&dir, &[("shellview.bash", BASH_RC)])?;
+            install(&dir, &[("shellvisor.bash", BASH_RC)])?;
             Launch {
                 // --rcfile is ignored by login shells, so the rcfile emulates login startup.
                 args: vec![
                     "--rcfile".into(),
-                    dir.join("shellview.bash").to_string_lossy().into_owned(),
+                    dir.join("shellvisor.bash").to_string_lossy().into_owned(),
                     "-i".into(),
                 ],
-                env: vec![("SHELLVIEW_LOGIN".into(), "1".into())],
+                env: vec![("SHELLVISOR_LOGIN".into(), "1".into())],
                 integrated: true,
                 program,
                 name,

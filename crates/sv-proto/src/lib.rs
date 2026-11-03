@@ -1,7 +1,7 @@
-//! Wire formats shared by the ShellView app and the `sv` command.
+//! Wire formats shared by the Shellvisor app and the `sv` command.
 //!
-//! Shell hooks and `sv` talk to ShellView by printing OSC escape sequences to
-//! the terminal. ShellView sits between the shell and the real terminal, so it
+//! Shell hooks and `sv` talk to Shellvisor by printing OSC escape sequences to
+//! the terminal. Shellvisor sits between the shell and the real terminal, so it
 //! sees them, acts on them, and never forwards them.
 //!
 //! | Sequence                        | Meaning                         |
@@ -11,21 +11,21 @@
 //! | `OSC 133 ; C`                   | command started                 |
 //! | `OSC 133 ; D [; exit]`          | command finished                |
 //! | `OSC 7770 ; cmd ; <base64>`     | text of the command being run   |
-//! | `OSC 7770 ; mode ; on/off/exit` | switch ShellView view / quit    |
+//! | `OSC 7770 ; mode ; on/off/exit` | switch Shellvisor view / quit    |
 
 use base64::Engine as _;
 
-/// ShellView's private OSC number.
-pub const OSC_SHELLVIEW: &[u8] = b"7770";
+/// Shellvisor's private OSC number.
+pub const OSC_SHELLVISOR: &[u8] = b"7770";
 
-/// Environment variable set inside every shell ShellView starts.
-pub const ENV_INSIDE: &str = "SHELLVIEW";
-/// Environment variable holding the ShellView process id.
-pub const ENV_PID: &str = "SHELLVIEW_PID";
-/// Environment variable holding the ShellView version.
-pub const ENV_VERSION: &str = "SHELLVIEW_VERSION";
-/// Environment variable holding the shell name ShellView started (zsh, bash…).
-pub const ENV_SHELL: &str = "SHELLVIEW_SHELL";
+/// Environment variable set inside every shell Shellvisor starts.
+pub const ENV_INSIDE: &str = "SHELLVISOR";
+/// Environment variable holding the Shellvisor process id.
+pub const ENV_PID: &str = "SHELLVISOR_PID";
+/// Environment variable holding the Shellvisor version.
+pub const ENV_VERSION: &str = "SHELLVISOR_VERSION";
+/// Environment variable holding the shell name Shellvisor started (zsh, bash…).
+pub const ENV_SHELL: &str = "SHELLVISOR_SHELL";
 
 /// A view-mode request sent by `sv`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,7 +34,7 @@ pub enum Mode {
     On,
     /// Hide panels and show only the shell (basic view).
     Off,
-    /// Leave ShellView completely.
+    /// Leave Shellvisor completely.
     Exit,
 }
 
@@ -62,7 +62,7 @@ impl Mode {
     }
 }
 
-/// Something the shell (or `sv`) told ShellView.
+/// Something the shell (or `sv`) told Shellvisor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShellEvent {
     Cwd(String),
@@ -75,7 +75,7 @@ pub enum ShellEvent {
 
 /// Parse the parameters of an OSC sequence (already split on `;`).
 ///
-/// Returns `None` for sequences that are not ShellView's.
+/// Returns `None` for sequences that are not Shellvisor's.
 pub fn parse_osc(params: &[&[u8]]) -> Option<ShellEvent> {
     match params {
         [b"7", rest @ ..] if !rest.is_empty() => {
@@ -94,7 +94,7 @@ pub fn parse_osc(params: &[&[u8]]) -> Option<ShellEvent> {
             }
             _ => None,
         },
-        [id, b"cmd", data] if *id == OSC_SHELLVIEW => {
+        [id, b"cmd", data] if *id == OSC_SHELLVISOR => {
             let raw = base64::engine::general_purpose::STANDARD
                 .decode(data)
                 .ok()?;
@@ -102,8 +102,8 @@ pub fn parse_osc(params: &[&[u8]]) -> Option<ShellEvent> {
                 String::from_utf8_lossy(&raw).into_owned(),
             ))
         }
-        [id, b"cmd"] if *id == OSC_SHELLVIEW => Some(ShellEvent::CommandText(String::new())),
-        [id, b"mode", m] if *id == OSC_SHELLVIEW => Mode::parse(m).map(ShellEvent::Mode),
+        [id, b"cmd"] if *id == OSC_SHELLVISOR => Some(ShellEvent::CommandText(String::new())),
+        [id, b"mode", m] if *id == OSC_SHELLVISOR => Mode::parse(m).map(ShellEvent::Mode),
         _ => None,
     }
 }

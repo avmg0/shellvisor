@@ -3,7 +3,8 @@
 //! ```yaml
 //! shell: zsh              # or bash, or a full path; default: $SHELL
 //! scrollback_lines: 5000  # per shell tab
-//! shell_integration: true # report folder / command / exit code to ShellView
+//! shell_integration: true # report folder / command / exit code to Shellvisor
+//! start_view: full      # full (tabs, status bar) or basic (just the shell)
 //! mouse: true            # mouse wheel scrolls history; hold Option (iTerm2) or
 //!                         # turn off View → Allow Mouse Reporting (Terminal.app) to select text
 //! ```
@@ -18,6 +19,15 @@ pub struct Config {
     pub scrollback_lines: usize,
     pub shell_integration: bool,
     pub mouse: bool,
+    pub start_view: StartView,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum StartView {
+    #[default]
+    Full,
+    Basic,
 }
 
 impl Default for Config {
@@ -27,6 +37,7 @@ impl Default for Config {
             scrollback_lines: 5000,
             shell_integration: true,
             mouse: true,
+            start_view: StartView::Full,
         }
     }
 }
@@ -85,6 +96,16 @@ mod tests {
         // Later releases add keys (layouts, keymap…); older binaries must not choke.
         let c = Config::parse("scrollback_lines: 100\nlayouts: {}\n").unwrap();
         assert_eq!(c.scrollback_lines, 100);
+    }
+
+    #[test]
+    fn start_view() {
+        assert_eq!(
+            Config::parse("start_view: basic").unwrap().start_view,
+            StartView::Basic
+        );
+        assert_eq!(Config::default().start_view, StartView::Full);
+        assert!(Config::parse("start_view: sideways").is_err());
     }
 
     #[test]

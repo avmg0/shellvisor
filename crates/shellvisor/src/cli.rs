@@ -1,20 +1,20 @@
 //! The `sv` command.
 //!
-//! `sv` is the same binary as `shellview`, invoked under another name (or as
-//! `shellview sv …`). Inside ShellView it talks to its parent by printing an
-//! escape sequence to the terminal; outside it can start ShellView.
+//! `sv` is the same binary as `shellvisor`, invoked under another name (or as
+//! `shellvisor sv …`). Inside Shellvisor it talks to its parent by printing an
+//! escape sequence to the terminal; outside it can start Shellvisor.
 
 use std::io::Write;
 use sv_proto::{ENV_INSIDE, ENV_PID, ENV_SHELL, ENV_VERSION, Mode};
 
 const HELP: &str = "\
-sv — control ShellView from your shell
+sv — control Shellvisor from your shell
 
 usage:
-  sv on        start ShellView here (or show the full view if already inside)
+  sv on        start Shellvisor here (or show the full view if already inside)
   sv off       switch to basic view (just your shell; everything keeps running)
-  sv exit      leave ShellView
-  sv status    is ShellView running in this terminal?
+  sv exit      leave Shellvisor
+  sv status    is Shellvisor running in this terminal?
   sv version   print the version
   sv help      this help
 ";
@@ -45,7 +45,7 @@ fn send(mode: Mode) -> i32 {
 }
 
 fn not_running(cmd: &str) -> i32 {
-    eprintln!("sv {cmd}: ShellView is not running in this terminal — start it with `sv on`");
+    eprintln!("sv {cmd}: Shellvisor is not running in this terminal — start it with `sv on`");
     1
 }
 
@@ -56,7 +56,7 @@ pub fn run(args: &[String]) -> i32 {
             if inside() {
                 send(Mode::On)
             } else {
-                start_shellview()
+                start_shellvisor()
             }
         }
         "off" => {
@@ -77,14 +77,14 @@ pub fn run(args: &[String]) -> i32 {
             if inside() {
                 let get = |k| std::env::var(k).unwrap_or_else(|_| "?".into());
                 println!(
-                    "ShellView {} · running (pid {}) · view: basic · shell: {} · hooks: {}",
+                    "Shellvisor {} · running (pid {}) · view: basic · shell: {} · hooks: {}",
                     get(ENV_VERSION),
                     get(ENV_PID),
                     get(ENV_SHELL),
-                    get("SHELLVIEW_HOOKS")
+                    get("SHELLVISOR_HOOKS")
                 );
             } else {
-                println!("ShellView is not running in this terminal (start it with `sv on`)");
+                println!("Shellvisor is not running in this terminal (start it with `sv on`)");
             }
             0
         }
@@ -103,17 +103,17 @@ pub fn run(args: &[String]) -> i32 {
     }
 }
 
-/// Replace this process with ShellView, in the current folder.
-fn start_shellview() -> i32 {
+/// Replace this process with Shellvisor, in the current folder.
+fn start_shellvisor() -> i32 {
     use std::os::unix::process::CommandExt;
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("sv on: cannot find the shellview binary: {e}");
+            eprintln!("sv on: cannot find the shellvisor binary: {e}");
             return 1;
         }
     };
-    let err = std::process::Command::new(exe).arg0("shellview").exec();
-    eprintln!("sv on: could not start ShellView: {err}");
+    let err = std::process::Command::new(exe).arg0("shellvisor").exec();
+    eprintln!("sv on: could not start Shellvisor: {err}");
     1
 }

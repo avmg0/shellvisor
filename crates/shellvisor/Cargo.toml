@@ -1,5 +1,5 @@
 [package]
-name = "shellview"
+name = "shellvisor"
 description = "A multi-pane terminal workspace: your real shell plus files, system stats, data flow and coding agents"
 version.workspace = true
 edition.workspace = true

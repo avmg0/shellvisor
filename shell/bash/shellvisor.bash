@@ -1,8 +1,8 @@
-# ShellView shell integration for bash (works with macOS's bash 3.2 and bash 4/5).
+# Shellvisor shell integration for bash (works with macOS's bash 3.2 and bash 4/5).
 # Loaded via `bash --rcfile <this> -i`. Sources your normal startup files first,
-# then reports cwd / command start / exit code to ShellView with OSC escapes.
+# then reports cwd / command start / exit code to Shellvisor with OSC escapes.
 
-if [ -n "$SHELLVIEW_LOGIN" ]; then
+if [ -n "$SHELLVISOR_LOGIN" ]; then
   [ -r /etc/profile ] && . /etc/profile
   if   [ -r "$HOME/.bash_profile" ]; then . "$HOME/.bash_profile"
   elif [ -r "$HOME/.bash_login" ];   then . "$HOME/.bash_login"
@@ -11,7 +11,7 @@ if [ -n "$SHELLVIEW_LOGIN" ]; then
 else
   [ -r "$HOME/.bashrc" ] && . "$HOME/.bashrc"
 fi
-unset SHELLVIEW_LOGIN
+unset SHELLVISOR_LOGIN
 
 __sv_osc() { printf '\033]%s\007' "$1"; }
 __sv_b64() { printf '%s' "$1" | base64 | tr -d '\n'; }

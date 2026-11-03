@@ -1,38 +1,49 @@
-//! ShellView — a multi-pane workspace around your real zsh or bash.
+//! Shellvisor — a multi-pane workspace around your real zsh or bash.
 //!
 //! One binary, two names:
-//!   `shellview [--shell zsh|bash|PATH]`  start ShellView
+//!   `shellvisor [--shell zsh|bash|PATH]`  start Shellvisor
 //!   `sv <command>`                       control it from inside your shell
+
+/// Product name, as shown to users.
+pub const NAME: &str = "Shellvisor";
+/// Lower-case name: binary, config and data folders.
+pub const NAME_LOWER: &str = "shellvisor";
 
 mod app;
 mod cli;
 mod config;
 mod history;
-mod input;
+mod keys;
+mod mouse;
 mod paths;
 mod shell;
+mod sysinfo;
 mod term;
+mod ui;
+mod workspace;
 
 use std::path::{Path, PathBuf};
 use sv_proto::{ENV_INSIDE, ENV_PID, ENV_SHELL, ENV_VERSION};
 
 const USAGE: &str = "\
-shellview — your shell, plus a workspace around it
+shellvisor — your shell, plus a workspace around it
 
 usage:
-  shellview [options]
-  shellview sv <command>      (same as running `sv <command>`)
+  shellvisor [options]
+  shellvisor sv <command>      (same as running `sv <command>`)
 
 options:
   -s, --shell <zsh|bash|PATH>  shell to run (default: config, then $SHELL)
-      --no-integration         don't add ShellView's shell hooks
+      --no-integration         don't add Shellvisor's shell hooks
   -h, --help                   this help
   -V, --version                print the version
 
-inside ShellView:
+inside Shellvisor:
+  F1                    all keys
+  ctrl+]                leader key (then one letter) — works in every terminal
+  alt+t / alt+\\ / alt+-  new tab / split side by side / split stacked
+  alt+`                 full view ⇄ basic view (also: sv on / sv off)
   ctrl+q                quit
-  shift+PgUp/PgDn       scroll back (or use the mouse wheel)
-  sv off | sv exit      basic view | leave
 ";
 
 struct Args {
@@ -90,7 +101,7 @@ fn main() {
             return;
         }
         Some("-V" | "--version") => {
-            println!("shellview {}", env!("CARGO_PKG_VERSION"));
+            println!("shellvisor {}", env!("CARGO_PKG_VERSION"));
             return;
         }
         _ => {}
@@ -99,21 +110,21 @@ fn main() {
     let opts = match parse_args(&args) {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("shellview: {e}\n\n{USAGE}");
+            eprintln!("shellvisor: {e}\n\n{USAGE}");
             std::process::exit(2);
         }
     };
 
     if cli::inside() {
         eprintln!(
-            "shellview: already running in this terminal — use `sv off` / `sv on` to switch views"
+            "shellvisor: already running in this terminal — use `sv off` / `sv on` to switch views"
         );
         std::process::exit(1);
     }
 
     let (cfg, warning) = config::Config::load(&paths::config_file());
     if let Some(w) = warning {
-        eprintln!("shellview: {w}");
+        eprintln!("shellvisor: {w}");
     }
 
     let cache = paths::cache_dir();
@@ -121,7 +132,7 @@ fn main() {
     let launch = match shell::build(choice, opts.integration && cfg.shell_integration, &cache) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("shellview: {e}");
+            eprintln!("shellvisor: {e}");
             std::process::exit(1);
         }
     };
@@ -129,7 +140,7 @@ fn main() {
     let mut env = vec![
         ("TERM".to_string(), "xterm-256color".to_string()),
         ("COLORTERM".into(), "truecolor".into()),
-        ("TERM_PROGRAM".into(), "ShellView".into()),
+        ("TERM_PROGRAM".into(), "Shellvisor".into()),
         (
             "TERM_PROGRAM_VERSION".into(),
             env!("CARGO_PKG_VERSION").into(),
@@ -139,7 +150,7 @@ fn main() {
         (ENV_VERSION.into(), env!("CARGO_PKG_VERSION").into()),
         (ENV_SHELL.into(), launch.name.clone()),
         (
-            "SHELLVIEW_HOOKS".into(),
+            "SHELLVISOR_HOOKS".into(),
             if launch.integrated { "on" } else { "off" }.into(),
         ),
     ];
@@ -154,11 +165,15 @@ fn main() {
         scrollback: cfg.scrollback_lines,
         mouse: cfg.mouse,
         history: history::History::new(&paths::state_dir()),
+        start_view: match cfg.start_view {
+            config::StartView::Full => app::View::Full,
+            config::StartView::Basic => app::View::Basic,
+        },
     });
     match result {
         Ok(code) => std::process::exit(code),
         Err(e) => {
-            eprintln!("shellview: {e}");
+            eprintln!("shellvisor: {e}");
             std::process::exit(1);
         }
     }

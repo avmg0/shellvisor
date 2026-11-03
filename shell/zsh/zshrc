@@ -1,8 +1,8 @@
-__sv_zdotdir="$ZDOTDIR"; ZDOTDIR="$SHELLVIEW_USER_ZDOTDIR"
+__sv_zdotdir="$ZDOTDIR"; ZDOTDIR="$SHELLVISOR_USER_ZDOTDIR"
 [[ -r "$ZDOTDIR/.zshrc" ]] && source "$ZDOTDIR/.zshrc"
-SHELLVIEW_USER_ZDOTDIR="$ZDOTDIR"; ZDOTDIR="$__sv_zdotdir"
+SHELLVISOR_USER_ZDOTDIR="$ZDOTDIR"; ZDOTDIR="$__sv_zdotdir"
 
-# ---- ShellView hooks: cwd, command text, start/finish + exit code
+# ---- Shellvisor hooks: cwd, command text, start/finish + exit code
 autoload -Uz add-zsh-hook
 __sv_osc() { printf '\e]%s\a' "$1" }
 __sv_running=0
@@ -22,4 +22,4 @@ add-zsh-hook precmd __sv_precmd
 add-zsh-hook preexec __sv_preexec
 
 # non-login shells never read .zlogin: hand ZDOTDIR back to the user now
-[[ -o login ]] || { ZDOTDIR="$SHELLVIEW_USER_ZDOTDIR"; unset SHELLVIEW_USER_ZDOTDIR SHELLVIEW_ORIG_ZDOTDIR; }
+[[ -o login ]] || { ZDOTDIR="$SHELLVISOR_USER_ZDOTDIR"; unset SHELLVISOR_USER_ZDOTDIR SHELLVISOR_ORIG_ZDOTDIR; }

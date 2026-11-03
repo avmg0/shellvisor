@@ -14,7 +14,7 @@ use crate::shell::Launch;
 /// Side effects collected while parsing shell output.
 #[derive(Default)]
 pub struct Effects {
-    /// ShellView events reported by the shell hooks or `sv`.
+    /// Shellvisor events reported by the shell hooks or `sv`.
     pub events: Vec<ShellEvent>,
     /// Answers to terminal queries (cursor position, device attributes) → back to the PTY.
     pub replies: Vec<u8>,
@@ -104,7 +104,7 @@ pub struct InputModes {
 
 impl InputModes {
     /// The modes the real terminal should be in: the program's own, except
-    /// that when it doesn't use the mouse and `capture` is on, ShellView takes
+    /// that when it doesn't use the mouse and `capture` is on, Shellvisor takes
     /// mouse events itself (SGR encoding) so the wheel can scroll history.
     pub fn effective(self, capture: bool) -> Self {
         if capture && self.mouse == vt100::MouseProtocolMode::None {
@@ -196,6 +196,7 @@ impl Pane {
     pub fn spawn(
         launch: &Launch,
         extra_env: &[(String, String)],
+        cwd: Option<&std::path::Path>,
         rows: u16,
         cols: u16,
         scrollback: usize,
@@ -206,8 +207,13 @@ impl Pane {
             .map_err(|e| io::Error::other(e.to_string()))?;
         let mut cmd = CommandBuilder::new(&launch.program);
         cmd.args(&launch.args);
-        if let Ok(cwd) = std::env::current_dir() {
-            cmd.cwd(cwd);
+        match cwd.filter(|d| d.is_dir()) {
+            Some(d) => cmd.cwd(d),
+            None => {
+                if let Ok(d) = std::env::current_dir() {
+                    cmd.cwd(d);
+                }
+            }
         }
         cmd.env_remove("COLUMNS");
         cmd.env_remove("LINES");
@@ -292,6 +298,14 @@ impl Pane {
     /// Input modes the program inside has asked for.
     pub fn input_modes(&self) -> InputModes {
         InputModes::of(self.parser.screen())
+    }
+
+    pub fn mouse_mode(&self) -> vt100::MouseProtocolMode {
+        self.parser.screen().mouse_protocol_mode()
+    }
+
+    pub fn mouse_encoding(&self) -> vt100::MouseProtocolEncoding {
+        self.parser.screen().mouse_protocol_encoding()
     }
 
     /// Does the program inside want mouse events itself?
@@ -403,7 +417,7 @@ mod tests {
     }
 
     #[test]
-    fn shellview_osc_becomes_event_and_is_not_drawn() {
+    fn shellvisor_osc_becomes_event_and_is_not_drawn() {
         let mut p = parser();
         p.process(b"hi\x1b]7;file://h/tmp\x07\x1b]133;D;2\x1b\\there");
         let fx = std::mem::take(&mut p.callbacks_mut().fx);

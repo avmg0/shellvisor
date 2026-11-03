@@ -1,11 +1,11 @@
-# ShellView — Architecture
+# Shellvisor — Architecture
 
-Status: v0.2 · 2026-10-04 · P0 implemented (see Decisions log at the end)
+Status: v0.3 · 2026-11-04 · P0 + P1a implemented (see Decisions log at the end)
 Wireframes: `docs/wireframes/` (to be exported) · Phases: [ROADMAP.md](ROADMAP.md)
 
 ---
 
-## 1. What ShellView is
+## 1. What Shellvisor is
 
 A full-screen terminal UI that runs **inside the user's existing terminal app** (Terminal.app, iTerm2, Ghostty, WezTerm, Kitty) — like `tmux`, `htop` or `vim` — and splits the window into panes:
 
@@ -20,7 +20,7 @@ Plus `sv`, a set of structured (nushell-style) commands that work inside the she
 
 ### Goals
 1. Every existing shell command, alias, script and full-screen app keeps working unchanged.
-2. Tiny footprint: ShellView itself ≤ 15 MB RAM idle, < 0.5 % CPU idle, ≤ 8 MB binary (agents' own memory excluded).
+2. Tiny footprint: Shellvisor itself ≤ 15 MB RAM idle, < 0.5 % CPU idle, ≤ 8 MB binary (agents' own memory excluded).
 3. One binary, no runtime dependencies, macOS (Apple Silicon) first, Linux second.
 4. Can be turned off and on at any moment without losing running work (`sv off` / `sv on`).
 
@@ -36,7 +36,7 @@ Plus `sv`, a set of structured (nushell-style) commands that work inside the she
 
 ```
  Terminal.app / iTerm2 / Ghostty            (the user's terminal)
- └── shellview                              (ONE process: UI + state, ~10–15 MB)
+ └── shellvisor                              (ONE process: UI + state, ~10–15 MB)
      ├── PTY ─ zsh   (tab 1)               ┐
      ├── PTY ─ bash  (tab 2, split a)      │ real shells, one PTY each
      ├── PTY ─ zsh   (tab 2, split b)      ┘
@@ -46,12 +46,12 @@ Plus `sv`, a set of structured (nushell-style) commands that work inside the she
      └── short-lived helpers: git, du-walk threads, pipeline stages (only on demand)
 
  sv <cmd>   ← same binary, invoked by the user or an agent inside any shell
-            talks to its parent ShellView via (a) OSC escape on the tty or
+            talks to its parent Shellvisor via (a) OSC escape on the tty or
             (b) a private unix socket — never the network
 ```
 
-- **No daemon, no background service.** Everything lives as long as the `shellview` process. Quitting ends it all (with a warning if commands or agents are still running).
-- **Multi-call binary:** `shellview` starts the UI; `sv …` (symlink or argv[0] check) runs a CLI subcommand.
+- **No daemon, no background service.** Everything lives as long as the `shellvisor` process. Quitting ends it all (with a warning if commands or agents are still running).
+- **Multi-call binary:** `shellvisor` starts the UI; `sv …` (symlink or argv[0] check) runs a CLI subcommand.
 
 ---
 
@@ -91,12 +91,12 @@ Rules that keep it light (from the performance budget board):
 Start as **one binary crate with clear modules** plus one small protocol crate. Split into more crates only if compile times hurt.
 
 ```
-shellview/
+shellvisor/
 ├── Cargo.toml                 # workspace
 ├── crates/
-│   ├── shellview/             # the binary (UI + everything below as modules)
+│   ├── shellvisor/             # the binary (UI + everything below as modules)
 │   │   └── src/
-│   │       ├── main.rs        # argv[0] dispatch: shellview | sv
+│   │       ├── main.rs        # argv[0] dispatch: shellvisor | sv
 │   │       ├── app/           # App state, event loop, focus, commands, toasts
 │   │       ├── config/        # config.yaml load/watch/defaults, keymap, layouts
 │   │       ├── ui/            # ratatui widgets, theme, layout tree, editor, status bar
@@ -114,7 +114,7 @@ shellview/
 │   └── sv-proto/              # OSC 7770 + socket message types (serde), shared by app & cli
 ├── shell/                     # integration scripts (embedded with include_str!)
 │   ├── zsh/  zshenv zprofile zshrc zlogin  (installed as dotfiles at runtime)
-│   └── bash/ shellview.bash
+│   └── bash/ shellvisor.bash
 ├── docs/                      # ARCHITECTURE.md, ROADMAP.md, decisions/
 ├── tests/                     # integration tests with real PTYs
 └── prototype/                 # the earlier Python/Textual prototype — reference only
@@ -144,13 +144,13 @@ Release profile: `opt-level = "z"` or `"s"` (measure), `lto = true`, `codegen-un
 ### 5.1 Terminal pane (`term/`)
 - Each shell/agent = **PTY + `vt100::Parser` + scrollback ring**.
 - Output path: `pty bytes → OSC extractor → vt100 parser → dirty rows → render`.
-- The OSC extractor strips ShellView's own sequences (see 5.3) before the emulator sees them and turns them into events.
-- Full-screen apps (vim, htop, less) use the alternate screen; ShellView just renders whatever vt100 holds.
+- The OSC extractor strips Shellvisor's own sequences (see 5.3) before the emulator sees them and turns them into events.
+- Full-screen apps (vim, htop, less) use the alternate screen; Shellvisor just renders whatever vt100 holds.
 - Mouse: passed through when the app inside requested mouse mode; otherwise used for focus/selection.
 
 ### 5.2 Shell integration (`shell/`) — *already built and tested in the prototype*
 - **zsh:** start with `ZDOTDIR=<embedded dir>`; forwarder files source the user's real `.zshenv/.zprofile/.zshrc/.zlogin`, then add `precmd`/`preexec` hooks; `ZDOTDIR` is handed back.
-- **bash:** `bash --rcfile shellview.bash -i`; emulates login startup (`/etc/profile`, `~/.bash_profile` | `~/.bash_login` | `~/.profile`), then `PROMPT_COMMAND` + `DEBUG` trap. Works with macOS bash 3.2. Caveat: replaces an existing DEBUG trap.
+- **bash:** `bash --rcfile shellvisor.bash -i`; emulates login startup (`/etc/profile`, `~/.bash_profile` | `~/.bash_login` | `~/.profile`), then `PROMPT_COMMAND` + `DEBUG` trap. Works with macOS bash 3.2. Caveat: replaces an existing DEBUG trap.
 - Other shells run without hooks; cwd falls back to polling the process.
 
 ### 5.3 OSC protocol (`sv-proto`)
@@ -176,7 +176,7 @@ These drive: file pane following `cd`, tab states (running / ✔ / ✖ exit code
 ```
 key ─▶ global keys (ctrl+q, alt+`, F1, F5…)   — always win, even inside vim
     ─▶ leader key (ctrl+] then letter)
-    ─▶ focused ShellView pane (files, agents, tables…)
+    ─▶ focused Shellvisor pane (files, agents, tables…)
     ─▶ PTY of the focused shell / agent       — everything else
 ```
 - Detects Option-as-Alt misconfiguration on macOS (e.g. `alt+1` arriving as `¡`) and shows the setup helper once.
@@ -185,13 +185,13 @@ key ─▶ global keys (ctrl+q, alt+`, F1, F5…)   — always win, even inside 
 ### 5.6 Structured data — `sv` (`data/`, `cli/`)
 - Value model: `Table = Vec<Row>`, `Row = ordered map`, cell types: string, int, float, size, duration, date, bool, list, record.
 - Between `sv` stages: **JSON lines** over the pipe (detected because stdout isn't a tty).
-- At the end of a pipe (stdout is ShellView's tty): emits a table marker → ShellView renders an interactive table inline (sort / filter / copy).
+- At the end of a pipe (stdout is Shellvisor's tty): emits a table marker → Shellvisor renders an interactive table inline (sort / filter / copy).
 - Piped into a normal command: plain aligned text, or `--json` / `--csv`.
 - Command bar (alt+;) uses its own parser with nu-style operators (`> < == =~ and or`); in shell pipes the same filters use word operators (`gt lt eq ne has`).
 
 ### 5.7 Agents (`agents/`)
 ```
-             ┌──────────── ShellView agent runtime ────────────┐
+             ┌──────────── Shellvisor agent runtime ────────────┐
  team.yaml ─▶│ registry ── tree (parent/child) ── limits       │
  Auto-plan ─▶│    │            │                    │          │
  sv agent  ─▶│ spawner ─▶ PTY + adapter ─▶ normalized events ─▶ UI columns / tree / timeline
@@ -211,7 +211,7 @@ key ─▶ global keys (ctrl+q, alt+`, F1, F5…)   — always win, even inside 
 ### 5.8 System & thermals (`sys/`)
 - `sysinfo` for CPU/mem/disk/net/processes; process list sampled only while visible.
 - macOS thermals: thermal state via `NSProcessInfo.thermalState` (public API); per-sensor temps and fans via IOKit/SMC (best effort — show "not available" rather than guess).
-- ShellView reports its own RSS/CPU ("self") so the budget is always visible.
+- Shellvisor reports its own RSS/CPU ("self") so the budget is always visible.
 
 ---
 
@@ -219,12 +219,12 @@ key ─▶ global keys (ctrl+q, alt+`, F1, F5…)   — always win, even inside 
 
 | Path | Purpose |
 |---|---|
-| `~/.config/shellview/config.yaml` | settings, keymap overrides, layouts, theme |
-| `~/.local/state/shellview/session.yaml` | last session's tabs/splits/folders (restore) |
-| `~/.local/state/shellview/history.jsonl` | command history with exit code, duration, tab |
-| `~/.local/state/shellview/agents/<run>/` | full agent logs, usage ledger |
-| `<project>/.shellview/team.yaml` | agent team script |
-| `$TMPDIR/shellview-<uid>/bus.sock` | agent/CLI socket (0600, removed on exit) |
+| `~/.config/shellvisor/config.yaml` | settings, keymap overrides, layouts, theme |
+| `~/.local/state/shellvisor/session.yaml` | last session's tabs/splits/folders (restore) |
+| `~/.local/state/shellvisor/history.jsonl` | command history with exit code, duration, tab |
+| `~/.local/state/shellvisor/agents/<run>/` | full agent logs, usage ledger |
+| `<project>/.shellvisor/team.yaml` | agent team script |
+| `$TMPDIR/shellvisor-<uid>/bus.sock` | agent/CLI socket (0600, removed on exit) |
 
 ---
 
@@ -249,7 +249,7 @@ key ─▶ global keys (ctrl+q, alt+`, F1, F5…)   — always win, even inside 
 | Per extra tab | +2–4 MB |
 | Per agent column | ~+1 MB (agent CLI excluded) |
 
-Enforced by: a `bench/` harness that launches ShellView in a pseudo-terminal, idles 30 s and records RSS/CPU; CI fails if binary size or idle RSS regress past the budget.
+Enforced by: a `bench/` harness that launches Shellvisor in a pseudo-terminal, idles 30 s and records RSS/CPU; CI fails if binary size or idle RSS regress past the budget.
 
 ---
 
@@ -276,12 +276,18 @@ Enforced by: a `bench/` harness that launches ShellView in a pseudo-terminal, id
 
 | Date | Decision | Why |
 |---|---|---|
-| 2026-10-04 | **Input is forwarded byte-for-byte** in basic view; ShellView only picks out its own keys (`ctrl+q`, `alt+\``, `shift+PgUp/PgDn`) and, when it owns the mouse, wheel events. A key decoder is added in P1 for pane-local keys. | Zero translation loss: every key, paste, IME and mouse sequence reaches the shell exactly as the real terminal sent it. |
+| 2026-10-04 | **Input is forwarded byte-for-byte** in basic view; Shellvisor only picks out its own keys (`ctrl+q`, `alt+\``, `shift+PgUp/PgDn`) and, when it owns the mouse, wheel events. A key decoder is added in P1 for pane-local keys. | Zero translation loss: every key, paste, IME and mouse sequence reaches the shell exactly as the real terminal sent it. |
 | 2026-10-04 | **Input modes are mirrored** to the real terminal (application cursor/keypad, bracketed paste, mouse mode + encoding). | The real terminal encodes keys and mouse events, so it must be in the mode the program inside asked for. |
-| 2026-10-04 | **ShellView answers terminal queries itself** (cursor position `CSI 6n`, status `CSI 5n`, device attributes `CSI c` / `CSI > c`); passes bell, window title and OSC 52 clipboard through. | Programs inside talk to ShellView's emulator, not the real terminal. |
-| 2026-10-04 | **Mouse wheel = scrollback** by default (ShellView enables SGR mouse reporting when the program inside doesn't use the mouse). In full-screen apps without mouse support the wheel becomes arrow keys, like real terminals do. Config `mouse: false` turns it off. | On macOS, `shift+PgUp` is taken by Terminal.app/iTerm2, so the wheel is the only reliable scroll gesture. Trade-off: text selection needs Option (iTerm2) or turning off mouse reporting (Terminal.app). |
+| 2026-10-04 | **Shellvisor answers terminal queries itself** (cursor position `CSI 6n`, status `CSI 5n`, device attributes `CSI c` / `CSI > c`); passes bell, window title and OSC 52 clipboard through. | Programs inside talk to Shellvisor's emulator, not the real terminal. |
+| 2026-10-04 | **Mouse wheel = scrollback** by default (Shellvisor enables SGR mouse reporting when the program inside doesn't use the mouse). In full-screen apps without mouse support the wheel becomes arrow keys, like real terminals do. Config `mouse: false` turns it off. | On macOS, `shift+PgUp` is taken by Terminal.app/iTerm2, so the wheel is the only reliable scroll gesture. Trade-off: text selection needs Option (iTerm2) or turning off mouse reporting (Terminal.app). |
 | 2026-10-04 | **Never query the real terminal's cursor position** (ratatui `Terminal::clear`/`autoresize` are avoided; the screen is cleared with a plain escape and the ratatui terminal is rebuilt on resize). | Saves a round-trip at startup and works with terminals that don't answer. |
-| 2026-10-04 | `sv` is linked as `<cache>/bin/sv` and that folder is prepended to `PATH` inside ShellView. | `sv` works in every shell tab with no install step. |
+| 2026-10-04 | `sv` is linked as `<cache>/bin/sv` and that folder is prepended to `PATH` inside Shellvisor. | `sv` works in every shell tab with no install step. |
+| 2026-11-04 | **Renamed ShellView → Shellvisor** (binary `shellvisor`, command stays `sv`, folders `~/.config/shellvisor` etc., env `SHELLVISOR*`). | Distinct, searchable name; "supervisor" for your shells and agents; keeps the `sv` initials. |
+| 2026-11-04 | **Full view always captures the mouse** (SGR). Clicks focus tabs/splits; wheel scrolls; programs that asked for the mouse get events re-encoded in *their* protocol (X10/UTF-8/SGR) with pane-local coordinates. | Splits make raw passthrough impossible — coordinates must be translated. |
+| 2026-11-04 | **Keys are tokenized** (CSI/SS3/alt+key/UTF-8/mouse/bracketed paste as single tokens); shortcuts match whole tokens; everything else is forwarded byte-for-byte. A paste is never interpreted. | Shortcuts work even when typed fast, without losing fidelity for the shell. |
+| 2026-11-04 | **Only the focused pane may set the window title**; bell and OSC 52 clipboard pass through from any pane; a bell in a hidden tab marks the tab `!`. | Background tabs must not hijack the title. |
+| 2026-11-04 | **Quit, close tab and close split ask first when a command is still running** (`y`/Enter/ctrl+q = yes). | Protects running work; ctrl+q twice still always quits. |
+| 2026-11-04 | Colours use the **256-colour palette**, not 24-bit. | Terminal.app has no true colour. |
 
 ### P0 measurements (Linux x86_64, release build, bash)
 

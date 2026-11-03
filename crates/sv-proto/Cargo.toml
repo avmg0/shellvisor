@@ -1,6 +1,6 @@
 [package]
 name = "sv-proto"
-description = "Wire formats shared by ShellView and the sv command"
+description = "Wire formats shared by Shellvisor and the sv command"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

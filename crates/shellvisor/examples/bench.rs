@@ -2,10 +2,11 @@
 //!
 //!   cargo build --release && cargo run --release --example bench [-- --check]
 //!
-//! Starts the release `shellview` in a pseudo-terminal with bash, waits for
+//! Starts the release `shellvisor` in a pseudo-terminal with bash, waits for
 //! the prompt, idles, and reports binary size, startup time, memory and idle
-//! CPU of the ShellView process itself (the shell is not counted).
-//! With `--check`, exits 1 if any P0 budget is exceeded.
+//! CPU of the Shellvisor process itself (the shell is not counted).
+//! `BENCH_TABS=3` opens extra tabs (alt+t) before measuring.
+//! With `--check`, exits 1 if any budget is exceeded.
 
 use portable_pty::{CommandBuilder, PtySize};
 use std::io::Read;
@@ -13,14 +14,14 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-// P0 budgets (docs/ARCHITECTURE.md §8).
+// Budgets (docs/ARCHITECTURE.md §8): P1 allows ≤ 10 MB with 3 tabs.
 const MAX_BINARY_MB: f64 = 5.0;
-const MAX_RSS_MB: f64 = 8.0;
+const MAX_RSS_MB: f64 = 10.0;
 const MAX_IDLE_CPU_PCT: f64 = 0.5;
 const MAX_FIRST_FRAME_MS: u128 = 100;
 
 fn release_binary() -> PathBuf {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/release/shellview");
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/release/shellvisor");
     root.canonicalize().unwrap_or(root)
 }
 
@@ -82,18 +83,19 @@ fn main() {
         .unwrap();
     let mut cmd = CommandBuilder::new(&bin);
     cmd.args(["--shell", "bash"]);
-    cmd.env_remove("SHELLVIEW");
+    cmd.env_remove("SHELLVISOR");
     cmd.env("HOME", tmp.join("home"));
     cmd.env("TERM", "xterm-256color");
-    cmd.env("SHELLVIEW_STATE_DIR", tmp.join("state"));
-    cmd.env("SHELLVIEW_CACHE_DIR", tmp.join("cache"));
-    cmd.env("SHELLVIEW_CONFIG", tmp.join("none.yaml"));
+    cmd.env("SHELLVISOR_STATE_DIR", tmp.join("state"));
+    cmd.env("SHELLVISOR_CACHE_DIR", tmp.join("cache"));
+    cmd.env("SHELLVISOR_CONFIG", tmp.join("none.yaml"));
 
     let started = Instant::now();
     let mut child = pair.slave.spawn_command(cmd).unwrap();
     drop(pair.slave);
     let pid = child.process_id().unwrap();
     let mut reader = pair.master.try_clone_reader().unwrap();
+    let mut writer = pair.master.take_writer().unwrap();
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
     std::thread::spawn(move || {
         let mut buf = [0u8; 8192];
@@ -104,7 +106,7 @@ fn main() {
         }
     });
 
-    // First frame = ShellView switched to the alternate screen and drew.
+    // First frame = Shellvisor switched to the alternate screen and drew.
     let mut seen = Vec::new();
     let mut first_frame = None;
     let mut prompt = None;
@@ -120,9 +122,19 @@ fn main() {
             }
         }
     }
-    let first_frame = first_frame.expect("no output from shellview");
+    let first_frame = first_frame.expect("no output from shellvisor");
     let prompt = prompt.expect("no prompt within 10s");
 
+    let tabs: usize = std::env::var("BENCH_TABS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
+    for _ in 1..tabs {
+        use std::io::Write;
+        writer.write_all(b"\x1bt").unwrap(); // alt+t
+        writer.flush().unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+    }
     std::thread::sleep(Duration::from_secs(2)); // settle
     while rx.try_recv().is_ok() {}
     let cpu0 = cpu_secs(pid).unwrap_or(0.0);
@@ -144,7 +156,10 @@ fn main() {
         );
         ok
     };
-    println!("ShellView P0 budget ({}s idle)\n", idle.as_secs());
+    println!(
+        "Shellvisor budget ({tabs} tab(s), full view, {}s idle)\n",
+        idle.as_secs()
+    );
     let mut ok = true;
     ok &= row(
         "binary size",

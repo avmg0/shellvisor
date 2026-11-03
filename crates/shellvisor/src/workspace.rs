@@ -1,0 +1,318 @@
+//! Tabs and splits.
+//!
+//! A tab holds a binary tree of panes: each split divides its area side by
+//! side or stacked, at a ratio the user can adjust.
+
+use crate::keys::Dir;
+use ratatui::layout::Rect;
+
+pub type PaneId = u32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Axis {
+    /// Children side by side (a │ b).
+    Horizontal,
+    /// Children stacked (a over b).
+    Vertical,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Node {
+    Leaf(PaneId),
+    Split {
+        axis: Axis,
+        /// Share of the area given to `a`, 0.1..=0.9.
+        ratio: f32,
+        a: Box<Node>,
+        b: Box<Node>,
+    },
+}
+
+const MIN_RATIO: f32 = 0.1;
+const MAX_RATIO: f32 = 0.9;
+
+impl Node {
+    /// Pane rectangles for `area`, in reading order.
+    pub fn layout(&self, area: Rect, out: &mut Vec<(PaneId, Rect)>) {
+        match self {
+            Node::Leaf(id) => out.push((*id, area)),
+            Node::Split { axis, ratio, a, b } => {
+                let (ra, rb) = split_rect(area, *axis, *ratio);
+                a.layout(ra, out);
+                b.layout(rb, out);
+            }
+        }
+    }
+
+    pub fn panes(&self) -> Vec<PaneId> {
+        let mut v = Vec::new();
+        self.collect(&mut v);
+        v
+    }
+
+    fn collect(&self, v: &mut Vec<PaneId>) {
+        match self {
+            Node::Leaf(id) => v.push(*id),
+            Node::Split { a, b, .. } => {
+                a.collect(v);
+                b.collect(v);
+            }
+        }
+    }
+
+    pub fn contains(&self, id: PaneId) -> bool {
+        match self {
+            Node::Leaf(x) => *x == id,
+            Node::Split { a, b, .. } => a.contains(id) || b.contains(id),
+        }
+    }
+
+    /// Replace leaf `target` with a split of (target, new). Returns false if
+    /// `target` isn't in this tree.
+    pub fn split(&mut self, target: PaneId, axis: Axis, new: PaneId) -> bool {
+        match self {
+            Node::Leaf(id) if *id == target => {
+                *self = Node::Split {
+                    axis,
+                    ratio: 0.5,
+                    a: Box::new(Node::Leaf(target)),
+                    b: Box::new(Node::Leaf(new)),
+                };
+                true
+            }
+            Node::Leaf(_) => false,
+            Node::Split { a, b, .. } => a.split(target, axis, new) || b.split(target, axis, new),
+        }
+    }
+
+    /// Remove `target`; its sibling takes its place. Returns None if the tree
+    /// becomes empty.
+    pub fn remove(self, target: PaneId) -> Option<Node> {
+        match self {
+            Node::Leaf(id) if id == target => None,
+            leaf @ Node::Leaf(_) => Some(leaf),
+            Node::Split { axis, ratio, a, b } => match (a.remove(target), b.remove(target)) {
+                (Some(a), Some(b)) => Some(Node::Split {
+                    axis,
+                    ratio,
+                    a: Box::new(a),
+                    b: Box::new(b),
+                }),
+                (Some(only), None) | (None, Some(only)) => Some(only),
+                (None, None) => None,
+            },
+        }
+    }
+
+    /// Grow/shrink `target` towards `dir` by `step` of the nearest enclosing
+    /// split along that axis. Returns true if something changed.
+    pub fn resize(&mut self, target: PaneId, dir: Dir, step: f32) -> bool {
+        let want = match dir {
+            Dir::Left | Dir::Right => Axis::Horizontal,
+            Dir::Up | Dir::Down => Axis::Vertical,
+        };
+        self.resize_inner(target, want, dir, step)
+    }
+
+    fn resize_inner(&mut self, target: PaneId, want: Axis, dir: Dir, step: f32) -> bool {
+        let Node::Split { axis, ratio, a, b } = self else {
+            return false;
+        };
+        let in_a = a.contains(target);
+        if !in_a && !b.contains(target) {
+            return false;
+        }
+        // Prefer the deepest matching split.
+        let deeper = if in_a {
+            a.resize_inner(target, want, dir, step)
+        } else {
+            b.resize_inner(target, want, dir, step)
+        };
+        if deeper || *axis != want {
+            return deeper;
+        }
+        // Moving the divider right/down grows `a`.
+        let delta = match dir {
+            Dir::Right | Dir::Down => step,
+            Dir::Left | Dir::Up => -step,
+        };
+        let new = (*ratio + delta).clamp(MIN_RATIO, MAX_RATIO);
+        let changed = (new - *ratio).abs() > f32::EPSILON;
+        *ratio = new;
+        changed
+    }
+}
+
+pub fn split_rect(area: Rect, axis: Axis, ratio: f32) -> (Rect, Rect) {
+    match axis {
+        Axis::Horizontal => {
+            let wa = ((area.width as f32 * ratio).round() as u16)
+                .clamp(1, area.width.saturating_sub(1).max(1));
+            let a = Rect { width: wa, ..area };
+            let b = Rect {
+                x: area.x + wa,
+                width: area.width.saturating_sub(wa),
+                ..area
+            };
+            (a, b)
+        }
+        Axis::Vertical => {
+            let ha = ((area.height as f32 * ratio).round() as u16)
+                .clamp(1, area.height.saturating_sub(1).max(1));
+            let a = Rect { height: ha, ..area };
+            let b = Rect {
+                y: area.y + ha,
+                height: area.height.saturating_sub(ha),
+                ..area
+            };
+            (a, b)
+        }
+    }
+}
+
+/// The pane next to `from` in direction `dir`: the closest one whose edge
+/// touches and which overlaps most along the other axis.
+pub fn neighbor(rects: &[(PaneId, Rect)], from: PaneId, dir: Dir) -> Option<PaneId> {
+    let (_, r) = *rects.iter().find(|(id, _)| *id == from)?;
+    let overlap = |a0: u16, a1: u16, b0: u16, b1: u16| a1.min(b1).saturating_sub(a0.max(b0));
+    rects
+        .iter()
+        .filter(|(id, _)| *id != from)
+        .filter_map(|(id, o)| {
+            let (gap, ov) = match dir {
+                Dir::Right if o.x >= r.right() => {
+                    (o.x - r.right(), overlap(r.y, r.bottom(), o.y, o.bottom()))
+                }
+                Dir::Left if o.right() <= r.x => {
+                    (r.x - o.right(), overlap(r.y, r.bottom(), o.y, o.bottom()))
+                }
+                Dir::Down if o.y >= r.bottom() => {
+                    (o.y - r.bottom(), overlap(r.x, r.right(), o.x, o.right()))
+                }
+                Dir::Up if o.bottom() <= r.y => {
+                    (r.y - o.bottom(), overlap(r.x, r.right(), o.x, o.right()))
+                }
+                _ => return None,
+            };
+            (ov > 0).then_some((gap, std::cmp::Reverse(ov), *id))
+        })
+        .min()
+        .map(|(_, _, id)| id)
+}
+
+/// A tab: a tree of panes, which one is focused, and whether it's zoomed.
+#[derive(Debug, Clone)]
+pub struct Tab {
+    pub root: Node,
+    pub focus: PaneId,
+    pub zoomed: bool,
+    /// Name set by the user (alt+r); otherwise the label is automatic.
+    pub name: Option<String>,
+}
+
+impl Tab {
+    pub fn new(pane: PaneId) -> Self {
+        Tab {
+            root: Node::Leaf(pane),
+            focus: pane,
+            zoomed: false,
+            name: None,
+        }
+    }
+
+    /// Visible pane rectangles (only the focused one when zoomed).
+    pub fn layout(&self, area: Rect) -> Vec<(PaneId, Rect)> {
+        if self.zoomed {
+            return vec![(self.focus, area)];
+        }
+        let mut v = Vec::new();
+        self.root.layout(area, &mut v);
+        v
+    }
+
+    pub fn next_pane(&mut self) {
+        let panes = self.root.panes();
+        if let Some(i) = panes.iter().position(|p| *p == self.focus) {
+            self.focus = panes[(i + 1) % panes.len()];
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rects(n: &Node) -> Vec<(PaneId, Rect)> {
+        let mut v = Vec::new();
+        n.layout(Rect::new(0, 0, 100, 40), &mut v);
+        v
+    }
+
+    #[test]
+    fn split_and_layout() {
+        let mut n = Node::Leaf(1);
+        assert!(n.split(1, Axis::Horizontal, 2));
+        assert!(n.split(2, Axis::Vertical, 3));
+        assert!(!n.split(9, Axis::Vertical, 4));
+        let r = rects(&n);
+        assert_eq!(r[0], (1, Rect::new(0, 0, 50, 40)));
+        assert_eq!(r[1], (2, Rect::new(50, 0, 50, 20)));
+        assert_eq!(r[2], (3, Rect::new(50, 20, 50, 20)));
+        assert_eq!(n.panes(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn remove_collapses_to_sibling() {
+        let mut n = Node::Leaf(1);
+        n.split(1, Axis::Horizontal, 2);
+        n.split(2, Axis::Vertical, 3);
+        let n = n.remove(2).unwrap();
+        assert_eq!(n.panes(), vec![1, 3]);
+        let n = n.remove(1).unwrap();
+        assert_eq!(n, Node::Leaf(3));
+        assert_eq!(n.remove(3), None);
+    }
+
+    #[test]
+    fn neighbors() {
+        let mut n = Node::Leaf(1);
+        n.split(1, Axis::Horizontal, 2);
+        n.split(2, Axis::Vertical, 3);
+        let r = rects(&n);
+        assert_eq!(neighbor(&r, 1, Dir::Right), Some(2));
+        assert_eq!(neighbor(&r, 2, Dir::Down), Some(3));
+        assert_eq!(neighbor(&r, 3, Dir::Up), Some(2));
+        assert_eq!(neighbor(&r, 3, Dir::Left), Some(1));
+        assert_eq!(neighbor(&r, 1, Dir::Left), None);
+    }
+
+    #[test]
+    fn resize_moves_the_right_divider() {
+        let mut n = Node::Leaf(1);
+        n.split(1, Axis::Horizontal, 2);
+        n.split(2, Axis::Vertical, 3);
+        assert!(n.resize(3, Dir::Left, 0.1)); // outer split: 1 shrinks
+        assert_eq!(rects(&n)[0].1.width, 40);
+        assert!(n.resize(3, Dir::Up, 0.1)); // inner split: 2 shrinks
+        assert_eq!(rects(&n)[1].1.height, 16);
+        for _ in 0..20 {
+            n.resize(1, Dir::Left, 0.1);
+        }
+        assert_eq!(rects(&n)[0].1.width, 10, "clamped at 10%");
+    }
+
+    #[test]
+    fn zoom_shows_only_focus() {
+        let mut t = Tab::new(1);
+        t.root.split(1, Axis::Horizontal, 2);
+        t.focus = 2;
+        t.zoomed = true;
+        assert_eq!(
+            t.layout(Rect::new(0, 0, 80, 24)),
+            vec![(2, Rect::new(0, 0, 80, 24))]
+        );
+        t.zoomed = false;
+        t.next_pane();
+        assert_eq!(t.focus, 1);
+    }
+}

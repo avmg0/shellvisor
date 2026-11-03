@@ -1,4 +1,4 @@
-//! End-to-end tests: run the real `shellview` binary inside a pseudo-terminal
+//! End-to-end tests: run the real `shellvisor` binary inside a pseudo-terminal
 //! with a real bash / zsh, type into it, and read the screen back.
 
 use portable_pty::{CommandBuilder, PtySize};
@@ -8,6 +8,8 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 const WAIT: Duration = Duration::from_secs(15);
+const NAME: &str = "Shellvisor";
+const NAME_LOWER: &str = "shellvisor";
 
 struct Session {
     writer: Box<dyn Write + Send>,
@@ -36,8 +38,19 @@ fn scratch(tag: &str) -> PathBuf {
 }
 
 impl Session {
+    /// Start in basic view (looks like a plain terminal).
     fn start(shell: &str, tag: &str) -> Session {
+        Self::start_with(shell, tag, "start_view: basic\n")
+    }
+
+    /// Start in full view (tab bar, borders, status bar).
+    fn start_full(tag: &str) -> Session {
+        Self::start_with("bash", tag, "start_view: full\n")
+    }
+
+    fn start_with(shell: &str, tag: &str, config: &str) -> Session {
         let dir = scratch(tag);
+        std::fs::write(dir.join("config.yaml"), config).unwrap();
         let pair = portable_pty::native_pty_system()
             .openpty(PtySize {
                 rows: 24,
@@ -46,12 +59,12 @@ impl Session {
                 pixel_height: 0,
             })
             .unwrap();
-        let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_shellview"));
+        let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_shellvisor"));
         cmd.args(["--shell", shell]);
         cmd.cwd(dir.join("work"));
         for k in [
-            "SHELLVIEW",
-            "SHELLVIEW_PID",
+            "SHELLVISOR",
+            "SHELLVISOR_PID",
             "ZDOTDIR",
             "PROMPT_COMMAND",
             "BASH_ENV",
@@ -62,9 +75,9 @@ impl Session {
         cmd.env("HOME", dir.join("home"));
         cmd.env("TERM", "xterm-256color");
         cmd.env("SHELL", "/bin/sh");
-        cmd.env("SHELLVIEW_STATE_DIR", dir.join("state"));
-        cmd.env("SHELLVIEW_CACHE_DIR", dir.join("cache"));
-        cmd.env("SHELLVIEW_CONFIG", dir.join("none.yaml"));
+        cmd.env("SHELLVISOR_STATE_DIR", dir.join("state"));
+        cmd.env("SHELLVISOR_CACHE_DIR", dir.join("cache"));
+        cmd.env("SHELLVISOR_CONFIG", dir.join("config.yaml"));
         let child = pair.slave.spawn_command(cmd).unwrap();
         drop(pair.slave);
         let mut reader = pair.master.try_clone_reader().unwrap();
@@ -146,7 +159,7 @@ impl Session {
             }
             assert!(
                 Instant::now() < end,
-                "shellview did not exit; screen:\n{}",
+                "shellvisor did not exit; screen:\n{}",
                 self.text()
             );
             self.pump(Duration::from_millis(100));
@@ -198,7 +211,7 @@ fn lifecycle(shell: &str) {
         .unwrap();
     assert!(ms >= 250, "duration {ms}ms");
 
-    // `sv` is on PATH and knows it is inside ShellView.
+    // `sv` is on PATH and knows it is inside Shellvisor.
     s.run("sv status");
     s.wait_for("running (pid");
     s.wait_for(&format!("shell: {shell}"));
@@ -207,7 +220,7 @@ fn lifecycle(shell: &str) {
     // Our private escape sequences never reach the screen.
     assert!(!s.text().contains("7770"), "{}", s.text());
 
-    // `sv exit` leaves ShellView.
+    // `sv exit` leaves Shellvisor.
     s.send("sv exit\r");
     assert_eq!(s.wait_exit(), 0);
 }
@@ -309,18 +322,18 @@ fn vim_round_trip() {
     s.wait_for("PROMPT>");
     s.send("vim -u NONE -N note.txt\r");
     s.wait_for("note.txt");
-    s.send("iShellView vim test\x1b:wq\r");
+    s.send("iShellvisor vim test\x1b:wq\r");
     s.wait_for("PROMPT>");
     s.run("cat note.txt");
-    s.wait_for("ShellView vim test");
+    s.wait_for("Shellvisor vim test");
     let saved = std::fs::read_to_string(s.dir.join("work/note.txt")).unwrap();
-    assert_eq!(saved.trim(), "ShellView vim test");
+    assert_eq!(saved.trim(), "Shellvisor vim test");
 }
 
 #[test]
 fn already_inside_is_refused() {
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_shellview"))
-        .env("SHELLVIEW", "1")
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_shellvisor"))
+        .env("SHELLVISOR", "1")
         .output()
         .unwrap();
     assert!(!out.status.success());
@@ -328,17 +341,182 @@ fn already_inside_is_refused() {
 }
 
 #[test]
-fn sv_outside_shellview() {
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_shellview"))
+fn sv_outside_shellvisor() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_shellvisor"))
         .args(["sv", "status"])
-        .env_remove("SHELLVIEW")
+        .env_remove("SHELLVISOR")
         .output()
         .unwrap();
     assert!(String::from_utf8_lossy(&out.stdout).contains("not running"));
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_shellview"))
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_shellvisor"))
         .args(["sv", "exit"])
-        .env_remove("SHELLVIEW")
+        .env_remove("SHELLVISOR")
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
+}
+
+// ------------------------------------------------------------------ P1a
+
+impl Session {
+    fn line(&self, row: usize) -> String {
+        self.text().lines().nth(row).unwrap_or_default().to_string()
+    }
+
+    /// Wait until `pred(screen)` holds.
+    fn wait_until(&mut self, what: &str, pred: impl Fn(&str) -> bool) {
+        let end = Instant::now() + WAIT;
+        while !pred(&self.text()) {
+            assert!(
+                Instant::now() < end,
+                "timed out waiting for {what}; screen:\n{}",
+                self.text()
+            );
+            self.pump(Duration::from_millis(50));
+        }
+    }
+}
+
+fn top(t: &str) -> &str {
+    t.lines().next().unwrap_or("")
+}
+
+#[test]
+fn full_view_has_tab_bar_border_and_status_bar() {
+    let mut s = Session::start_full("full");
+    s.wait_for("PROMPT>");
+    let first = s.line(0);
+    assert!(first.contains("1 bash"), "tab bar: {first:?}");
+    assert!(s.line(1).starts_with('╭'), "border: {:?}", s.line(1));
+    s.wait_for(&format!("▍{}", NAME_LOWER));
+    s.wait_for("F1 help");
+}
+
+#[test]
+fn tabs_open_switch_and_close() {
+    let mut s = Session::start_full("tabs");
+    s.wait_for("PROMPT>");
+    s.send("echo first-tab\r");
+    s.wait_for("first-tab");
+    s.send("\x1bt"); // alt+t
+    s.wait_until("second tab", |t| top(t).contains("2 bash"));
+    s.wait_until("fresh prompt", |t| {
+        !t.contains("first-tab") && t.contains("PROMPT>")
+    });
+    s.send("\x1b1"); // alt+1
+    s.wait_for("first-tab");
+    s.send("\x1b2");
+    s.wait_until("tab 2 again", |t| !t.contains("first-tab"));
+    s.send("exit\r"); // closing the shell closes its tab
+    s.wait_until("one tab left", |t| !top(t).contains("2 bash"));
+    s.wait_for("first-tab");
+}
+
+#[test]
+fn split_side_by_side_and_type_into_each() {
+    let mut s = Session::start_full("split");
+    s.wait_for("PROMPT>");
+    s.send("\x1b\\"); // alt+\ → split right
+    s.wait_until("two panes", |t| {
+        t.lines().nth(1).unwrap_or("").matches('╭').count() == 2
+    });
+    s.send("echo RIGHT-SIDE\r");
+    s.wait_for("RIGHT-SIDE");
+    // The right pane starts at column 50 of 100.
+    let row = s
+        .text()
+        .lines()
+        .find(|l| l.contains("RIGHT-SIDE") && !l.contains("echo"))
+        .unwrap()
+        .to_string();
+    assert!(row.find("RIGHT-SIDE").unwrap() > 45, "{row:?}");
+    s.send("\x1b[1;3D"); // alt+left
+    s.send("echo LEFT-SIDE\r");
+    s.wait_until("left output", |t| {
+        t.lines().any(|l| l.starts_with("│LEFT-SIDE"))
+    });
+    // The right shell really is 48 columns wide (100/2 minus borders).
+    s.send("\x1b[1;3C");
+    s.send("stty size\r");
+    s.wait_until("stty", |t| t.contains("│20 48 "));
+}
+
+#[test]
+fn sv_off_and_on_switch_views_without_losing_the_shell() {
+    let mut s = Session::start_full("toggle");
+    s.wait_for("PROMPT>");
+    let mark = format!("▍{}", NAME_LOWER);
+    s.send("export MARK=still-here\r");
+    s.send("sv off\r");
+    s.wait_until("basic view", |t| !t.contains(&mark) && !t.contains('╭'));
+    s.send("sv on\r");
+    s.wait_for(&mark);
+    s.send("\x1b`"); // alt+` → basic
+    s.wait_until("basic again", |t| !t.contains(&mark));
+    s.send("echo $MARK\r");
+    s.wait_for("still-here");
+}
+
+#[test]
+fn closing_a_busy_tab_asks_first() {
+    let mut s = Session::start_full("confirm");
+    s.wait_for("PROMPT>");
+    s.send("\x1bt");
+    s.wait_until("tab 2", |t| top(t).contains("2 bash"));
+    s.wait_for("PROMPT>");
+    s.send("sleep 300\r");
+    s.wait_for("sleep 300");
+    s.pump(Duration::from_millis(300));
+    s.send("\x1bw"); // alt+w
+    s.wait_for("is still running");
+    s.send("n");
+    s.wait_until("dialog gone", |t| !t.contains("is still running"));
+    assert!(
+        s.line(0).contains("2 "),
+        "tab must survive 'n': {:?}",
+        s.line(0)
+    );
+    s.send("\x1bw");
+    s.wait_for("is still running");
+    s.send("y");
+    s.wait_until("tab closed", |t| !top(t).contains("sleep"));
+}
+
+#[test]
+fn leader_key_and_help() {
+    let mut s = Session::start_full("leader");
+    s.wait_for("PROMPT>");
+    s.send("\x1d"); // ctrl+]
+    s.wait_for("ctrl+] →");
+    s.send("?");
+    let help = format!("{} keys", NAME);
+    s.wait_for(&help);
+    s.send("x"); // any key closes help…
+    s.wait_until("help closed", |t| !t.contains(&help));
+    s.send("\x1d-"); // leader + '-' → split stacked
+    s.wait_until("stacked split", |t| {
+        t.lines().filter(|l| l.starts_with('╭')).count() == 2
+    });
+}
+
+#[test]
+fn rename_tab() {
+    let mut s = Session::start_full("rename");
+    s.wait_for("PROMPT>");
+    s.send("\x1br"); // alt+r
+    s.wait_for("Rename tab:");
+    s.send("api server\r");
+    s.wait_until("renamed", |t| top(t).contains("api server"));
+}
+
+#[test]
+fn quit_with_running_command_asks() {
+    let mut s = Session::start_full("quit");
+    s.wait_for("PROMPT>");
+    s.send("sleep 300\r");
+    s.pump(Duration::from_millis(400));
+    s.send("\x11");
+    s.wait_for(&format!("Quit {}?", NAME));
+    s.send("\x11"); // ctrl+q again = yes
+    assert_eq!(s.wait_exit(), 0);
 }
