@@ -4,12 +4,18 @@
 //! shell: zsh              # or bash, or a full path; default: $SHELL
 //! scrollback_lines: 5000  # per shell tab
 //! shell_integration: true # report folder / command / exit code to Shellvisor
-//! start_view: full      # full (tabs, status bar) or basic (just the shell)
-//! mouse: true            # mouse wheel scrolls history; hold Option (iTerm2) or
+//! start_view: full       # full (tabs, status bar) or basic (just the shell)
+//! restore: ask            # last session's tabs on start: ask, always or never
+//! mouse: true             # mouse wheel scrolls history; hold Option (iTerm2) or
 //!                         # turn off View → Allow Mouse Reporting (Terminal.app) to select text
+//! keys:                   # change or turn off shortcuts (see `F1` for all actions)
+//!   new_tab: alt+n        # one key…
+//!   next_layout: [f7]     # …or a list
+//!   rename_tab: none      # frees alt+r for your shell
 //! ```
 
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -20,6 +26,34 @@ pub struct Config {
     pub shell_integration: bool,
     pub mouse: bool,
     pub start_view: StartView,
+    pub restore: Restore,
+    pub keys: HashMap<String, KeyList>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Restore {
+    #[default]
+    Ask,
+    Always,
+    Never,
+}
+
+/// `alt+n` or `[alt+n, f10]`
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum KeyList {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl KeyList {
+    pub fn to_vec(&self) -> Vec<String> {
+        match self {
+            KeyList::One(s) => vec![s.clone()],
+            KeyList::Many(v) => v.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
@@ -38,11 +72,21 @@ impl Default for Config {
             shell_integration: true,
             mouse: true,
             start_view: StartView::Full,
+            restore: Restore::Ask,
+            keys: HashMap::new(),
         }
     }
 }
 
 impl Config {
+    /// Key overrides in the shape the keymap wants.
+    pub fn key_overrides(&self) -> HashMap<String, Vec<String>> {
+        self.keys
+            .iter()
+            .map(|(k, v)| (k.clone(), v.to_vec()))
+            .collect()
+    }
+
     /// Parse YAML text. An empty file means "all defaults".
     pub fn parse(text: &str) -> Result<Config, String> {
         if text.trim().is_empty() {
@@ -106,6 +150,18 @@ mod tests {
         );
         assert_eq!(Config::default().start_view, StartView::Full);
         assert!(Config::parse("start_view: sideways").is_err());
+    }
+
+    #[test]
+    fn restore_and_keys() {
+        let c =
+            Config::parse("restore: never\nkeys:\n  new_tab: alt+n\n  next_layout: [f7, alt+y]\n")
+                .unwrap();
+        assert_eq!(c.restore, Restore::Never);
+        let o = c.key_overrides();
+        assert_eq!(o["new_tab"], vec!["alt+n"]);
+        assert_eq!(o["next_layout"], vec!["f7", "alt+y"]);
+        assert_eq!(Config::default().restore, Restore::Ask);
     }
 
     #[test]

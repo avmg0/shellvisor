@@ -3,7 +3,7 @@
 //! Colours use the 256-colour palette (not 24-bit) so they look the same in
 //! Terminal.app, which has no true colour.
 
-use crate::app::{App, Modal, PaneState, View};
+use crate::app::{App, MENU, Modal, PaneState, View};
 use crate::keys;
 use crate::term::TermView;
 use ratatui::Frame;
@@ -94,6 +94,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             );
         }
         Modal::Help => draw_help(f, app),
+        Modal::Menu(sel) => draw_menu(f, app, *sel),
         Modal::Rename(name) => {
             let row = status.unwrap_or(Rect::new(
                 0,
@@ -340,53 +341,61 @@ fn fmt_secs(s: u64) -> String {
     }
 }
 
-const HELP: &[(&str, &str)] = &[
-    ("", "Global — work everywhere, even inside vim"),
-    ("F1", "this help"),
-    ("alt+`", "full view ⇄ basic view (also: sv on / sv off)"),
-    ("ctrl+q", "quit (asks if commands are running)"),
-    (
-        "ctrl+]",
-        "leader key: then one letter (works in every terminal)",
-    ),
-    ("", "Tabs"),
-    ("alt+t · F10", "new tab in the same folder"),
-    ("alt+1…9", "go to tab"),
-    ("alt+[ · alt+]", "previous / next tab"),
-    ("alt+r · alt+w", "rename · close tab"),
-    ("", "Splits"),
-    ("alt+\\ · alt+-", "split side by side · stacked"),
-    ("alt+arrows · F6", "move between splits · next split"),
-    ("alt+shift+arrows", "resize split"),
-    ("F5", "zoom split full-screen"),
-    ("ctrl+] x", "close split"),
-    ("", "Scrolling"),
-    (
-        "mouse wheel",
-        "scroll back (Option-drag / iTerm2 to select text)",
-    ),
-    ("shift+PgUp/PgDn", "scroll back one page"),
+/// Section headings in the help screen, placed before these actions.
+const SECTIONS: &[(&str, &str)] = &[
+    ("help", "Global — work everywhere, even inside vim"),
+    ("new_tab", "Tabs"),
+    ("split_right", "Splits"),
+    ("scroll_up", "Scrolling"),
 ];
 
+/// Help rows built from the live keymap, so custom keys show up here.
+pub fn help_rows(app: &App) -> Vec<(String, String, bool)> {
+    let mut rows = Vec::new();
+    for (name, _, _, desc) in keys::ACTIONS {
+        if let Some((_, title)) = SECTIONS.iter().find(|(n, _)| n == name) {
+            rows.push((String::new(), title.to_string(), true));
+        }
+        if desc.is_empty() {
+            continue;
+        }
+        let shown = app.keymap().shown(name);
+        let key = if shown.is_empty() {
+            if *name == "close_pane" {
+                "ctrl+] x".to_string()
+            } else {
+                "(off)".to_string()
+            }
+        } else {
+            shown.to_string()
+        };
+        rows.push((key, desc.to_string(), false));
+    }
+    rows
+}
+
 fn draw_help(f: &mut Frame, app: &App) {
-    let area = centered(app.screen, 72, HELP.len() as u16 + 6);
+    let rows = help_rows(app);
+    let area = centered(app.screen, 78, rows.len() as u16 + 5);
     f.render_widget(Clear, area);
     let mut lines = vec![Line::raw("")];
-    for (k, v) in HELP {
-        if k.is_empty() {
+    for (k, v, heading) in rows {
+        if heading {
             lines.push(Line::styled(
                 format!("  {v}"),
                 Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
             ));
         } else {
             lines.push(Line::from(vec![
-                Span::styled(format!("  {k:<18}"), Style::default().fg(AMBER)),
-                Span::raw(*v),
+                Span::styled(format!("  {k:<20}"), Style::default().fg(AMBER)),
+                Span::raw(v),
             ]));
         }
     }
-    lines.push(Line::raw(""));
-    lines.push(Line::styled("  any key closes", Style::default().fg(DIM)));
+    lines.push(Line::styled(
+        "  any key closes · change keys in ~/.config/shellvisor/config.yaml",
+        Style::default().fg(DIM),
+    ));
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(AMBER))
@@ -400,6 +409,36 @@ fn draw_help(f: &mut Frame, app: &App) {
             .wrap(Wrap { trim: false }),
         area,
     );
+}
+
+fn draw_menu(f: &mut Frame, app: &App, sel: usize) {
+    let area = centered(app.screen, 34, MENU.len() as u16 + 4);
+    f.render_widget(Clear, area);
+    let mut lines = vec![Line::raw("")];
+    for (i, (label, _)) in MENU.iter().enumerate() {
+        let num = if i == 9 { 0 } else { i + 1 };
+        let text = format!(" {num}  {label:<26}");
+        lines.push(if i == sel {
+            Line::styled(
+                text,
+                Style::default()
+                    .bg(AMBER)
+                    .fg(INK)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Line::raw(text)
+        });
+    }
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(AMBER))
+        .title(Span::styled(
+            format!(" tab {} ", app.active + 1),
+            Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Span::styled(" ↑↓ ⏎ · esc ", Style::default().fg(DIM)));
+    f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 #[cfg(test)]

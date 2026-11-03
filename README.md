@@ -4,8 +4,8 @@
 
 Shellvisor is a full-screen terminal app (like `tmux`, `htop` or `vim`) that runs your own zsh or bash in tabs and splits, and — as it grows — adds panes for files, live system stats, a data-flow view of your pipelines, and coding agents working side by side. Every command, alias and full-screen program you use today keeps working unchanged.
 
-> **Status: early development (phase P1 of 7).**
-> Working today: tabs and splits of real zsh/bash shells, a tab bar that shows what each tab is doing (running ⠋, failed ✖, new output •), a status bar, and a one-key switch to *basic view*, which looks exactly like a plain terminal. Files, stats, data flow and agents panes arrive in P2–P5. See [docs/ROADMAP.md](docs/ROADMAP.md).
+> **Status: early development (P0–P1 of 7 done).**
+> Working today: tabs and splits of real zsh/bash shells, a tab bar that shows what each tab is doing (running ⠋, failed ✖, new output •), a status bar, split layouts, your tabs restored after a restart, custom keys, and a one-key switch to *basic view*, which looks exactly like a plain terminal. Files, stats, data flow and agents panes arrive in P2–P5. See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Why
 
@@ -45,6 +45,8 @@ shellvisor --shell bash    # or pick: zsh, bash, or a full path
 | `alt+\` · `alt+-` | split side by side · stacked |
 | `alt+arrows` · `F6` | move between splits |
 | `alt+shift+arrows` · `F5` | resize · zoom a split |
+| `F7` · `alt+l` | rearrange splits: columns → rows → main + side → grid |
+| `alt+m` | tab menu |
 | ``alt+` `` · `sv off` / `sv on` | basic view ⇄ full view |
 | `ctrl+]` then a letter | leader key — every shortcut, in every terminal (`ctrl+] ?` lists them) |
 | mouse | click a tab or split to focus it · wheel scrolls back |
@@ -65,7 +67,17 @@ scrollback_lines: 5000  # lines of history kept per shell
 shell_integration: true # report folder / command / exit code to Shellvisor
 mouse: true             # wheel scrolls history
 start_view: full        # full (tabs, status bar) or basic (just the shell)
+restore: ask            # reopen last session's tabs: ask, always or never
+keys:                   # change or turn off any shortcut (F1 lists them all)
+  new_tab: alt+n
+  rename_tab: none      # frees alt+r for your shell
 ```
+
+Keys are written like `alt+t`, `ctrl+]`, `f7`, `alt+shift+left`, `shift+pageup`. Shellvisor refuses keys without `ctrl`/`alt` (they would stop you typing) and tells you about clashes.
+
+## Sessions
+
+Shellvisor remembers your tabs, splits, tab names and folders in `~/.local/state/shellvisor/session.yaml` as you work, so it survives closing the terminal window. Next time it asks whether to reopen them. Commands are never re-run.
 
 ## How the shell integration works
 

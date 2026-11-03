@@ -16,6 +16,7 @@ mod history;
 mod keys;
 mod mouse;
 mod paths;
+mod session;
 mod shell;
 mod sysinfo;
 mod term;
@@ -127,6 +128,11 @@ fn main() {
         eprintln!("shellvisor: {w}");
     }
 
+    let (keymap, warnings) = keys::Keymap::new(&cfg.key_overrides());
+    for w in &warnings {
+        eprintln!("shellvisor: {w}");
+    }
+
     let cache = paths::cache_dir();
     let choice = opts.shell.as_deref().or(cfg.shell.as_deref());
     let launch = match shell::build(choice, opts.integration && cfg.shell_integration, &cache) {
@@ -169,6 +175,10 @@ fn main() {
             config::StartView::Full => app::View::Full,
             config::StartView::Basic => app::View::Basic,
         },
+        keymap,
+        restore: cfg.restore,
+        session_path: paths::state_dir().join("session.yaml"),
+        warnings,
     });
     match result {
         Ok(code) => std::process::exit(code),

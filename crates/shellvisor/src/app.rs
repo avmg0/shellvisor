@@ -8,9 +8,11 @@
 //!
 //! The app thread owns all state and redraws only when something changed.
 
+use crate::config::Restore;
 use crate::history::{Entry, History};
-use crate::keys::{self, Cmd};
+use crate::keys::{self, Cmd, Keymap};
 use crate::mouse::MouseEv;
+use crate::session::{SavedNode, SavedTab, Session};
 use crate::shell::Launch;
 use crate::term::{InputModes, Pane};
 use crate::ui;
@@ -47,7 +49,28 @@ pub struct Options {
     pub mouse: bool,
     pub history: History,
     pub start_view: View,
+    pub keymap: Keymap,
+    pub restore: Restore,
+    pub session_path: PathBuf,
+    /// Problems found in config.yaml, shown once at start.
+    pub warnings: Vec<String>,
 }
+
+/// The tab menu (alt+m).
+pub const MENU: &[(&str, Cmd)] = &[
+    ("Rename tab", Cmd::RenameTab),
+    ("Split side by side", Cmd::SplitRight),
+    ("Split stacked", Cmd::SplitDown),
+    ("Rearrange splits", Cmd::NextLayout),
+    ("Zoom split", Cmd::Zoom),
+    ("Close split", Cmd::ClosePane),
+    ("New tab", Cmd::NewTab),
+    ("Close tab", Cmd::CloseTab),
+    ("Basic view", Cmd::ToggleView),
+    ("All keys", Cmd::Help),
+];
+
+const SAVE_EVERY: Duration = Duration::from_secs(1);
 
 enum Ev {
     Input(Vec<u8>),
@@ -78,6 +101,7 @@ pub enum Pending {
     Quit,
     CloseTab(usize),
     ClosePane(PaneId),
+    Restore(Box<Session>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -88,6 +112,8 @@ pub enum Modal {
     Help,
     Rename(String),
     Confirm(Pending, String),
+    /// Tab menu, with the highlighted row.
+    Menu(usize),
 }
 
 pub struct App {
@@ -106,6 +132,10 @@ pub struct App {
     option_hint_shown: bool,
     quit: Option<i32>,
     dirty: bool,
+    session_dirty: bool,
+    /// Don't overwrite the saved session while we're still asking about it.
+    session_locked: bool,
+    last_save: Instant,
 }
 
 static RESTORED: AtomicBool = AtomicBool::new(false);
@@ -163,9 +193,21 @@ pub fn run(opts: Options) -> io::Result<i32> {
         option_hint_shown: false,
         quit: None,
         dirty: true,
+        session_dirty: false,
+        session_locked: false,
+        last_save: Instant::now(),
     };
     let first = app.new_pane(None)?;
     app.tabs.push(Tab::new(first));
+    app.offer_restore()?;
+    if let Some(w) = app.opts.warnings.first().cloned() {
+        let more = app.opts.warnings.len() - 1;
+        app.notice(if more > 0 {
+            format!("{w} (+{more} more)")
+        } else {
+            w
+        });
+    }
 
     // Take over the screen. From here on, always restore — even on panic.
     terminal::enable_raw_mode()?;
@@ -197,6 +239,7 @@ pub fn run(opts: Options) -> io::Result<i32> {
     drop(tx);
 
     let result = app.event_loop(rx);
+    app.save_session();
     for p in app.panes.values_mut() {
         p.pane.kill();
     }
@@ -221,6 +264,119 @@ pub fn shrink(r: Rect) -> Rect {
 }
 
 impl App {
+    pub fn keymap(&self) -> &Keymap {
+        &self.opts.keymap
+    }
+
+    // ---------------------------------------------------------------- session
+
+    fn offer_restore(&mut self) -> io::Result<()> {
+        if self.opts.restore == Restore::Never {
+            return Ok(());
+        }
+        let here = self
+            .panes
+            .values()
+            .next()
+            .map(|p| p.cwd.clone())
+            .unwrap_or_default();
+        let Some(saved) = Session::load(&self.opts.session_path).filter(|s| !s.is_trivial(&here))
+        else {
+            return Ok(());
+        };
+        match self.opts.restore {
+            Restore::Always => self.restore(saved)?,
+            _ => {
+                let msg = format!(
+                    "Restore last session — {}? (y / n)",
+                    saved.summary(ui::short_path)
+                );
+                self.session_locked = true;
+                self.modal = Modal::Confirm(Pending::Restore(Box::new(saved)), msg);
+            }
+        }
+        Ok(())
+    }
+
+    /// Replace the current tabs with the saved ones (new shells in the saved folders).
+    fn restore(&mut self, saved: Session) -> io::Result<()> {
+        let old: Vec<PaneId> = self.tabs.iter().flat_map(|t| t.root.panes()).collect();
+        let mut tabs = Vec::new();
+        for t in &saved.tabs {
+            let root = t
+                .layout
+                .rebuild(&mut |cwd: &str| self.new_pane(Some(PathBuf::from(cwd))))?;
+            let panes = root.panes();
+            tabs.push(Tab {
+                focus: panes[t.focus.min(panes.len() - 1)],
+                zoomed: t.zoomed && panes.len() > 1,
+                name: t.name.clone(),
+                arrangement: None,
+                root,
+            });
+        }
+        for id in old {
+            if let Some(mut p) = self.panes.remove(&id) {
+                p.pane.kill();
+            }
+        }
+        let n = tabs.len();
+        self.tabs = tabs;
+        self.active = saved.active.min(n - 1);
+        self.session_locked = false;
+        self.relayout();
+        self.notice(format!("restored {n} tab{}", if n == 1 { "" } else { "s" }));
+        Ok(())
+    }
+
+    fn capture_session(&self) -> Session {
+        let cwd = |id: PaneId| {
+            self.panes
+                .get(&id)
+                .map(|p| p.cwd.clone())
+                .unwrap_or_default()
+        };
+        Session {
+            version: crate::session::VERSION,
+            view: if self.view == View::Full {
+                "full"
+            } else {
+                "basic"
+            }
+            .into(),
+            active: self.active,
+            tabs: self
+                .tabs
+                .iter()
+                .map(|t| SavedTab {
+                    name: t.name.clone(),
+                    zoomed: t.zoomed,
+                    focus: t
+                        .root
+                        .panes()
+                        .iter()
+                        .position(|p| *p == t.focus)
+                        .unwrap_or(0),
+                    layout: SavedNode::capture(&t.root, &cwd),
+                })
+                .collect(),
+        }
+    }
+
+    /// Write the session now (or delete it if no tabs are left).
+    fn save_session(&mut self) {
+        self.session_dirty = false;
+        self.last_save = Instant::now();
+        if self.session_locked {
+            return;
+        }
+        if self.tabs.is_empty() {
+            Session::remove(&self.opts.session_path);
+        } else {
+            let _ = self.capture_session().save(&self.opts.session_path);
+        }
+    }
+
     // ---------------------------------------------------------------- panes
 
     fn new_pane(&mut self, cwd: Option<PathBuf>) -> io::Result<PaneId> {
@@ -331,6 +487,7 @@ impl App {
             }
         }
         self.dirty = true;
+        self.session_dirty = true;
     }
 
     fn notice(&mut self, msg: impl Into<String>) {
@@ -409,6 +566,9 @@ impl App {
             if self.spinning() && last_draw.elapsed() >= SPIN {
                 self.dirty = true;
             }
+            if self.session_dirty && self.last_save.elapsed() >= SAVE_EVERY {
+                self.save_session();
+            }
             if self.dirty && last_draw.elapsed() >= FRAME {
                 term.draw(|f| ui::draw(f, self))?;
                 self.dirty = false;
@@ -435,6 +595,9 @@ impl App {
         }
         if let Some((_, at)) = &self.notice {
             t = t.min((*at + NOTICE).saturating_duration_since(Instant::now()));
+        }
+        if self.session_dirty {
+            t = t.min((self.last_save + SAVE_EVERY).saturating_duration_since(Instant::now()));
         }
         t
     }
@@ -509,6 +672,7 @@ impl App {
             ShellEvent::Cwd(path) => {
                 p.cwd = path;
                 self.dirty = true;
+                self.session_dirty = true;
             }
             ShellEvent::CommandText(t) => p.command = t,
             ShellEvent::CommandStarted => {
@@ -608,6 +772,7 @@ impl App {
                             let n = name.trim().to_string();
                             self.tabs[self.active].name = (!n.is_empty()).then_some(n);
                             self.modal = Modal::None;
+                            self.session_dirty = true;
                         }
                         b"\x1b" | [0x03] => self.modal = Modal::None,
                         [0x7f] | [0x08] => {
@@ -629,14 +794,47 @@ impl App {
                     match key {
                         b"y" | b"Y" | b"\r" | [0x11] => {
                             self.modal = Modal::None;
-                            self.confirmed(pending);
+                            self.confirmed(pending)?;
                         }
-                        b"n" | b"N" | b"\x1b" | [0x03] => self.modal = Modal::None,
+                        b"n" | b"N" | b"\x1b" | [0x03] => {
+                            self.modal = Modal::None;
+                            if self.session_locked {
+                                // "No" to restoring: from now on save the new session.
+                                self.session_locked = false;
+                                self.session_dirty = true;
+                            }
+                        }
                         _ => {}
                     }
                     self.dirty = true;
                     if self.quit.is_some() {
                         return Ok(());
+                    }
+                    continue;
+                }
+                Modal::Menu(i) => {
+                    let n = MENU.len();
+                    self.dirty = true;
+                    match key {
+                        b"\x1b[A" | b"\x1bOA" | b"k" => self.modal = Modal::Menu((i + n - 1) % n),
+                        b"\x1b[B" | b"\x1bOB" | b"j" => self.modal = Modal::Menu((i + 1) % n),
+                        b"\r" | b" " => {
+                            self.modal = Modal::None;
+                            self.flush_forward(&mut forward)?;
+                            self.run_cmd(MENU[i].1)?;
+                            if self.quit.is_some() {
+                                return Ok(());
+                            }
+                        }
+                        [d @ b'1'..=b'9'] if ((d - b'1') as usize) < n => {
+                            self.modal = Modal::None;
+                            self.run_cmd(MENU[(d - b'1') as usize].1)?;
+                        }
+                        b"0" if n >= 10 => {
+                            self.modal = Modal::None;
+                            self.run_cmd(MENU[9].1)?;
+                        }
+                        _ => self.modal = Modal::None, // esc, q, alt+m, anything else closes
                     }
                     continue;
                 }
@@ -648,7 +846,7 @@ impl App {
                 self.on_mouse(ev)?;
                 continue;
             }
-            if let Some(cmd) = keys::global(key) {
+            if let Some(cmd) = self.opts.keymap.lookup(key) {
                 self.flush_forward(&mut forward)?;
                 self.run_cmd(cmd)?;
                 if self.quit.is_some() {
@@ -773,12 +971,14 @@ impl App {
         }
     }
 
-    fn confirmed(&mut self, p: Pending) {
+    fn confirmed(&mut self, p: Pending) -> io::Result<()> {
         match p {
             Pending::Quit => self.quit = Some(0),
             Pending::CloseTab(i) => self.close_tab(i),
             Pending::ClosePane(id) => self.close_pane(id),
+            Pending::Restore(saved) => self.restore(*saved)?,
         }
+        Ok(())
     }
 
     fn close_pane(&mut self, id: PaneId) {
@@ -807,6 +1007,14 @@ impl App {
             Cmd::Quit => self.request_quit(None),
             Cmd::Leader => self.modal = Modal::Leader,
             Cmd::Help => self.modal = Modal::Help,
+            Cmd::TabMenu => self.modal = Modal::Menu(0),
+            Cmd::NextLayout => match self.tabs[tab].next_arrangement() {
+                Some(a) => {
+                    self.notice(format!("layout: {}", a.name()));
+                    self.relayout();
+                }
+                None => self.notice("Only one split here — split first with alt+\\ or alt+-"),
+            },
             Cmd::ToggleView => {
                 let v = if self.view == View::Full {
                     View::Basic

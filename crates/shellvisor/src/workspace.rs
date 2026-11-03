@@ -200,6 +200,80 @@ pub fn neighbor(rects: &[(PaneId, Rect)], from: PaneId, dir: Dir) -> Option<Pane
         .map(|(_, _, id)| id)
 }
 
+/// Ways to rearrange a tab's splits (F7 / alt+l cycles through them).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Arrangement {
+    /// Equal columns side by side.
+    Columns,
+    /// Equal rows stacked.
+    Rows,
+    /// One big pane on the left, the rest stacked on the right.
+    MainSide,
+    /// As square a grid as possible.
+    Grid,
+}
+
+impl Arrangement {
+    pub fn next(self) -> Self {
+        match self {
+            Arrangement::Columns => Arrangement::Rows,
+            Arrangement::Rows => Arrangement::MainSide,
+            Arrangement::MainSide => Arrangement::Grid,
+            Arrangement::Grid => Arrangement::Columns,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Arrangement::Columns => "columns",
+            Arrangement::Rows => "rows",
+            Arrangement::MainSide => "main + side",
+            Arrangement::Grid => "grid",
+        }
+    }
+}
+
+/// Equal-sized chain of nodes along one axis.
+fn chain(mut nodes: Vec<Node>, axis: Axis) -> Node {
+    if nodes.len() == 1 {
+        return nodes.pop().unwrap();
+    }
+    let n = nodes.len();
+    let first = nodes.remove(0);
+    Node::Split {
+        axis,
+        ratio: 1.0 / n as f32,
+        a: Box::new(first),
+        b: Box::new(chain(nodes, axis)),
+    }
+}
+
+/// Build a fresh tree holding `panes` (in this order) in the given arrangement.
+pub fn arrange(panes: &[PaneId], how: Arrangement) -> Node {
+    let leaves = |ids: &[PaneId]| ids.iter().map(|id| Node::Leaf(*id)).collect::<Vec<_>>();
+    if panes.len() <= 1 {
+        return Node::Leaf(panes.first().copied().unwrap_or(0));
+    }
+    match how {
+        Arrangement::Columns => chain(leaves(panes), Axis::Horizontal),
+        Arrangement::Rows => chain(leaves(panes), Axis::Vertical),
+        Arrangement::MainSide => Node::Split {
+            axis: Axis::Horizontal,
+            ratio: 0.6,
+            a: Box::new(Node::Leaf(panes[0])),
+            b: Box::new(chain(leaves(&panes[1..]), Axis::Vertical)),
+        },
+        Arrangement::Grid => {
+            let cols = (panes.len() as f64).sqrt().ceil() as usize;
+            let rows = panes
+                .chunks(cols)
+                .map(|row| chain(leaves(row), Axis::Horizontal))
+                .collect();
+            chain(rows, Axis::Vertical)
+        }
+    }
+}
+
 /// A tab: a tree of panes, which one is focused, and whether it's zoomed.
 #[derive(Debug, Clone)]
 pub struct Tab {
@@ -208,6 +282,8 @@ pub struct Tab {
     pub zoomed: bool,
     /// Name set by the user (alt+r); otherwise the label is automatic.
     pub name: Option<String>,
+    /// Last arrangement applied with F7, so the next press moves on.
+    pub arrangement: Option<Arrangement>,
 }
 
 impl Tab {
@@ -217,7 +293,24 @@ impl Tab {
             focus: pane,
             zoomed: false,
             name: None,
+            arrangement: None,
         }
+    }
+
+    /// Rearrange the splits into the next arrangement; returns its name.
+    pub fn next_arrangement(&mut self) -> Option<Arrangement> {
+        let panes = self.root.panes();
+        if panes.len() < 2 {
+            return None;
+        }
+        let next = self
+            .arrangement
+            .map(Arrangement::next)
+            .unwrap_or(Arrangement::Columns);
+        self.root = arrange(&panes, next);
+        self.arrangement = Some(next);
+        self.zoomed = false;
+        Some(next)
     }
 
     /// Visible pane rectangles (only the focused one when zoomed).
@@ -299,6 +392,73 @@ mod tests {
             n.resize(1, Dir::Left, 0.1);
         }
         assert_eq!(rects(&n)[0].1.width, 10, "clamped at 10%");
+    }
+
+    fn widths(n: &Node) -> Vec<(u16, u16, u16, u16)> {
+        rects(n)
+            .into_iter()
+            .map(|(_, r)| (r.x, r.y, r.width, r.height))
+            .collect()
+    }
+
+    #[test]
+    fn arrangements() {
+        let p = [1, 2, 3, 4];
+        assert_eq!(
+            widths(&arrange(&p, Arrangement::Columns)),
+            vec![
+                (0, 0, 25, 40),
+                (25, 0, 25, 40),
+                (50, 0, 25, 40),
+                (75, 0, 25, 40)
+            ]
+        );
+        assert_eq!(
+            widths(&arrange(&p, Arrangement::Rows)),
+            vec![
+                (0, 0, 100, 10),
+                (0, 10, 100, 10),
+                (0, 20, 100, 10),
+                (0, 30, 100, 10)
+            ]
+        );
+        let ms = widths(&arrange(&p, Arrangement::MainSide));
+        assert_eq!(ms[0], (0, 0, 60, 40));
+        assert!(ms[1..].iter().all(|r| r.0 == 60 && r.2 == 40));
+        assert_eq!(
+            widths(&arrange(&p, Arrangement::Grid)),
+            vec![
+                (0, 0, 50, 20),
+                (50, 0, 50, 20),
+                (0, 20, 50, 20),
+                (50, 20, 50, 20)
+            ]
+        );
+        // 3 panes in a grid: 2 on top, 1 full-width below
+        let g3 = widths(&arrange(&[1, 2, 3], Arrangement::Grid));
+        assert_eq!(g3[2], (0, 20, 100, 20));
+        assert_eq!(arrange(&[7], Arrangement::Grid), Node::Leaf(7));
+        assert_eq!(arrange(&p, Arrangement::Grid).panes(), vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn cycling_arrangements_keeps_panes() {
+        let mut t = Tab::new(1);
+        assert_eq!(t.next_arrangement(), None, "one pane: nothing to arrange");
+        t.root.split(1, Axis::Horizontal, 2);
+        t.root.split(2, Axis::Vertical, 3);
+        let seen: Vec<_> = (0..5).map(|_| t.next_arrangement().unwrap()).collect();
+        assert_eq!(
+            seen,
+            [
+                Arrangement::Columns,
+                Arrangement::Rows,
+                Arrangement::MainSide,
+                Arrangement::Grid,
+                Arrangement::Columns
+            ]
+        );
+        assert_eq!(t.root.panes(), vec![1, 2, 3]);
     }
 
     #[test]

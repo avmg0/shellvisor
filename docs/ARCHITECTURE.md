@@ -1,6 +1,6 @@
 # Shellvisor — Architecture
 
-Status: v0.3 · 2026-11-04 · P0 + P1a implemented (see Decisions log at the end)
+Status: v0.4 · 2026-11-04 · P0 + P1 implemented (see Decisions log at the end)
 Wireframes: `docs/wireframes/` (to be exported) · Phases: [ROADMAP.md](ROADMAP.md)
 
 ---
@@ -288,6 +288,9 @@ Enforced by: a `bench/` harness that launches Shellvisor in a pseudo-terminal, i
 | 2026-11-04 | **Only the focused pane may set the window title**; bell and OSC 52 clipboard pass through from any pane; a bell in a hidden tab marks the tab `!`. | Background tabs must not hijack the title. |
 | 2026-11-04 | **Quit, close tab and close split ask first when a command is still running** (`y`/Enter/ctrl+q = yes). | Protects running work; ctrl+q twice still always quits. |
 | 2026-11-04 | Colours use the **256-colour palette**, not 24-bit. | Terminal.app has no true colour. |
+| 2026-11-04 | **Session file** `~/.local/state/shellvisor/session.yaml` (tabs, split tree with ratios, folders, names, focus, zoom). Written atomically ≤ 1 s after a change, and on quit/SIGHUP; deleted when the last shell exits. Not overwritten while the "restore?" question is open. | Survives closing the terminal window; never restores half a file; never re-runs commands. |
+| 2026-11-04 | **Keys are configured as text** (`alt+t`, `ctrl+]`, `f7`, `alt+shift+left`) and the defaults use the same parser. `none` unbinds; keys without ctrl/alt are refused; clashes and unknown actions are reported. Help (F1) is generated from the live keymap. | One source of truth; lets users free shortcuts their shell needs (e.g. zsh's alt+t / alt+l). |
+| 2026-11-04 | **F7 rearranges shell splits** (columns → rows → main + side → grid) instead of switching to presets with placeholder panes. | Placeholder panes are clutter until files/stats/agents panes exist. |
 
 ### P0 measurements (Linux x86_64, release build, bash)
 

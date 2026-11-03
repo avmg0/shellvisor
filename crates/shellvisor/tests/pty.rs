@@ -18,6 +18,8 @@ struct Session {
     screen: vt100::Parser,
     child: Box<dyn portable_pty::Child + Send + Sync>,
     dir: PathBuf,
+    /// Keep the scratch folder on drop (to restart in the same state).
+    keep: bool,
 }
 
 fn have(cmd: &str) -> bool {
@@ -51,6 +53,11 @@ impl Session {
     fn start_with(shell: &str, tag: &str, config: &str) -> Session {
         let dir = scratch(tag);
         std::fs::write(dir.join("config.yaml"), config).unwrap();
+        Self::launch(shell, dir)
+    }
+
+    /// Start again in an existing scratch folder (same state, same config).
+    fn launch(shell: &str, dir: PathBuf) -> Session {
         let pair = portable_pty::native_pty_system()
             .openpty(PtySize {
                 rows: 24,
@@ -98,6 +105,7 @@ impl Session {
             screen: vt100::Parser::new(24, 100, 0),
             child,
             dir,
+            keep: false,
         }
     }
 
@@ -174,7 +182,9 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) {
         let _ = self.child.kill();
-        let _ = std::fs::remove_dir_all(&self.dir);
+        if !self.keep {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
     }
 }
 
@@ -519,4 +529,143 @@ fn quit_with_running_command_asks() {
     s.wait_for(&format!("Quit {}?", NAME));
     s.send("\x11"); // ctrl+q again = yes
     assert_eq!(s.wait_exit(), 0);
+}
+
+// ------------------------------------------------------------------ P1b
+
+#[test]
+fn session_is_restored_after_quitting() {
+    let mut s = Session::start_with("bash", "restore", "start_view: full\n");
+    s.wait_for("PROMPT>");
+    s.send("\x1bt"); // second tab…
+    s.wait_until("tab 2", |t| top(t).contains("2 bash"));
+    s.wait_for("PROMPT>");
+    s.send("cd /usr\r"); // …in /usr
+    s.wait_until("cd", |t| top(t).contains("2 bash · usr"));
+    s.send("\x1b\\"); // split it
+    s.wait_until("split", |t| top(t).contains("⊞2"));
+    s.send("\x1br"); // and name tab 1 after switching to it
+    s.wait_for("Rename tab:");
+    s.send("\x1b"); // (cancel)
+    s.wait_until("rename cancelled", |t| !t.contains("Rename tab:"));
+    s.send("\x1b1"); // go to tab 1…
+    s.wait_until("tab 1 active", |t| !t.contains("/usr"));
+    s.send("\x1br"); // …and rename it
+    s.wait_for("Rename tab:");
+    s.send("main\r");
+    s.wait_until("renamed", |t| top(t).contains("main"));
+    s.pump(Duration::from_millis(1500)); // let the session save
+    let saved = std::fs::read_to_string(s.dir.join("state/session.yaml")).unwrap();
+    assert!(
+        saved.contains("/usr") && saved.contains("side_by_side") && saved.contains("main"),
+        "{saved}"
+    );
+    s.send("\x11");
+    assert_eq!(s.wait_exit(), 0);
+    s.keep = true;
+    let dir = s.dir.clone();
+    drop(s);
+
+    let mut s = Session::launch("bash", dir);
+    s.wait_for("Restore last session");
+    s.wait_for("2 tabs: main, /usr");
+    s.send("y");
+    s.wait_until("two tabs back", |t| {
+        top(t).contains("1 bash · main") && top(t).contains("2 bash · usr ⊞2")
+    });
+    s.send("\x1b2");
+    s.wait_until("split restored", |t| {
+        t.lines().nth(1).unwrap_or("").matches('╭').count() == 2
+    });
+    s.send("pwd\r");
+    s.wait_for("││/usr");
+}
+
+#[test]
+fn declining_restore_starts_fresh_and_never_is_silent() {
+    let mut s = Session::start_with("bash", "norestore", "start_view: full\n");
+    s.wait_for("PROMPT>");
+    s.send("\x1bt");
+    s.wait_until("tab 2", |t| top(t).contains("2 bash"));
+    s.pump(Duration::from_millis(1500));
+    s.send("\x11");
+    s.wait_exit();
+    s.keep = true;
+    let dir = s.dir.clone();
+    drop(s);
+
+    let mut s = Session::launch("bash", dir.clone());
+    s.wait_for("Restore last session");
+    s.send("n");
+    s.wait_until("one fresh tab", |t| {
+        !t.contains("Restore") && !top(t).contains("2 bash")
+    });
+    s.send("\x11");
+    s.wait_exit();
+    s.keep = true;
+    drop(s);
+
+    std::fs::write(
+        dir.join("config.yaml"),
+        "start_view: full\nrestore: never\n",
+    )
+    .unwrap();
+    let mut s = Session::launch("bash", dir);
+    s.wait_for("PROMPT>");
+    s.pump(Duration::from_millis(500));
+    assert!(!s.text().contains("Restore"), "{}", s.text());
+}
+
+#[test]
+fn f7_rearranges_splits() {
+    let mut s = Session::start_full("layout");
+    s.wait_for("PROMPT>");
+    s.send("\x1b\\"); // split right
+    s.wait_until("2", |t| top(t).contains("⊞2"));
+    s.send("\x1b-"); // split the right one down
+    s.wait_until("3", |t| top(t).contains("⊞3"));
+    s.send("\x1b[18~"); // F7 → columns
+    s.wait_for("layout: columns");
+    s.wait_until("three columns", |t| {
+        t.lines().nth(1).unwrap_or("").matches('╭').count() == 3
+    });
+    s.send("\x1b[18~"); // → rows
+    s.wait_for("layout: rows");
+    s.wait_until("three rows", |t| {
+        t.lines().filter(|l| l.starts_with('╭')).count() == 3
+    });
+}
+
+#[test]
+fn custom_keys_from_config() {
+    let mut s = Session::start_with(
+        "bash",
+        "keys",
+        "start_view: full\nkeys:\n  new_tab: alt+n\n  rename_tab: none\n",
+    );
+    s.wait_for("PROMPT>");
+    s.send("\x1bn"); // alt+n is now "new tab"
+    s.wait_until("tab 2", |t| top(t).contains("2 bash"));
+    s.send("\x1br"); // alt+r goes to the shell instead of renaming
+    s.pump(Duration::from_millis(400));
+    assert!(!s.text().contains("Rename tab:"));
+    s.send("\x1b[11~"); // F1 lists the custom key
+    s.wait_for("keys");
+    s.wait_until("alt+n in help", |t| {
+        t.contains("alt+n") && t.contains("new tab in the same folder")
+    });
+}
+
+#[test]
+fn tab_menu() {
+    let mut s = Session::start_full("menu");
+    s.wait_for("PROMPT>");
+    s.send("\x1bm"); // alt+m
+    s.wait_for("Split side by side");
+    s.send("\x1b[B\r"); // down to "Split side by side", enter
+    s.wait_until("split", |t| top(t).contains("⊞2"));
+    s.send("\x1bm");
+    s.wait_for("Rename tab");
+    s.send("\x1b"); // esc closes
+    s.wait_until("menu closed", |t| !t.contains("Rename tab"));
 }

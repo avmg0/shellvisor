@@ -1,13 +1,13 @@
 # Shellvisor — Roadmap & Phases
 
-Status: v0.3 · 2026-11-04 · **P0 done · P1a done** · see [ARCHITECTURE.md](ARCHITECTURE.md)
+Status: v0.4 · 2026-11-04 · **P0 done · P1 done** · see [ARCHITECTURE.md](ARCHITECTURE.md)
 
 Each phase ends with something you can **run and use daily**, and must stay inside the performance budget before the next phase starts. Sizes are relative (S ≈ a few days, M ≈ 1–2 weeks, L ≈ 2–4 weeks of focused work) — not promises.
 
 | Phase | Name | Size | You can use it for… | Boards |
 |---|---|---|---|---|
 | **P0** ✅ | Foundations | M | Shellvisor as a plain, fast shell wrapper (basic view) | 11, 14 |
-| **P1** | Workspace | L | tabs, splits, layouts, keymap — a tmux-like daily driver | 3, 4, 4b, 12, 14 |
+| **P1** ✅ | Workspace | L | tabs, splits, layouts, keymap — a tmux-like daily driver | 3, 4, 4b, 12, 14 |
 | **P2** | Core panes | L | the default 4-pane workspace (files, stats, activity) | 1, 6, 9, 10 |
 | **P3** | Data | M | data-flow view and `sv` structured commands | 2, 13 |
 | **P4** | Agents I | L | run several coding agents side by side, manually | 5, 8, 16 |
@@ -39,12 +39,14 @@ Risks: vt100 gaps with exotic apps → keep `alacritty_terminal` as plan B.
 
 ---
 
-## P1 · Workspace — P1a ✅ done 2026-11-04 · P1b next
+## P1 · Workspace — ✅ done 2026-11-04
 **Goal:** the frame everything else plugs into.
 
 **P1a done:** layout tree, tabs, splits (side by side / stacked), focus/resize/zoom, tab states (running spinner, ✖ exit, • new output, ! bell), rename, close-with-running confirmation, keymap router (global → leader `ctrl+]` → pane → PTY), F1 help, status bar (folder, running command + time, last exit, own memory, clock), Option-as-Alt detection hint, `sv on`/`sv off`/alt+` full ⇄ basic, mouse routing (click to focus tab/split, wheel scroll, apps that use the mouse get pane-local coordinates in their own protocol). Measured: 0.85 MB binary, 4.4 MB RSS with 3 tabs, 0 % idle CPU. 36 unit + 18 end-to-end tests.
 
-**P1b remaining:** session save/restore, layout presets (Dev with placeholder panes, Focus, Basic) and `F7`/`alt+l`, keymap overrides in config.yaml, tab menu (`alt+m`).
+**P1b done:** session save/restore (`session.yaml`, saved within 1 s of any change and on exit/SIGHUP; ask/always/never; commands never re-run), `F7`/`alt+l` split arrangements (columns, rows, main + side, grid), keymap overrides in config.yaml (text key specs, `none` to unbind, clash and typo warnings, F1 help built from the live keymap), tab menu (`alt+m`). Measured: 0.99 MB binary, 4.5 MB RSS with 3 tabs, 0 % idle CPU. 47 unit + 23 end-to-end tests.
+
+*Change from plan:* the Dev/Monitor/Files/Agents presets with placeholder panes were dropped from P1 — empty panes are clutter. Those presets arrive with their panes (P2+); in P1, `F7` rearranges shell splits instead.
 
 Deliverables
 - Layout tree (row/col with sizes), pane framework (focus, borders, titles, zoom F5).
