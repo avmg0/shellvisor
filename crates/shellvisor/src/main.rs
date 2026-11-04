@@ -178,6 +178,11 @@ fn main() {
             if launch.integrated { "on" } else { "off" }.into(),
         ),
     ];
+    if launch.name == "bash" && cfg!(target_os = "macos") {
+        // macOS's bash 3.2 otherwise greets every new pane with "The default
+        // interactive shell is now zsh…"
+        env.push(("BASH_SILENCE_DEPRECATION_WARNING".into(), "1".into()));
+    }
     let bus_path = bus::socket_path(&paths::state_dir());
     env.push((bus::ENV_SOCK.into(), bus_path.display().to_string()));
     if let Some(bin) = install_sv_link(&cache) {

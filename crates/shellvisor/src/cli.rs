@@ -648,10 +648,17 @@ fn agent_run(args: &[String]) -> i32 {
     if dry {
         println!("team {} — {}", t.name, goal);
         for m in &t.agents {
+            // a command: its program name (and arguments), not the whole path
             let how = if m.cmd.is_empty() {
                 m.cli.clone()
             } else {
-                m.cmd.clone()
+                let mut words = m.cmd.split_whitespace();
+                let prog = words.next().unwrap_or("");
+                let prog = prog.rsplit('/').next().unwrap_or(prog);
+                std::iter::once(prog)
+                    .chain(words)
+                    .collect::<Vec<_>>()
+                    .join(" ")
             };
             let when = match &m.start {
                 Start::Now => "starts now".to_string(),

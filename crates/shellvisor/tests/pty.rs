@@ -855,7 +855,8 @@ fn sv_flow_meters_a_pipeline_and_the_flow_pane_shows_it() {
     // live job: two processes joined by a pipe
     s.send("sleep 3 | cat\r");
     s.wait_until("job in the flow pane", |t| {
-        t.contains("sleep 3") && t.contains("│ pipe")
+        // pipe links come from /proc: Linux only
+        t.contains("sleep 3") && (t.contains("│ pipe") || !cfg!(target_os = "linux"))
     });
     s.wait_for("Nothing running");
     // metered pipeline
