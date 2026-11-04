@@ -843,3 +843,25 @@ fn command_bar_runs_a_pipeline_into_a_table() {
     s.send("ls | count\r");
     s.wait_for("ls | count = 2");
 }
+
+#[test]
+fn sv_flow_meters_a_pipeline_and_the_flow_pane_shows_it() {
+    let mut s = Session::start_full("flow");
+    s.wait_for("PROMPT>");
+    s.send("\x1b[19~"); // F8: flow pane
+    s.wait_for("Nothing running");
+    s.send("\x1b\x1b[D"); // alt+left: back to the shell
+    s.pump(Duration::from_millis(200));
+    // live job: two processes joined by a pipe
+    s.send("sleep 3 | cat\r");
+    s.wait_until("job in the flow pane", |t| {
+        t.contains("sleep 3") && t.contains("│ pipe")
+    });
+    s.wait_for("Nothing running");
+    // metered pipeline
+    s.run("sv flow 'seq 1 20000 | grep 7 | wc -l'");
+    s.wait_for("flow · 3 stages");
+    s.wait_until("stage meters in the pane", |t| {
+        t.contains("finished") && t.contains("20.0k → 6878 lines · 34% kept")
+    });
+}

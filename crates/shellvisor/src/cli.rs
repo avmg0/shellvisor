@@ -16,7 +16,9 @@ usage:
   sv exit      leave Shellvisor
   sv files [tree|list|git|find]   open the files pane (in this tab)
   sv sys       open the system pane (CPU, memory, disk, network, temperatures)
-  sv layout dev|monitor|files     lay this tab out as a preset
+  sv layout dev|monitor|files|data   lay this tab out as a preset
+  sv flow 'a | b | c'             run a pipeline with a meter on every stage
+  sv flowpane  open the Flow pane (what the shell is running, live)
   sv power on|off|auto            low-power mode (auto = on battery)
   sv data      list the data commands (ls, ps, open, where, sort-by, to csv…)
   sv status    is Shellvisor running in this terminal?
@@ -81,7 +83,8 @@ pub fn run(args: &[String]) -> i32 {
                 not_running("exit")
             }
         }
-        "files" | "sys" | "system" | "layout" | "power" => {
+        "flow" => crate::flowrun::run(&args[1..]),
+        "files" | "sys" | "system" | "flowpane" | "layout" | "power" => {
             if !inside() {
                 return not_running(cmd);
             }
@@ -90,7 +93,8 @@ pub fn run(args: &[String]) -> i32 {
                 ("files", None) => vec!["files"],
                 ("files", Some(v @ ("tree" | "list" | "git" | "find"))) => vec!["files", v],
                 ("sys" | "system", None) => vec!["system"],
-                ("layout", Some(l @ ("dev" | "monitor" | "files"))) => vec!["layout", l],
+                ("flowpane", None) => vec!["flow"],
+                ("layout", Some(l @ ("dev" | "monitor" | "files" | "data"))) => vec!["layout", l],
                 ("power", Some(m @ ("on" | "off" | "auto"))) => vec!["power", m],
                 _ => {
                     eprintln!("sv {cmd}: unexpected argument — see `sv help`");

@@ -15,6 +15,7 @@ use crate::activity::{self, Activity};
 use crate::config::{LowPower, Restore};
 use crate::data::value::Data;
 use crate::files::{self, Act, Done, FilesPane, Job, Outcome};
+use crate::flow::{FlowAct, FlowPane};
 use crate::history::{Entry, History};
 use crate::keys::{self, Cmd, Keymap, Preset};
 use crate::mouse::MouseEv;
@@ -77,6 +78,8 @@ pub const MENU: &[(&str, Cmd)] = &[
     ("Layout: dev", Cmd::Preset(Preset::Dev)),
     ("Layout: monitor", Cmd::Preset(Preset::Monitor)),
     ("Layout: files", Cmd::Preset(Preset::Files)),
+    ("Layout: data", Cmd::Preset(Preset::Data)),
+    ("Flow pane", Cmd::ToggleFlow),
     ("Rearrange splits", Cmd::NextLayout),
     ("Zoom split", Cmd::Zoom),
     ("Close split", Cmd::ClosePane),
@@ -92,6 +95,7 @@ pub const MENU: &[(&str, Cmd)] = &[
 pub enum Tool {
     Files(FilesPane),
     System(SysPane),
+    Flow(FlowPane),
 }
 
 impl Tool {
@@ -99,6 +103,7 @@ impl Tool {
         match self {
             Tool::Files(_) => "files",
             Tool::System(_) => "system",
+            Tool::Flow(_) => "flow",
         }
     }
 
@@ -106,6 +111,7 @@ impl Tool {
         match self {
             Tool::Files(f) => f.title(),
             Tool::System(s) => s.title(),
+            Tool::Flow(f) => f.title(),
         }
     }
 }
@@ -140,6 +146,8 @@ pub struct PaneState {
     pub activity: Option<Activity>,
     /// Rows of the last table `sv` printed here (for F4).
     pub table: Option<PathBuf>,
+    /// Stats file of the last `sv flow` run here.
+    pub flow: Option<PathBuf>,
     progress_at: Instant,
     /// New output since progress was last read.
     progress_due: bool,
@@ -426,7 +434,7 @@ impl App {
             Some(t) => Leaf {
                 cwd: match t {
                     Tool::Files(f) => f.root.display().to_string(),
-                    Tool::System(_) => String::new(),
+                    Tool::System(_) | Tool::Flow(_) => String::new(),
                 },
                 tool: Some(t.kind().to_string()),
             },
@@ -537,6 +545,7 @@ impl App {
                 bell: false,
                 activity: None,
                 table: None,
+                flow: None,
                 progress_at: Instant::now(),
                 progress_due: false,
                 focused_at: 0,
@@ -549,7 +558,7 @@ impl App {
     /// A saved leaf: a shell in its folder, or a tool pane.
     fn new_leaf(&mut self, l: &Leaf) -> io::Result<PaneId> {
         match l.tool.as_deref() {
-            Some(kind @ ("files" | "system")) => {
+            Some(kind @ ("files" | "system" | "flow")) => {
                 let cwd = if l.cwd.is_empty() {
                     std::env::current_dir().unwrap_or_default()
                 } else {
@@ -566,6 +575,8 @@ impl App {
         self.next_id += 1;
         let tool = if kind == "system" {
             Tool::System(SysPane::new())
+        } else if kind == "flow" {
+            Tool::Flow(FlowPane::new())
         } else {
             let (f, jobs) = FilesPane::new(cwd);
             self.run_jobs(id, jobs);
@@ -840,10 +851,23 @@ impl App {
                 p.focused_at = self.focus_tick;
             }
         }
-        let shell_cwd = self
+        let shell = self
             .paired_shell(self.active)
-            .and_then(|id| self.panes.get(&id))
-            .map(|p| PathBuf::from(&p.cwd));
+            .and_then(|id| self.panes.get(&id));
+        let shell_cwd = shell.map(|p| PathBuf::from(&p.cwd));
+        // What the Flow pane watches: the job, the sv flow file, the command.
+        let watch = shell.map(|p| {
+            (
+                p.pane.foreground_job(),
+                p.flow.clone(),
+                if p.running {
+                    p.command.clone()
+                } else {
+                    String::new()
+                },
+                p.started,
+            )
+        });
         let low = self.low_power;
         let shown = self.visible_tools();
         for (id, t) in self.tools.iter_mut() {
@@ -856,6 +880,15 @@ impl App {
         for id in shown {
             let mut out = Outcome::default();
             match self.tools.get_mut(&id) {
+                Some(Tool::Flow(fp)) => {
+                    if fp.due_in(low).is_zero() {
+                        let (pg, flow, cmd, started) =
+                            watch.clone().unwrap_or((None, None, String::new(), None));
+                        let before = (fp.job.clone(), fp.flow.clone());
+                        fp.sample(pg, flow.as_deref(), &cmd, started);
+                        out.redraw = before != (fp.job.clone(), fp.flow.clone()) || pg.is_some();
+                    }
+                }
                 Some(Tool::Files(f)) => {
                     if let Some(cwd) = &shell_cwd {
                         if f.follow && *cwd != f.seen_cwd && cwd.is_dir() {
@@ -966,6 +999,7 @@ impl App {
         }
         for id in self.visible_tools() {
             let due = match &self.tools[&id] {
+                Tool::Flow(fp) => fp.due_in(self.low_power),
                 Tool::System(sp) => sp.due_in(self.low_power),
                 Tool::Files(_) if self.low_power => continue,
                 Tool::Files(f) => f.poll_due_in(),
@@ -1116,6 +1150,10 @@ impl App {
                 }
             }
             ShellEvent::Request(words) => self.on_request(&words),
+            ShellEvent::Flow(path) => {
+                p.flow = Some(PathBuf::from(path));
+                self.dirty = true;
+            }
             ShellEvent::Table(path) => {
                 p.table = Some(PathBuf::from(path));
                 if !self.option_hint_shown || self.notice.is_none() {
@@ -1499,6 +1537,12 @@ impl App {
                 redraw: sp.key(key),
                 ..Default::default()
             },
+            Some(Tool::Flow(fp)) => {
+                if let Some(FlowAct::Type(cmd)) = fp.key(key) {
+                    self.type_in_shell(&cmd);
+                }
+                return;
+            }
             None => return,
         };
         self.apply(id, out);
@@ -1629,11 +1673,12 @@ impl App {
                 Ok(())
             }
             ["system"] => self.show_tool("system", false),
+            ["flow"] => self.show_tool("flow", false),
             ["layout", name] => match Preset::parse(name) {
                 Some(p) => self.apply_preset(p),
                 None => {
                     self.notice(format!(
-                        "sv layout: unknown layout `{name}` (dev, monitor, files)"
+                        "sv layout: unknown layout `{name}` (dev, monitor, files, data)"
                     ));
                     Ok(())
                 }
@@ -1762,6 +1807,15 @@ impl App {
                     ratio: 0.38,
                     a: leaf(f),
                     b: leaf(shell),
+                }
+            }
+            Preset::Data => {
+                let fl = self.new_tool("flow", here);
+                Node::Split {
+                    axis: Axis::Horizontal,
+                    ratio: 0.5,
+                    a: leaf(shell),
+                    b: leaf(fl),
                 }
             }
         };
@@ -1944,6 +1998,7 @@ impl App {
                 self.set_low_power(!self.low_power);
             }
             Cmd::ExploreTable => self.explore_table(),
+            Cmd::ToggleFlow => self.show_tool("flow", true)?,
             Cmd::CommandBar => {
                 self.table = None;
                 self.bar_pos = None;

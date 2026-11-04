@@ -182,6 +182,8 @@ pub struct Pane {
     writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
+    /// The shell's process id.
+    pid: Option<u32>,
     /// Lines scrolled back from the bottom (0 = live).
     scroll: usize,
 }
@@ -234,6 +236,7 @@ impl Pane {
             .take_writer()
             .map_err(|e| io::Error::other(e.to_string()))?;
         let killer = child.clone_killer();
+        let pid = child.process_id();
         let parser = vt100::Parser::new_with_callbacks(rows, cols, scrollback, Hooks::default());
         Ok(Spawned {
             pane: Pane {
@@ -241,6 +244,7 @@ impl Pane {
                 writer,
                 master: pair.master,
                 killer,
+                pid,
                 scroll: 0,
             },
             reader,
@@ -293,6 +297,13 @@ impl Pane {
 
     pub fn screen(&self) -> &vt100::Screen {
         self.parser.screen()
+    }
+
+    /// The process group in the foreground of this terminal (the running
+    /// job), if it isn't the shell itself.
+    pub fn foreground_job(&self) -> Option<i32> {
+        let pg = self.master.process_group_leader()?;
+        (Some(pg as u32) != self.pid).then_some(pg)
     }
 
     /// Input modes the program inside has asked for.

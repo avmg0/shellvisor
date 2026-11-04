@@ -1,6 +1,6 @@
 # Shellvisor — Roadmap & Phases
 
-Status: v0.5 · 2026-11-04 · **P0 · P1 · P2 done** · see [ARCHITECTURE.md](ARCHITECTURE.md)
+Status: v0.6 · 2026-11-04 · **P0 · P1 · P2 · P3 done** · see [ARCHITECTURE.md](ARCHITECTURE.md)
 
 Each phase ends with something you can **run and use daily**, and must stay inside the performance budget before the next phase starts. Sizes are relative (S ≈ a few days, M ≈ 1–2 weeks, L ≈ 2–4 weeks of focused work) — not promises.
 
@@ -9,7 +9,7 @@ Each phase ends with something you can **run and use daily**, and must stay insi
 | **P0** ✅ | Foundations | M | Shellvisor as a plain, fast shell wrapper (basic view) | 11, 14 |
 | **P1** ✅ | Workspace | L | tabs, splits, layouts, keymap — a tmux-like daily driver | 3, 4, 4b, 12, 14 |
 | **P2** ✅ | Core panes | L | the default 4-pane workspace (files, stats, activity) | 1, 6, 9, 10 |
-| **P3** | Data | M | data-flow view and `sv` structured commands | 2, 13 |
+| **P3** ✅ | Data | M | data-flow view and `sv` structured commands | 2, 13 |
 | **P4** | Agents I | L | run several coding agents side by side, manually | 5, 8, 16 |
 | **P5** | Agents II | L | sub-agents, team.yaml, auto-plan | 7, 15, 16 |
 | **P6** | Polish & ship | M | the rest of the file views, layout editor, packaging | 4, 9, 10, 11 |
@@ -80,8 +80,12 @@ Exit criteria: default workspace runs all day at ≤ 15 MB, < 0.5 % CPU idle.
 
 ---
 
-## P3 · Data
+## P3 · Data — ✅ done 2026-11-04
 **Goal:** see and shape data flowing through commands.
+
+**Result:** `sv` data commands — a value model with sizes, durations and dates; sources `ls ps host df ports env history open git-log git-status`; filters `where select reject sort-by reverse first last skip uniq get group-by count sum avg min max columns describe`; `from json|jsonl|csv|tsv|yaml|toml|ssv|lines`, `to json|jsonl|csv|tsv|md|yaml|text`; stage by stage (`sv ls | sv where …`, JSON lines between stages) or as one quoted pipeline. Table viewer (`F4`): sort, filter by text or condition, copy CSV/JSON/Markdown (pbcopy / wl-copy / xclip, else OSC 52), insert a cell; 100k rows tested. Command bar (`alt+;`) with nu-style operators, history, `alt+⏎` to the prompt. Flow pane (`F8`, `sv layout data`): the live foreground job (processes, CPU, memory; read/write rates and pipe links on Linux) and `sv flow '…'` meters per stage (bytes, lines, kept %, rate, slowest stage, stderr, output tail), "send to shell" / "run again". Measured with 3 tabs + dev layout: 1.76 MB binary, 5.6 MB RSS, 0.2 % idle CPU. 100 unit + 32 end-to-end tests.
+
+*Changes from plan:* `sys` became `host` (`sv sys` already opens the system pane). The table viewer is an overlay opened with `F4` rather than drawn inline in the scrollback — the text table stays in the scrollback, the viewer works on the saved rows. Per-stage rates in the *live job* view need `/proc`, so on macOS that view shows CPU and memory only; `sv flow` meters work everywhere. The board 13 examples were not re-checked against the design canvas (set aside); the README examples are covered by tests instead.
 
 Deliverables
 - **Flow pane:** live foreground job (processes, cpu, rss, pipes); pipeline runner with per-stage bytes/lines/rate, filter ratio, bottleneck, per-stage stderr, output tail; "send to shell".

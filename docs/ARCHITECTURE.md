@@ -1,6 +1,6 @@
 # Shellvisor — Architecture
 
-Status: v0.5 · 2026-11-04 · P0 + P1 + P2 implemented (see Decisions log at the end)
+Status: v0.6 · 2026-11-04 · P0 – P3 implemented (see Decisions log at the end)
 Wireframes: `docs/wireframes/` (to be exported) · Phases: [ROADMAP.md](ROADMAP.md)
 
 ---
@@ -296,6 +296,10 @@ Enforced by: a `bench/` harness that launches Shellvisor in a pseudo-terminal, i
 | 2026-11-04 | **Git via the CLI** with `GIT_OPTIONAL_LOCKS=0` (`status --porcelain=v1 -z -b`, `ls-files`, `diff`). | No libgit2 in the binary; never fights the user's git for the index lock. |
 | 2026-11-04 | **Activity from the command line, progress from the screen.** A table of programs + sub-commands (git clone, npm i, pip install, uv sync, brew, docker pull, cargo build, curl, wget…) marks a command as a download; the last `NN%` on the pane's bottom lines is its progress (re-read ≤ 4×/s). | Works with every version of every tool, no wrappers or hooks. |
 | 2026-11-04 | **`sv` requests**: `OSC 7770;do;<word>[;<arg>]` (`files`, `system`, `layout dev`, `power auto`). | Same channel as `sv on/off`, works over ssh-less local shells with no socket. |
+| 2026-11-04 | **`sv` data between stages is JSON lines** (no header line), so `jq` and friends work on it; types survive by convention — ISO-8601 strings become dates, numbers in columns named `size`, `mem`, `*_bytes`… become sizes, `duration`, `*_ms`… durations. At the end of a pipe on a terminal it is an aligned table. | No hidden schema to break other tools; good-enough round trip. |
+| 2026-11-04 | **Tables inside Shellvisor are saved** (state/tables, newest 20, JSON lines) and announced with `OSC 7770;table;<base64 path>`; `F4` opens the viewer on them. Viewer sorts/filters a list of row numbers and formats only visible rows. | Scrollback keeps the plain text; the viewer scales to 100k rows. |
+| 2026-11-04 | **Command bar runs `shellvisor sv '<pipeline>'` as a child** in the shell's folder and reads its JSON lines. | Same engine as the shell, correct working folder, nothing blocking the UI. |
+| 2026-11-04 | **`sv flow` meters with copier threads** between `sh -c` stages: bytes/lines counted per stage, time blocked writing *into* a stage = it is slow (time waiting to read from the first stage counts for it). Stats JSON rewritten 4×/s (`OSC 7770;flow;<path>`); the Flow pane reads it once a second while visible. The live job comes from the PTY's foreground process group + `ps`; idle shells cost nothing. | Works for any commands, no tracing, no root. |
 | 2026-11-04 | **Low-power mode**: auto while on battery (checked once a minute — `/sys/class/power_supply` or `pmset -g ps`), or `sv power on/off`. Stats every 5 s, spinner at 4 fps, no folder polling. | Respects laptops without giving up the panes. |
 
 ### P0 measurements (Linux x86_64, release build, bash)

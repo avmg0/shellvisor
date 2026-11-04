@@ -15,6 +15,8 @@ mod cli;
 mod config;
 mod data;
 mod files;
+mod flow;
+mod flowrun;
 mod gitstat;
 mod highlight;
 mod history;

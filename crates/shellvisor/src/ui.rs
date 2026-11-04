@@ -82,6 +82,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             match t {
                 Tool::Files(fp) => fp.render(inner, f.buffer_mut(), is_focus),
                 Tool::System(sp) => sp.render(inner, f.buffer_mut(), app.low_power),
+                Tool::Flow(fp) => fp.render(inner, f.buffer_mut()),
             }
             continue;
         }

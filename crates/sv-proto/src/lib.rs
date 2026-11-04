@@ -14,6 +14,7 @@
 //! | `OSC 7770 ; mode ; on/off/exit` | switch Shellvisor view / quit    |
 //! | `OSC 7770 ; do ; word [; arg]`  | open a pane, preset, power mode |
 //! | `OSC 7770 ; table ; <base64>`   | an `sv` table was saved at path |
+//! | `OSC 7770 ; flow ; <base64>`    | `sv flow` writes live stats there |
 
 use base64::Engine as _;
 
@@ -77,6 +78,13 @@ pub enum ShellEvent {
     Request(Vec<String>),
     /// `sv` printed a table and saved its rows (JSON lines) at this path.
     Table(String),
+    /// `sv flow` is running and writes its stats (JSON) at this path.
+    Flow(String),
+}
+
+/// The escape sequence `sv flow` prints with the path of its stats file.
+pub fn flow_sequence(path: &str) -> String {
+    format!("\x1b]7770;flow;{}\x07", b64(path.as_bytes()))
 }
 
 /// Base64 (standard alphabet) — for OSC payloads and OSC 52 clipboard.
@@ -133,6 +141,12 @@ pub fn parse_osc(params: &[&[u8]]) -> Option<ShellEvent> {
             Some(ShellEvent::Table(
                 String::from_utf8_lossy(&raw).into_owned(),
             ))
+        }
+        [id, b"flow", data] if *id == OSC_SHELLVISOR => {
+            let raw = base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .ok()?;
+            Some(ShellEvent::Flow(String::from_utf8_lossy(&raw).into_owned()))
         }
         [id, b"do", words @ ..] if *id == OSC_SHELLVISOR && !words.is_empty() => {
             Some(ShellEvent::Request(

@@ -104,6 +104,7 @@ pub enum Cmd {
     Preset(Preset),
     ExploreTable,
     CommandBar,
+    ToggleFlow,
 }
 
 /// Ready-made layouts for a tab.
@@ -115,15 +116,18 @@ pub enum Preset {
     Monitor,
     /// Files on the left, shell on the right.
     Files,
+    /// Shell on the left, the Flow pane on the right.
+    Data,
 }
 
 impl Preset {
-    pub const ALL: [Preset; 3] = [Preset::Dev, Preset::Monitor, Preset::Files];
+    pub const ALL: [Preset; 4] = [Preset::Dev, Preset::Monitor, Preset::Files, Preset::Data];
     pub fn name(self) -> &'static str {
         match self {
             Preset::Dev => "dev",
             Preset::Monitor => "monitor",
             Preset::Files => "files",
+            Preset::Data => "data",
         }
     }
     pub fn parse(s: &str) -> Option<Preset> {
@@ -246,6 +250,12 @@ pub const ACTIONS: &[(&str, Cmd, &[&str], &str)] = &[
         "system pane: open · focus · close (also: sv sys)",
     ),
     (
+        "toggle_flow",
+        Cmd::ToggleFlow,
+        &["f8"],
+        "flow pane: the running job, or sv flow meters (also: sv flowpane)",
+    ),
+    (
         "explore_table",
         Cmd::ExploreTable,
         &["f4"],
@@ -265,6 +275,7 @@ pub const ACTIONS: &[(&str, Cmd, &[&str], &str)] = &[
     ),
     ("preset_monitor", Cmd::Preset(Preset::Monitor), &[], ""),
     ("preset_files", Cmd::Preset(Preset::Files), &[], ""),
+    ("preset_data", Cmd::Preset(Preset::Data), &[], ""),
     (
         "low_power",
         Cmd::LowPower,
@@ -501,6 +512,7 @@ pub fn after_leader(key: &[u8]) -> Option<Cmd> {
         b"s" => ToggleSystem,
         b";" | b":" => CommandBar,
         b"v" => ExploreTable,
+        b"d" => ToggleFlow,
         b"\x1b[A" => Focus(Dir::Up),
         b"\x1b[B" => Focus(Dir::Down),
         b"\x1b[C" => Focus(Dir::Right),
@@ -510,7 +522,7 @@ pub fn after_leader(key: &[u8]) -> Option<Cmd> {
     })
 }
 
-pub const LEADER_HINT: &str = " ctrl+] → t tab · w close tab · x close split · \\ split │ · - split ─ · o next split · z zoom · l layout · m menu · f files · s system · ; command bar · v table · b basic view · r rename · 1-9 tab · ? help · ctrl+] send ctrl+] ";
+pub const LEADER_HINT: &str = " ctrl+] → t tab · w close tab · x close split · \\ split │ · - split ─ · o next split · z zoom · l layout · m menu · f files · s system · d flow · ; command bar · v table · b basic view · r rename · 1-9 tab · ? help · ctrl+] send ctrl+] ";
 
 /// On macOS, Option+key types these characters unless the terminal is set to
 /// send Option as Alt/Meta. Seeing one alone means alt shortcuts can't work.

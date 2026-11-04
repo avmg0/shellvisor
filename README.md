@@ -4,12 +4,12 @@
 
 Shellvisor is a full-screen terminal app (like `tmux`, `htop` or `vim`) that runs your own zsh or bash in tabs and splits, and — as it grows — adds panes for files, live system stats, a data-flow view of your pipelines, and coding agents working side by side. Every command, alias and full-screen program you use today keeps working unchanged.
 
-> **Status: early development (P0–P2 of 7 done).**
-> Working today: tabs and splits of real zsh/bash shells, a tab bar that shows what each tab is doing (running ⠋, downloading ◐, failed ✖, new output •), a status bar, split layouts, your tabs restored after a restart, custom keys, and a one-key switch to *basic view*, which looks exactly like a plain terminal. Plus a **files pane** (tree, list, git changes, find, preview) that follows your shell, a **system pane** (CPU, memory, disk, network, I/O, temperatures, processes), and download/install progress for git, npm, pip, uv, brew, docker, cargo, curl and friends. Data flow and agents arrive in P3–P5. See [docs/ROADMAP.md](docs/ROADMAP.md).
+> **Status: early development (P0–P3 of 7 done).**
+> Working today: tabs and splits of real zsh/bash shells, a tab bar that shows what each tab is doing (running ⠋, downloading ◐, failed ✖, new output •), a status bar, split layouts, your tabs restored after a restart, custom keys, and a one-key switch to *basic view*, which looks exactly like a plain terminal. Plus a **files pane** (tree, list, git changes, find, preview) that follows your shell, a **system pane** (CPU, memory, disk, network, I/O, temperatures, processes), download/install progress for git, npm, pip, uv, brew, docker, cargo, curl and friends, **`sv` data commands** (nushell-style tables in bash/zsh) with an interactive table viewer, and a **Flow pane** that shows the running job and meters pipelines stage by stage. Coding agents arrive in P4–P5. See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Why
 
-- **One binary, tiny footprint.** Written in Rust. Budget: ≤ 8 MB binary, ≤ 15 MB memory, < 0.5 % CPU when idle. The current build is ~1.3 MB and uses ~5.2 MB of memory with three tabs plus the files and system panes open.
+- **One binary, tiny footprint.** Written in Rust. Budget: ≤ 8 MB binary, ≤ 15 MB memory, < 0.5 % CPU when idle. The current build is ~1.8 MB and uses ~5.6 MB of memory with three tabs plus the files and system panes open.
 - **Nothing to relearn.** Your `.zshrc` / `.bash_profile` load as usual; vim, less, fzf, ssh and git all behave as before.
 - **Off is one command away.** `sv off` hides the panels, `sv exit` leaves completely.
 
@@ -48,7 +48,10 @@ shellvisor --shell bash    # or pick: zsh, bash, or a full path
 | `F7` · `alt+l` | rearrange splits: columns → rows → main + side → grid |
 | `F2` · `sv files` | files pane: open · focus · close |
 | `F3` · `sv sys` | system pane: open · focus · close |
-| `sv layout dev` | shell + files + system (also `monitor`, `files`; or `alt+m`) |
+| `F8` · `sv flowpane` | flow pane: the job running in the shell, or `sv flow` meters |
+| `F4` | explore the last `sv` table: sort, filter, copy |
+| `alt+;` | command bar: `ls \| where size > 1mb \| sort-by size -r` → table |
+| `sv layout dev` | shell + files + system (also `monitor`, `files`, `data`; or `alt+m`) |
 | `alt+m` | tab menu |
 | ``alt+` `` · `sv off` / `sv on` | basic view ⇄ full view |
 | `ctrl+]` then a letter | leader key — every shortcut, in every terminal (`ctrl+] ?` lists them) |
@@ -94,6 +97,16 @@ ps aux | sv from ssv | sv where user eq root | sv to csv
 Sources: `ls ps host df ports env history open git-log git-status`. Filters: `where select reject sort-by reverse first last skip uniq get group-by count sum avg min max columns describe`. Formats: `from json|csv|tsv|yaml|toml|ssv|lines`, `to json|jsonl|csv|tsv|md|yaml|text`. `sv data` lists them all.
 
 On the terminal you get an aligned table; between `sv` stages rows travel as JSON lines, so `jq` works on them too.
+
+Inside Shellvisor, **`F4`** opens the last table full-screen: `←→` pick a column, `s`/`S` sort, `/` filter (text, or a condition like `size > 1mb`), `c` / `J` / `m` copy as CSV / JSON / Markdown, `⏎` types the cell at your prompt. It stays quick with 100k rows. **`alt+;`** opens a command bar for the same pipelines without the `sv` prefix — the result opens in the table viewer, or `alt+⏎` puts it at your prompt.
+
+### Flow
+
+```sh
+sv flow 'cat access.log | grep " 500 " | cut -d" " -f7 | sort | uniq -c | sort -rn'
+```
+
+runs the pipeline with a meter between every stage — lines and bytes in and out, % kept, rate, the stage holding everything up (◀ slowest), each stage's errors and the last lines of output — and prints a summary at the end. The **Flow pane** (`F8`, or `sv layout data`) shows it live; when nothing is metered it shows the job your shell is running right now: its processes, CPU, memory, read/write rates and pipes (rates and pipes on Linux).
 
 ## Configuration
 
