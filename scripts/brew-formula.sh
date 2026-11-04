@@ -18,6 +18,7 @@ sha() {
 }
 a=$(sha aarch64-apple-darwin); b=$(sha x86_64-apple-darwin)
 c=$(sha aarch64-unknown-linux-gnu); d=$(sha x86_64-unknown-linux-gnu)
+mkdir -p "$(dirname "$out")"
 tmp="$out.tmp.$$"
 sed -e "s/VERSION/$v/" \
     -e "s/SHA_AARCH64_APPLE_DARWIN/$a/" -e "s/SHA_X86_64_APPLE_DARWIN/$b/" \
