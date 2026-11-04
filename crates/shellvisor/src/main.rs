@@ -29,6 +29,7 @@ mod keys;
 mod layouted;
 mod mouse;
 mod osinfo;
+mod palette;
 mod paths;
 mod session;
 mod settings;
@@ -162,6 +163,8 @@ fn main() {
         }
     };
 
+    // before COLORTERM is set for our own shells below
+    let truecolor = palette::truecolor_terminal();
     let mut env = vec![
         ("TERM".to_string(), "xterm-256color".to_string()),
         ("COLORTERM".into(), "truecolor".into()),
@@ -208,6 +211,7 @@ fn main() {
         keymap,
         restore: cfg.restore,
         low_power: cfg.low_power,
+        truecolor,
         light: {
             // the settings screen's theme wins over config.yaml
             let ui = settings::Settings::load();

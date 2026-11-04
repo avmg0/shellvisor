@@ -67,6 +67,8 @@ pub struct Options {
     pub low_power: LowPower,
     /// Light theme for Shellvisor's own UI.
     pub light: bool,
+    /// The outer terminal shows 24-bit colour.
+    pub truecolor: bool,
     /// New agents get their own git worktree.
     pub agent_worktree: bool,
     pub agent_limits: agents::Limits,
@@ -341,6 +343,7 @@ pub struct App {
     pub bus_log: std::collections::VecDeque<(i64, String)>,
     pub low_power: bool,
     pub light: bool,
+    pub truecolor: bool,
     power_manual: bool,
     focus_tick: u64,
     last_focus: PaneId,
@@ -429,6 +432,7 @@ pub fn run(opts: Options) -> io::Result<i32> {
         bus_log: std::collections::VecDeque::new(),
         low_power,
         light: opts.light,
+        truecolor: opts.truecolor,
         power_manual: !auto_power,
         focus_tick: 0,
         last_focus: 0,

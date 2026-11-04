@@ -100,6 +100,7 @@ Inside Shellvisor, `ls` (and `ls <folder>`, `ls -a`) prints a table like nushell
 - the **colour of the folder in your prompt** (and bold) — Shellvisor's hooks colour `%1~` / `%~` (zsh) or `\W` / `\w` (bash) in whatever prompt you have, no dotfile editing; prompts drawn by tools like starship are left as they are
 - the **colour of folders in lists** — the files pane and `ls` / `sv` tables
 - `ls` as a table on/off, table borders (rounded or plain), theme
+- **dark background**: *design* (default) paints Shellvisor in the design's palette — a very dark blue-grey page `#0b0e12`, panels `#11151b`, shells on `#0e1217`, borders `#262c36`, text `#d6dbe3`, amber / cyan / green / red accents — or *terminal* to keep your terminal's own background. Programs inside shells keep their own colours; basic view always looks like your plain terminal. Terminals without 24-bit colour (e.g. older Terminal.app) get the nearest 256-colour shades
 
 Choices are saved in `~/.local/state/shellvisor/settings.yaml` (your config.yaml is never rewritten) and shells pick them up at the next prompt.
 

@@ -47,6 +47,9 @@ pub struct Settings {
     pub table_borders: String,
     /// "auto", "dark" or "light"; empty: config.yaml decides.
     pub theme: String,
+    /// Dark theme background: "design" (the boards' dark blue-grey and
+    /// colours) or "terminal" (your terminal's own background).
+    pub background: String,
 }
 
 impl Default for Settings {
@@ -59,6 +62,7 @@ impl Default for Settings {
             ls_table: true,
             table_borders: "rounded".into(),
             theme: String::new(),
+            background: "design".into(),
         }
     }
 }
@@ -125,7 +129,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
-const ROWS: [&str; 7] = [
+const ROWS: [&str; 8] = [
     "Folder colour in the prompt",
     "Folder in the prompt bold",
     "Folder colour in lists",
@@ -133,6 +137,7 @@ const ROWS: [&str; 7] = [
     "ls prints a table",
     "Table borders",
     "Theme",
+    "Dark background",
 ];
 
 /// The settings screen (alt+s, `sv settings`): ↑↓ pick, ←→ change.
@@ -184,6 +189,7 @@ impl Screen {
             3 => s.list_bold = !s.list_bold,
             4 => s.ls_table = !s.ls_table,
             5 => s.table_borders = cycle(&["rounded", "plain"], &s.table_borders, by),
+            7 => s.background = cycle(&["design", "terminal"], &s.background, by),
             _ => {
                 let cur = if s.theme.is_empty() {
                     "config"
@@ -211,6 +217,13 @@ impl Screen {
             3 => on(s.list_bold),
             4 => on(s.ls_table),
             5 => s.table_borders.clone(),
+            7 => {
+                if s.background == "terminal" {
+                    "your terminal's".into()
+                } else {
+                    "design (dark blue-grey)".into()
+                }
+            }
             _ => {
                 if s.theme.is_empty() {
                     "from config.yaml".into()

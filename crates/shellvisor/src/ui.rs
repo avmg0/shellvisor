@@ -66,20 +66,32 @@ fn pane_block(title: String, is_focus: bool) -> Block<'static> {
 
 pub fn draw(f: &mut Frame, app: &App) {
     draw_all(f, app);
+    // basic view looks exactly like your plain terminal: no palette there
+    let design = !app.light && app.ui.background != "terminal" && app.view == View::Full;
+    if !app.light && !design {
+        return;
+    }
+    // shells keep their programs' own colours; only overlays cover them
+    let covered = app.board.is_some()
+        || app.table.is_some()
+        || app.editor.is_some()
+        || app.settings.is_some()
+        || !matches!(app.modal, Modal::None);
+    let mut areas = crate::palette::Areas::default();
+    if !covered {
+        for (id, outer, inner) in app.visible() {
+            if app.tools.contains_key(&id) {
+                areas.tool_panes.push(outer);
+            } else {
+                areas.shells.push(inner);
+                areas.shell_panes.push(outer);
+            }
+        }
+    }
     if app.light {
-        // shells keep their programs' own colours; only overlays cover them
-        let covered =
-            app.board.is_some() || app.table.is_some() || !matches!(app.modal, Modal::None);
-        let skip: Vec<Rect> = if covered {
-            Vec::new()
-        } else {
-            app.visible()
-                .into_iter()
-                .filter(|(id, _, _)| !app.tools.contains_key(id))
-                .map(|(_, _, inner)| inner)
-                .collect()
-        };
-        light_theme(f.buffer_mut(), &skip);
+        light_theme(f.buffer_mut(), &areas.shells);
+    } else {
+        crate::palette::apply(f.buffer_mut(), &areas, app.truecolor);
     }
 }
 

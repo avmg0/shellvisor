@@ -176,6 +176,8 @@ Deliverables
 - Settings screen (done): `alt+s` / `sv settings` — colour (and bold) of the folder in the shell prompt, applied by the hooks to zsh `%1~ %~ %c %. %/ %d` and bash `\W \w` in any prompt; colour of folders in lists (files pane, `ls`/`sv` tables); `ls` as a table; table borders; theme. Saved in state/settings.yaml; hooks read state/ui.env with the shell's own `read` at each prompt.
 - `ls` as a nushell-style table (done): the hooks define `ls` to run `sv ls` at the terminal (cosmetic flags -a -A -G -F -h --color allowed); other flags, pipes and the setting off use the real ls. `sv` tables get rounded borders, green header and index, folders in the folder colour.
 
+- Design palette (done): in full view, Shellvisor's frames, bars, panes and the shells' default background use the boards' colours (page #0b0e12, panels #11151b, shells #0e1217, bars #151a21, borders #262c36, text #d6dbe3, accents amber #e0a84a, cyan #6cc9d6, green #8fd18f, red #f07178). 24-bit where the terminal supports it, nearest 256-colour otherwise. Setting *Dark background: design / terminal*.
+
 Exit criteria: `sv resize` covered by an end-to-end test; a `v1.0.1` tag releases with one macOS job; CI and Release runs show no deprecation warnings.
 
 ---
