@@ -55,6 +55,7 @@ shellvisor --shell bash    # or pick: zsh, bash, or a full path
 | `alt+a` | agents waiting for approval: `y` allow · `n` deny · `a` always |
 | `sv layout dev` | files + shell + system + flow (also `monitor`, `files`, `data`, `agents`; or `alt+m`) |
 | `alt+e` | layout editor: start from a preset or a saved layout, add shell / files / git / system / thermals / flow panes, remove, resize (keys or mouse), undo; nothing changes until ⏎, esc puts it back. Save by name, as the default, or for this folder (`sv layout <name>` opens a saved one) |
+| `alt+s` · `sv settings` | settings: colour of the folder in your prompt and of folders in lists, `ls` as a table, table borders, theme |
 | `alt+m` | tab menu |
 | ``alt+` `` · `sv off` / `sv on` | basic view ⇄ full view |
 | `ctrl+]` then a letter | leader key — every shortcut, in every terminal (`ctrl+] ?` lists them) |
@@ -87,6 +88,20 @@ CPU (history and per core), memory, swap, disks, network, disk I/O, load, temper
 **Mac users:** `alt` shortcuts need your terminal to send Option as Alt — Terminal.app: *Settings → Profiles → Keyboard → Use Option as Meta key*; iTerm2: *Profiles → Keys → Left Option key → Esc+*. Shellvisor tells you if it's off. The leader key `ctrl+]` always works.
 
 **Selecting text:** Shellvisor uses the mouse wheel for scrollback. To select text with the mouse, hold **Option** (iTerm2) or turn off *View → Allow Mouse Reporting* (Terminal.app). Or set `mouse: false` in the config.
+
+### `ls` as a table
+
+Inside Shellvisor, `ls` (and `ls <folder>`, `ls -a`) prints a table like nushell's — name, type, size, modified — with folders in your folder colour, and `F4` explores it. `ls -l` and any other flag, `ls` in a pipe or script, and `command ls` are the real ls. Turn it off in settings (`alt+s`).
+
+### Settings
+
+`alt+s` (or `sv settings`) opens a settings screen with a live preview:
+
+- the **colour of the folder in your prompt** (and bold) — Shellvisor's hooks colour `%1~` / `%~` (zsh) or `\W` / `\w` (bash) in whatever prompt you have, no dotfile editing; prompts drawn by tools like starship are left as they are
+- the **colour of folders in lists** — the files pane and `ls` / `sv` tables
+- `ls` as a table on/off, table borders (rounded or plain), theme
+
+Choices are saved in `~/.local/state/shellvisor/settings.yaml` (your config.yaml is never rewritten) and shells pick them up at the next prompt.
 
 ## Data commands
 

@@ -21,5 +21,42 @@ __sv_preexec() {
 add-zsh-hook precmd __sv_precmd
 add-zsh-hook preexec __sv_preexec
 
+# ---- Shellvisor settings (settings screen / `sv settings`), read at each
+# prompt from $SHELLVISOR_UI: the folder's colour in the prompt, `ls` as a table
+__sv_palette=(37 39 35 178 208 170 167 245)
+__sv_prompt_last= __sv_prompt_base= __sv_lt=1
+__sv_style() {
+  local c=- b=0 t i p
+  [[ -r $SHELLVISOR_UI ]] && { read -r c; read -r b; read -r __sv_lt } < $SHELLVISOR_UI
+  # the prompt changed under us (a theme, conda…): that is the new base
+  [[ $PROMPT != $__sv_prompt_last ]] && __sv_prompt_base=$PROMPT
+  p=$__sv_prompt_base
+  for i in $__sv_palette; do p=${p//"%{%B%F{$i}%}"/}; p=${p//"%{%F{$i}%}"/}; done
+  p=${p//"%{%f%b%}"/}; p=${p//"%{%f%}"/}
+  __sv_prompt_base=$p
+  if [[ $c != - && -n $c ]]; then
+    local o="%{%F{$c}%}" e="%{%f%}"
+    [[ $b == 1 ]] && { o="%{%B%F{$c}%}"; e="%{%f%b%}"; }
+    for t in '%1~' '%~' '%c' '%.' '%/' '%d'; do p=${p//"$t"/$o$t$e}; done
+  fi
+  PROMPT=$p
+  __sv_prompt_last=$p
+}
+add-zsh-hook precmd __sv_style
+
+# `ls` prints a table (sv ls) at the terminal; with other flags, in a pipe,
+# or with the setting off it is the real ls
+function ls {
+  if [[ $__sv_lt == 1 && -t 1 ]] && (( $+commands[sv] )); then
+    local a
+    for a in "$@"; do
+      case $a in -a|-A|--all|-G|-F|-h|--color|--color=*) ;; -*) command ls "$@"; return ;; esac
+    done
+    command sv ls "$@"
+    return
+  fi
+  command ls "$@"
+}
+
 # non-login shells never read .zlogin: hand ZDOTDIR back to the user now
 [[ -o login ]] || { ZDOTDIR="$SHELLVISOR_USER_ZDOTDIR"; unset SHELLVISOR_USER_ZDOTDIR SHELLVISOR_ORIG_ZDOTDIR; }

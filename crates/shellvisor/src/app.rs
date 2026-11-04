@@ -331,6 +331,10 @@ pub struct App {
     drag: Option<Vec<bool>>,
     /// The layout editor (alt+e).
     pub editor: Option<crate::layouted::Editor>,
+    /// The settings screen (alt+s).
+    pub settings: Option<crate::settings::Screen>,
+    /// Current settings (folder colours …).
+    pub ui: crate::settings::Settings,
     /// Kept while the board is closed, so the plan survives.
     plan_kept: Option<crate::board::Plan>,
     /// What happened between agents (sv agent log): (unix time, text).
@@ -420,6 +424,8 @@ pub fn run(opts: Options) -> io::Result<i32> {
         plan_kept: None,
         drag: None,
         editor: None,
+        settings: None,
+        ui: crate::settings::Settings::load(),
         bus_log: std::collections::VecDeque::new(),
         low_power,
         light: opts.light,
@@ -782,6 +788,7 @@ impl App {
             Tool::Flow(FlowPane::new())
         } else {
             let (mut f, mut jobs) = FilesPane::new(cwd);
+            f.folder_style = Self::folder_style(&self.ui);
             if kind == "git" {
                 jobs.extend(f.set_view(files::View::Git));
             }
@@ -1487,6 +1494,10 @@ impl App {
         for key in keys::tokenize(bytes) {
             if self.board.is_some() && self.modal == Modal::None {
                 self.board_key(key);
+                continue;
+            }
+            if self.settings.is_some() && self.modal == Modal::None {
+                self.settings_key(key);
                 continue;
             }
             if self.editor.is_some() && self.modal == Modal::None && self.table.is_none() {
@@ -3841,6 +3852,11 @@ impl App {
                 Ok(())
             }
             ["system"] => self.show_tool("system", false),
+            ["settings"] => {
+                self.settings = Some(crate::settings::Screen::new());
+                self.dirty = true;
+                Ok(())
+            }
             ["agent", "board", view] => {
                 self.open_board(crate::board::View::parse(view), None);
                 Ok(())
@@ -3987,6 +4003,56 @@ impl App {
     }
 
     // ------------------------------------------------------------ layout editor
+
+    fn settings_key(&mut self, key: &[u8]) {
+        self.dirty = true;
+        let Some(sc) = self.settings.as_mut() else {
+            return;
+        };
+        let (changed, close) = sc.key(key);
+        if changed {
+            let s = sc.s.clone();
+            if let Err(e) = s.save() {
+                self.notice(format!("settings: {e}"));
+            }
+            self.apply_ui(s);
+        }
+        if close {
+            self.settings = None;
+        }
+    }
+
+    fn folder_style(s: &crate::settings::Settings) -> ratatui::style::Style {
+        use ratatui::style::{Color, Modifier, Style};
+        match crate::settings::color_index(&s.list_folder) {
+            Some(c) => {
+                let st = Style::default().fg(Color::Indexed(c));
+                if s.list_bold {
+                    st.add_modifier(Modifier::BOLD)
+                } else {
+                    st
+                }
+            }
+            None => Style::default(),
+        }
+    }
+
+    /// Use new settings: folder colour in files panes, theme.
+    fn apply_ui(&mut self, s: crate::settings::Settings) {
+        let style = Self::folder_style(&s);
+        for t in self.tools.values_mut() {
+            if let Tool::Files(f) = t {
+                f.folder_style = style;
+            }
+        }
+        match s.theme.as_str() {
+            "light" => self.light = true,
+            "dark" => self.light = false,
+            "auto" => self.light = crate::config::Theme::Auto.is_light(),
+            _ => {}
+        }
+        self.ui = s;
+    }
 
     fn open_editor(&mut self) {
         use crate::layouted::{Editor, Preset, builtin_presets, kind_of};
@@ -4417,6 +4483,9 @@ impl App {
             Cmd::ExploreTable => self.explore_table(),
             Cmd::Agents => self.toggle_agents(),
             Cmd::AgentBoard => self.open_board(None, None),
+            Cmd::Settings => {
+                self.settings = Some(crate::settings::Screen::new());
+            }
             Cmd::LayoutEditor => {
                 if self.view == View::Basic {
                     self.set_view(View::Full);

@@ -92,7 +92,7 @@ fn file_row(name: String, path: &Path) -> Option<Record> {
 fn ls(args: &[String]) -> Result<Data, String> {
     let all = args
         .iter()
-        .any(|a| a == "-a" || a == "--all" || a == "-la" || a == "-al");
+        .any(|a| a == "-a" || a == "-A" || a == "--all" || a == "-la" || a == "-al");
     let paths: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
     let paths: Vec<String> = if paths.is_empty() {
         vec![".".into()]

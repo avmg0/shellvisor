@@ -408,12 +408,32 @@ pub struct Style {
     pub width: usize,
     /// Show at most this many rows (the rest are summarised).
     pub max_rows: usize,
+    /// Rounded borders around and between cells, like nushell.
+    pub boxed: bool,
+    /// ANSI start for folder names (rows whose `type` is dir).
+    pub folder: Option<String>,
+}
+
+impl Style {
+    /// Plain text, no colour or borders, every row.
+    pub fn text() -> Style {
+        Style {
+            color: false,
+            width: usize::MAX / 4,
+            max_rows: usize::MAX,
+            boxed: false,
+            folder: None,
+        }
+    }
 }
 
 const BOLD_AMBER: &str = "\x1b[1;38;5;179m";
 const DIM: &str = "\x1b[38;5;244m";
 const CYAN: &str = "\x1b[38;5;73m";
 const RESET: &str = "\x1b[0m";
+const BOLD_GREEN: &str = "\x1b[1;38;5;35m";
+const BORDER: &str = "\x1b[38;5;240m";
+const LINK: &str = "\x1b[38;5;170m";
 
 fn clean(s: &str) -> String {
     s.chars()
@@ -500,6 +520,9 @@ fn render_record(r: &Record, st: &Style) -> String {
 }
 
 pub fn render_table(rows: &[Record], st: &Style) -> String {
+    if st.boxed && !rows.is_empty() {
+        return render_boxed(rows, st);
+    }
     if rows.is_empty() {
         return if st.color {
             format!("{DIM}(empty){RESET}\n")
@@ -588,7 +611,8 @@ pub fn render_table(rows: &[Record], st: &Style) -> String {
             line.push(' ');
             let text = pad(&fit(cell, w[i]), w[i], numeric[i]);
             if st.color && i == 0 {
-                line.push_str(&format!("{CYAN}{text}{RESET}"));
+                let c = name_color(&shown[n], st);
+                line.push_str(&format!("{c}{text}{RESET}"));
             } else {
                 line.push_str(&text);
             }
@@ -612,6 +636,119 @@ pub fn render_table(rows: &[Record], st: &Style) -> String {
             out.push_str(&more);
             out.push('\n');
         }
+    }
+    out
+}
+
+/// Colour for the first cell: folders in the chosen colour, links magenta,
+/// other files plain; tables without a `type` column keep cyan names.
+fn name_color(r: &Record, st: &Style) -> String {
+    match super::value::get(r, "type").map(|v| v.plain()) {
+        Some(t) if t == "dir" => st.folder.clone().unwrap_or_default(),
+        Some(t) if t == "link" => LINK.into(),
+        Some(_) => String::new(),
+        None => CYAN.into(),
+    }
+}
+
+/// A table with rounded borders, header and index in green (nushell's look).
+fn render_boxed(rows: &[Record], st: &Style) -> String {
+    let cols = columns(rows);
+    let shown = &rows[..rows.len().min(st.max_rows)];
+    let cells: Vec<Vec<String>> = shown
+        .iter()
+        .map(|r| {
+            cols.iter()
+                .map(|c| {
+                    super::value::get(r, c)
+                        .map(|v| clean(&v.display()))
+                        .unwrap_or_default()
+                })
+                .collect()
+        })
+        .collect();
+    let numeric: Vec<bool> = cols
+        .iter()
+        .map(|c| {
+            shown
+                .iter()
+                .filter_map(|r| super::value::get(r, c))
+                .filter(|v| !matches!(v, Value::Nothing))
+                .all(|v| {
+                    matches!(
+                        v,
+                        Value::Int(_) | Value::Float(_) | Value::Size(_) | Value::Duration(_)
+                    )
+                })
+        })
+        .collect();
+    let idx_w = shown.len().saturating_sub(1).to_string().len().max(1);
+    let mut w: Vec<usize> = cols
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            cells
+                .iter()
+                .map(|r| width_of(&r[i]))
+                .max()
+                .unwrap_or(0)
+                .max(width_of(c))
+        })
+        .collect();
+    // borders: "│ " before each column and " │" at the end
+    let budget = st.width.saturating_sub(idx_w + 4 + 3 * w.len());
+    while w.iter().sum::<usize>() > budget {
+        let (i, &m) = w.iter().enumerate().max_by_key(|(_, x)| **x).unwrap();
+        if m <= 6 {
+            break;
+        }
+        w[i] = m - 1;
+    }
+    let (b, g, r, dim) = if st.color {
+        (BORDER, BOLD_GREEN, RESET, DIM)
+    } else {
+        ("", "", "", "")
+    };
+    let rule = |l: &str, m: &str, rt: &str| {
+        let mut s = format!("{b}{l}{}", "─".repeat(idx_w + 2));
+        for x in &w {
+            s.push_str(m);
+            s.push_str(&"─".repeat(x + 2));
+        }
+        format!("{s}{rt}{r}\n")
+    };
+    let mut out = rule("╭", "┬", "╮");
+    let mut head = format!("{b}│{r} {g}{}{r} ", pad("#", idx_w, true));
+    for (i, c) in cols.iter().enumerate() {
+        head.push_str(&format!(
+            "{b}│{r} {g}{}{r} ",
+            pad(&fit(c, w[i]), w[i], numeric[i])
+        ));
+    }
+    out.push_str(&format!("{head}{b}│{r}\n"));
+    out.push_str(&rule("├", "┼", "┤"));
+    for (n, row) in cells.iter().enumerate() {
+        let mut line = format!("{b}│{r} {g}{}{r} ", pad(&n.to_string(), idx_w, true));
+        for (i, cell) in row.iter().enumerate() {
+            let text = pad(&fit(cell, w[i]), w[i], numeric[i]);
+            let c = if st.color && i == 0 {
+                name_color(&shown[n], st)
+            } else {
+                String::new()
+            };
+            let end = if c.is_empty() { "" } else { r };
+            line.push_str(&format!("{b}│{r} {c}{text}{end} "));
+        }
+        out.push_str(&format!("{line}{b}│{r}\n"));
+    }
+    out.push_str(&rule("╰", "┴", "╯"));
+    if rows.len() > shown.len() {
+        let n = rows.len() - shown.len();
+        out.push_str(&format!(
+            "{dim}… {n} more row{} ({} total){r}\n",
+            if n == 1 { "" } else { "s" },
+            rows.len()
+        ));
     }
     out
 }
@@ -649,6 +786,8 @@ mod tests {
             color: false,
             width: 80,
             max_rows: 1000,
+            boxed: false,
+            folder: None,
         }
     }
 
@@ -749,8 +888,25 @@ mod tests {
                 color: false,
                 width: 18,
                 max_rows: 1,
+                boxed: false,
+                folder: None,
             },
         );
+        // nushell-style borders, folders coloured
+        let boxed = render_table(
+            &rows,
+            &Style {
+                color: false,
+                width: 80,
+                max_rows: 10,
+                boxed: true,
+                folder: None,
+            },
+        );
+        assert!(boxed.starts_with("╭───┬"), "{boxed}");
+        assert!(boxed.contains("│ # │ name       │   size │"), "{boxed}");
+        assert!(boxed.contains("│ 0 │ Cargo.toml │ 1.2 kB │"), "{boxed}");
+        assert!(boxed.trim_end().ends_with("╯"), "{boxed}");
         assert!(
             narrow.lines().take(2).all(|l| width_of(l) <= 18),
             "{narrow}"

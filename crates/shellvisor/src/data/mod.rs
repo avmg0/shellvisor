@@ -84,14 +84,7 @@ fn render_to(fmt: &str, d: &Data) -> Result<String, String> {
         "tsv" => format::to_csv(d, '\t'),
         "md" | "markdown" => format::to_markdown(d),
         "yaml" | "yml" => format::to_yaml(d),
-        "text" | "table" => format::render_text(
-            d,
-            &format::Style {
-                color: false,
-                width: usize::MAX / 4,
-                max_rows: usize::MAX,
-            },
-        ),
+        "text" | "table" => format::render_text(d, &format::Style::text()),
         other => return Err(format!("unknown format `{other}` — try {FORMATS_OUT}")),
     })
 }
@@ -216,10 +209,13 @@ pub fn run(args: &[String]) -> i32 {
                 Data::Value(value::Value::List(l)) => l.len(),
                 _ => 0,
             };
+            let ui = crate::settings::Settings::load();
             let st = format::Style {
                 color: true,
                 width: term_width(),
                 max_rows: if inside { 200 } else { 1000 },
+                boxed: ui.boxed(),
+                folder: ui.folder_ansi(),
             };
             let mut text = format::render_text(&d, &st);
             if inside && rows > 0 {

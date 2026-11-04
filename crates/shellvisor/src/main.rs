@@ -31,6 +31,7 @@ mod mouse;
 mod osinfo;
 mod paths;
 mod session;
+mod settings;
 mod shell;
 mod sysmon;
 mod tableview;
@@ -183,6 +184,10 @@ fn main() {
         // interactive shell is now zsh…"
         env.push(("BASH_SILENCE_DEPRECATION_WARNING".into(), "1".into()));
     }
+    // the shell hooks read the settings screen's choices from here
+    let ui_env = settings::ui_env_path();
+    let _ = settings::Settings::load().save();
+    env.push(("SHELLVISOR_UI".into(), ui_env.display().to_string()));
     let bus_path = bus::socket_path(&paths::state_dir());
     env.push((bus::ENV_SOCK.into(), bus_path.display().to_string()));
     if let Some(bin) = install_sv_link(&cache) {
@@ -203,7 +208,16 @@ fn main() {
         keymap,
         restore: cfg.restore,
         low_power: cfg.low_power,
-        light: cfg.theme.is_light(),
+        light: {
+            // the settings screen's theme wins over config.yaml
+            let ui = settings::Settings::load();
+            match ui.theme.as_str() {
+                "light" => true,
+                "dark" => false,
+                "auto" => config::Theme::Auto.is_light(),
+                _ => cfg.theme.is_light(),
+            }
+        },
         agent_worktree: cfg.agents.worktree,
         agent_limits: cfg.agents.limits.get(),
         planner: cfg.agents.planner.clone(),

@@ -311,6 +311,8 @@ pub struct FilesPane {
     recent: Option<(PathBuf, Vec<RecentFile>)>,
     /// Grid: cells per row at the last draw.
     grid_cols: Cell<usize>,
+    /// How folder names look (settings screen: colour, bold).
+    pub folder_style: Style,
 }
 
 impl FilesPane {
@@ -340,6 +342,7 @@ impl FilesPane {
             sizes: None,
             recent: None,
             grid_cols: Cell::new(1),
+            folder_style: Style::default().fg(CYAN),
         };
         let jobs = p.set_root(root);
         (p, jobs)
@@ -1502,7 +1505,11 @@ impl FilesPane {
                     if it.link {
                         name.push_str(" →");
                     }
-                    let st = if it.dir { base.fg(CYAN) } else { base };
+                    let st = if it.dir {
+                        base.patch(self.folder_style)
+                    } else {
+                        base
+                    };
                     let mark = git.and_then(|g| g.mark(&it.path));
                     let mut right = String::new();
                     if self.view == View::List && w > 40 {
@@ -1528,7 +1535,7 @@ impl FilesPane {
                     };
                     (format!("{indent}{icon}{name}"), st, right)
                 }
-                Row::Up => ("  ../".into(), base.fg(CYAN), None),
+                Row::Up => ("  ../".into(), base.patch(self.folder_style), None),
                 Row::More(n, depth) => (
                     format!("{}  … {n} more", "  ".repeat(*depth as usize)),
                     base.fg(FAINT),
@@ -1588,7 +1595,11 @@ impl FilesPane {
                     };
                     (
                         name,
-                        if it.dir { base.fg(CYAN) } else { base },
+                        if it.dir {
+                            base.patch(self.folder_style)
+                        } else {
+                            base
+                        },
                         Some((format!("{bar} {size:>6} {pct:>3}% "), base.fg(col))),
                     )
                 }
@@ -1675,7 +1686,7 @@ impl FilesPane {
                     .fg(INK)
                     .add_modifier(Modifier::BOLD)
             } else if *dir {
-                Style::default().fg(CYAN)
+                self.folder_style
             } else {
                 Style::default().fg(DIM)
             };
@@ -1720,7 +1731,7 @@ impl FilesPane {
                 Row::Entry { idx, .. } => {
                     let Some(it) = self.item(idx) else { continue };
                     if it.dir {
-                        (format!("▸ {}/", it.name), Style::default().fg(CYAN))
+                        (format!("▸ {}/", it.name), self.folder_style)
                     } else {
                         let ext = it.name.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
                         let icon = match ext {

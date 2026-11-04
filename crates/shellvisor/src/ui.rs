@@ -257,6 +257,27 @@ fn draw_all(f: &mut Frame, app: &App) {
         b.render(inner, f.buffer_mut(), &app.board_snapshot());
     }
 
+    if let Some(sc) = &app.settings {
+        let (_, content, _) = app.regions();
+        let w = content.width.min(96);
+        let h = content.height.min(30);
+        let r = Rect::new(
+            content.x + (content.width - w) / 2,
+            content.y + (content.height - h) / 2,
+            w,
+            h,
+        );
+        f.render_widget(Clear, r);
+        let block = pane_block(" ⚙ settings ".to_string(), true);
+        let inner = block.inner(r);
+        f.render_widget(block, r);
+        let folder = app
+            .focused_cwd()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| "~".into());
+        sc.render(inner, f.buffer_mut(), &sc.who, &folder);
+    }
+
     if let Some(ed) = &app.editor {
         let (_, content, _) = app.regions();
         f.render_widget(Clear, content);

@@ -794,7 +794,7 @@ fn sv_data_pipelines_in_bash() {
     std::fs::write(work.join("small.txt"), "hi").unwrap();
     std::fs::write(work.join("people.csv"), "name,age\nAda,36\nLin,29\nBo,41\n").unwrap();
     s.run("sv ls | sv where size gt 1mb | sv select name size");
-    s.wait_for("big.bin  3.0 MB");
+    s.wait_for("│ 0 │ big.bin │ 3.0 MB │");
     assert!(!s.text().contains("small.txt"), "{}", s.text());
     s.run("sv 'open people.csv | where age ge 30 | sort-by age -r | get name | to csv'");
     s.wait_for("Bo");
@@ -1234,4 +1234,77 @@ fn layout_editor_builds_saves_and_reopens_a_folder_layout() {
     // and by name from any shell
     s.send("sv layout nope\r");
     s.wait_for("no saved layout called nope");
+}
+
+#[test]
+fn settings_colour_the_prompt_folder_and_ls_prints_a_table() {
+    for shell in ["bash", "zsh"] {
+        if !have(shell) {
+            continue;
+        }
+        let dir = scratch(&format!("settings-{shell}"));
+        std::fs::write(dir.join("home/.bash_profile"), "PS1='\\u \\W > '\n").unwrap();
+        std::fs::write(
+            dir.join("home/.zshrc"),
+            "PROMPT='%n %1~ > '\nunsetopt BEEP\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("config.yaml"),
+            "start_view: full\nrestore: never\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.join("work/src")).unwrap();
+        std::fs::write(dir.join("work/README.md"), "# hi\n").unwrap();
+        let mut s = Session::launch(shell, dir.clone());
+        s.wait_for(" work > ");
+        // ls: a nushell-style table; with other flags, the real ls
+        s.send("ls\r");
+        s.wait_until("ls table", |t| {
+            t.contains("╭───┬") && t.contains("│ # │ name") && t.contains("README.md")
+        });
+        s.send("clear; ls -l\r");
+        s.wait_for("total");
+        // settings screen: colour the prompt's folder
+        s.send("\x1bs");
+        s.wait_for("Folder colour in the prompt");
+        s.send("\x1b[C"); // cyan
+        s.wait_until("preview", |t| t.contains("% ls"));
+        s.send("\x1b");
+        s.pump(Duration::from_millis(200));
+        s.send("\r");
+        s.pump(Duration::from_millis(800));
+        let saved = std::fs::read_to_string(dir.join("state/settings.yaml")).unwrap();
+        assert!(saved.contains("prompt_folder: cyan"), "{saved}");
+        // the folder name in the newest prompt is drawn in colour 37
+        let screen = s.screen.screen();
+        let (rows, cols) = screen.size();
+        let mut found = false;
+        for r in (0..rows).rev() {
+            let line: String = (0..cols)
+                .map(|c| screen.cell(r, c).map(|x| x.contents()).unwrap_or_default())
+                .collect();
+            if let Some(i) = line.find(" work > ") {
+                let col = line[..i + 1].chars().count() as u16;
+                let cell = screen.cell(r, col).unwrap();
+                found = cell.fgcolor() == vt100::Color::Idx(37);
+                break;
+            }
+        }
+        assert!(found, "{shell}: prompt folder not coloured:\n{}", s.text());
+        // turning the table off gives the plain ls back
+        let mut st = std::fs::read_to_string(dir.join("state/settings.yaml")).unwrap();
+        st = st.replace("ls_table: true", "ls_table: false");
+        std::fs::write(dir.join("state/settings.yaml"), st).unwrap();
+        std::fs::write(dir.join("state/ui.env"), "37\n0\n0\n").unwrap();
+        s.send("clear\r");
+        s.pump(Duration::from_millis(300));
+        s.send("ls\r");
+        s.pump(Duration::from_millis(500));
+        assert!(
+            !s.text().contains("╭───┬") && s.text().contains("README.md"),
+            "{shell}:\n{}",
+            s.text()
+        );
+    }
 }

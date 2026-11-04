@@ -48,9 +48,50 @@ __sv_precmd() {
 # else in PROMPT_COMMAND also trips the DEBUG trap)
 __sv_ready() {
   local ec=$?
+  __sv_style
   __sv_osc "7770;prompt"
   __sv_at_prompt=1
   return $ec
+}
+
+# ---- Shellvisor settings (settings screen / `sv settings`), read at each
+# prompt from $SHELLVISOR_UI: the folder's colour in the prompt, `ls` as a table
+__sv_palette="37 39 35 178 208 170 167 245"
+__sv_ps1_last= ; __sv_ps1_base= ; __sv_lt=1
+__sv_style() {
+  local c=- b=0 i p o e
+  if [ -r "$SHELLVISOR_UI" ]; then { read -r c; read -r b; read -r __sv_lt; } < "$SHELLVISOR_UI"; fi
+  # the prompt changed under us (a theme, conda…): that is the new base
+  [ "$PS1" != "$__sv_ps1_last" ] && __sv_ps1_base=$PS1
+  p=$__sv_ps1_base
+  for i in $__sv_palette; do
+    p=${p//"\[\e[1;38;5;${i}m\]"/}
+    p=${p//"\[\e[38;5;${i}m\]"/}
+  done
+  p=${p//'\[\e[22;39m\]'/}
+  __sv_ps1_base=$p
+  if [ "$c" != - ] && [ -n "$c" ]; then
+    o="\[\e[38;5;${c}m\]"; e='\[\e[22;39m\]'
+    [ "$b" = 1 ] && o="\[\e[1;38;5;${c}m\]"
+    p=${p//'\w'/$o'\w'$e}
+    p=${p//'\W'/$o'\W'$e}
+  fi
+  PS1=$p
+  __sv_ps1_last=$p
+}
+
+# `ls` prints a table (sv ls) at the terminal; with other flags, in a pipe,
+# or with the setting off it is the real ls
+function ls {
+  if [ "${__sv_lt:-1}" = 1 ] && [ -t 1 ] && command -v sv >/dev/null 2>&1; then
+    local a
+    for a in "$@"; do
+      case $a in -a|-A|--all|-G|-F|-h|--color|--color=*) ;; -*) command ls "$@"; return ;; esac
+    done
+    command sv ls "$@"
+    return
+  fi
+  command ls "$@"
 }
 
 if [ "${BASH_VERSINFO[0]}" -gt 5 ] || { [ "${BASH_VERSINFO[0]}" -eq 5 ] && [ "${BASH_VERSINFO[1]}" -ge 1 ]; }; then

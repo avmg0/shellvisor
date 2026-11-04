@@ -127,6 +127,17 @@ pub fn copy_to_clipboard(text: &str) -> bool {
     false
 }
 
+/// The machine's short name (as a prompt shows it), from `hostname -s`.
+pub fn hostname_short() -> String {
+    std::process::Command::new("hostname")
+        .arg("-s")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "host".into())
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
