@@ -139,6 +139,8 @@ Exit criteria: the board 16 team.yaml runs end-to-end; over-limit spawns are ref
 ---
 
 ## P6 · Polish & ship
+**P6a done:** the rest of the file views — Columns (parent folder | this folder | preview), Grid (names in cells, arrows in two directions), Size (folders and files by total size as bars, drill in and out, stops counting past 400k files and says so) and Recent (newest changed files anywhere below, from git's file list or a bounded walk). `1`–`8` / tab switch views; the view bar shortens to "view n/8" when narrow. 118 unit + 36 end-to-end tests.
+
 Deliverables
 - Remaining file views: Columns, Grid, Size map, Recent activity.
 - Layout editor (alt+e) with palette, drag-resize, save/default/per-folder layouts.

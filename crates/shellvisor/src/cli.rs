@@ -14,7 +14,7 @@ usage:
   sv on        start Shellvisor here (or show the full view if already inside)
   sv off       switch to basic view (just your shell; everything keeps running)
   sv exit      leave Shellvisor
-  sv files [tree|list|git|find]   open the files pane (in this tab)
+  sv files [tree|list|columns|grid|git|find|size|recent]   the files pane
   sv sys       open the system pane (CPU, memory, disk, network, temperatures)
   sv layout dev|monitor|files|data|agents   lay this tab out as a preset
   sv flow 'a | b | c'             run a pipeline with a meter on every stage

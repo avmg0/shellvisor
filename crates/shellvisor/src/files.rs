@@ -32,6 +32,10 @@ const INK: Color = Color::Indexed(16);
 const MAX_DIR: usize = 5000;
 /// Most files indexed for Find.
 const MAX_INDEX: usize = 20_000;
+/// Size view: stop counting after this many files (and say so).
+const MAX_SIZE_WALK: u64 = 400_000;
+/// Recent view: newest files kept.
+const MAX_RECENT: usize = 300;
 const MAX_HITS: usize = 500;
 const PREVIEW_BYTES: usize = 64 * 1024;
 pub const POLL: Duration = Duration::from_secs(3);
@@ -59,19 +63,44 @@ const SKIP_DIRS: &[&str] = &[
 pub enum View {
     Tree,
     List,
+    /// Parent folder | this folder | preview.
+    Columns,
+    /// Names in a grid, like a file manager's icon view.
+    Grid,
     Git,
     Find,
+    /// What takes the space: folders and files by size, as bars.
+    Sizes,
+    /// Files changed most recently, anywhere under the folder.
+    Recent,
 }
 
 impl View {
-    pub const ALL: [View; 4] = [View::Tree, View::List, View::Git, View::Find];
+    pub const ALL: [View; 8] = [
+        View::Tree,
+        View::List,
+        View::Columns,
+        View::Grid,
+        View::Git,
+        View::Find,
+        View::Sizes,
+        View::Recent,
+    ];
     pub fn name(self) -> &'static str {
         match self {
             View::Tree => "tree",
             View::List => "list",
+            View::Columns => "columns",
+            View::Grid => "grid",
             View::Git => "git",
             View::Find => "find",
+            View::Sizes => "size",
+            View::Recent => "recent",
         }
+    }
+    /// Shows the folder's own entries (navigable with ⏎ / ← like List).
+    fn flat(self) -> bool {
+        matches!(self, View::List | View::Columns | View::Grid)
     }
     pub fn parse(s: &str) -> Option<View> {
         View::ALL.into_iter().find(|v| v.name() == s)
@@ -98,6 +127,25 @@ pub enum Job {
         root: PathBuf,
         file: PathBuf,
     },
+    Sizes {
+        root: PathBuf,
+        hidden: bool,
+    },
+    Recent {
+        root: PathBuf,
+    },
+}
+
+/// Recent view: (path relative to the folder, changed, bytes).
+pub type RecentFile = (String, SystemTime, u64);
+
+/// One entry of the size view.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Sized {
+    pub name: String,
+    pub dir: bool,
+    pub bytes: u64,
+    pub files: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +168,16 @@ pub enum Done {
     Diff {
         file: PathBuf,
         text: String,
+    },
+    Sizes {
+        root: PathBuf,
+        entries: Vec<Sized>,
+        /// Stopped counting early (huge folder).
+        partial: bool,
+    },
+    Recent {
+        root: PathBuf,
+        files: Vec<(String, SystemTime, u64)>,
     },
 }
 
@@ -184,6 +242,8 @@ enum Row {
     Change(PathBuf, GitMark),
     Name(usize),
     Hit(usize),
+    Size(usize),
+    Recent(usize),
     Note(String),
 }
 
@@ -245,6 +305,12 @@ pub struct FilesPane {
     /// Files coding agents changed: path → (agent name, colour).
     pub agent_marks: HashMap<PathBuf, (String, u8)>,
     last_poll: Instant,
+    /// Size view: (folder, entries, partial) — None while counting.
+    sizes: Option<(PathBuf, Vec<Sized>, bool)>,
+    /// Recent view: (folder, files newest first) — None while looking.
+    recent: Option<(PathBuf, Vec<RecentFile>)>,
+    /// Grid: cells per row at the last draw.
+    grid_cols: Cell<usize>,
 }
 
 impl FilesPane {
@@ -271,6 +337,9 @@ impl FilesPane {
             prev: None,
             agent_marks: HashMap::new(),
             last_poll: Instant::now(),
+            sizes: None,
+            recent: None,
+            grid_cols: Cell::new(1),
         };
         let jobs = p.set_root(root);
         (p, jobs)
@@ -295,8 +364,29 @@ impl FilesPane {
             self.find = Find::default();
             jobs.extend(self.ensure_index());
         }
+        jobs.extend(self.view_job());
         self.rebuild();
         jobs
+    }
+
+    /// The background work the size and recent views need for this folder.
+    fn view_job(&mut self) -> Option<Job> {
+        match self.view {
+            View::Sizes if self.sizes.as_ref().is_none_or(|(r, _, _)| *r != self.root) => {
+                self.sizes = None;
+                Some(Job::Sizes {
+                    root: self.root.clone(),
+                    hidden: self.hidden,
+                })
+            }
+            View::Recent if self.recent.as_ref().is_none_or(|(r, _)| *r != self.root) => {
+                self.recent = None;
+                Some(Job::Recent {
+                    root: self.root.clone(),
+                })
+            }
+            _ => None,
+        }
     }
 
     fn git_job(&mut self) -> Job {
@@ -309,8 +399,12 @@ impl FilesPane {
     /// Re-read changed folders and ask for a fresh git status.
     pub fn refresh(&mut self) -> Vec<Job> {
         self.reload_changed(true);
+        self.sizes = None;
+        self.recent = None;
+        let mut jobs = vec![self.git_job()];
+        jobs.extend(self.view_job());
         self.rebuild();
-        vec![self.git_job()]
+        jobs
     }
 
     /// Cheap check while visible: re-read folders whose mtime changed.
@@ -407,8 +501,8 @@ impl FilesPane {
                     }));
                 }
             }
-            View::List => {
-                if self.root.parent().is_some() {
+            View::List | View::Columns | View::Grid => {
+                if self.root.parent().is_some() && self.view != View::Grid {
                     rows.push(Row::Up);
                 }
                 if let Some(c) = self.cache.get(&self.root) {
@@ -441,6 +535,35 @@ impl FilesPane {
                     }
                 }
                 None => rows.push(Row::Note("not a git repository".into())),
+            },
+            View::Sizes => match &self.sizes {
+                Some((r, e, _)) if *r == self.root => {
+                    if self.root.parent().is_some() {
+                        rows.push(Row::Up);
+                    }
+                    for (i, it) in e.iter().enumerate() {
+                        if self.filter.is_empty() || matches(&self.filter, &it.name) {
+                            rows.push(Row::Size(i));
+                        }
+                    }
+                    if e.is_empty() {
+                        rows.push(Row::Note("empty folder".into()));
+                    }
+                }
+                _ => rows.push(Row::Note("counting sizes…".into())),
+            },
+            View::Recent => match &self.recent {
+                Some((r, f)) if *r == self.root => {
+                    for (i, (p, _, _)) in f.iter().enumerate() {
+                        if self.filter.is_empty() || matches(&self.filter, p) {
+                            rows.push(Row::Recent(i));
+                        }
+                    }
+                    if rows.is_empty() {
+                        rows.push(Row::Note("no files".into()));
+                    }
+                }
+                _ => rows.push(Row::Note("looking for recent changes…".into())),
             },
             View::Find => {
                 let f = &self.find;
@@ -512,6 +635,15 @@ impl FilesPane {
                 let h = self.find.hits.get(*i)?;
                 Some((self.root.join(&h.path), false, Some(h.line)))
             }
+            Row::Size(i) => {
+                let (_, e, _) = self.sizes.as_ref()?;
+                let it = e.get(*i)?;
+                Some((self.root.join(&it.name), it.dir, None))
+            }
+            Row::Recent(i) => {
+                let (_, f) = self.recent.as_ref()?;
+                Some((self.root.join(&f.get(*i)?.0), false, None))
+            }
             Row::More(..) | Row::Note(_) => None,
         }
     }
@@ -554,6 +686,22 @@ impl FilesPane {
                 self.find.searching = false;
                 self.find.truncated = truncated;
                 self.sel = 0;
+            }
+            Done::Sizes {
+                root,
+                entries,
+                partial,
+            } => {
+                if root != self.root {
+                    return Outcome::default();
+                }
+                self.sizes = Some((root, entries, partial));
+            }
+            Done::Recent { root, files } => {
+                if root != self.root {
+                    return Outcome::default();
+                }
+                self.recent = Some((root, files));
             }
             Done::Diff { file, text } => {
                 if self.prev.as_ref().map(|p| &p.path) == Some(&file) {
@@ -675,7 +823,8 @@ impl FilesPane {
                 jobs.extend(self.ensure_index());
             }
             View::Git => jobs.push(self.git_job()),
-            View::List | View::Tree => {}
+            View::Sizes | View::Recent => jobs.extend(self.view_job()),
+            _ => {}
         }
         self.rebuild();
         jobs
@@ -687,6 +836,22 @@ impl FilesPane {
         }
         let mut out = Outcome::redraw();
         let n = self.rows.len();
+        if self.view == View::Grid {
+            // arrows move in two dimensions; ⌫ goes up a folder
+            let cols = self.grid_cols.get().max(1);
+            let moved = match key {
+                b"\x1b[A" | b"\x1bOA" | b"k" => Some(self.sel.saturating_sub(cols)),
+                b"\x1b[B" | b"\x1bOB" | b"j" => Some((self.sel + cols).min(n.saturating_sub(1))),
+                b"\x1b[D" | b"\x1bOD" | b"h" => Some(self.sel.saturating_sub(1)),
+                b"\x1b[C" | b"\x1bOC" | b"l" => Some((self.sel + 1).min(n.saturating_sub(1))),
+                _ => None,
+            };
+            if let Some(s) = moved {
+                self.sel = s;
+                out.jobs.extend(self.update_preview());
+                return out;
+            }
+        }
         match key {
             b"\x1b[A" | b"\x1bOA" | b"k" => self.sel = self.sel.saturating_sub(1),
             b"\x1b[B" | b"\x1bOB" | b"j" => self.sel = (self.sel + 1).min(n.saturating_sub(1)),
@@ -723,14 +888,16 @@ impl FilesPane {
                 }
             }
             b"\t" => {
+                let n = View::ALL.len();
                 let i = View::ALL.iter().position(|v| *v == self.view).unwrap_or(0);
-                out.jobs = self.set_view(View::ALL[(i + 1) % 4]);
+                out.jobs = self.set_view(View::ALL[(i + 1) % n]);
             }
             b"\x1b[Z" => {
+                let n = View::ALL.len();
                 let i = View::ALL.iter().position(|v| *v == self.view).unwrap_or(0);
-                out.jobs = self.set_view(View::ALL[(i + 3) % 4]);
+                out.jobs = self.set_view(View::ALL[(i + n - 1) % n]);
             }
-            [d @ b'1'..=b'4'] => out.jobs = self.set_view(View::ALL[(d - b'1') as usize]),
+            [d @ b'1'..=b'8'] => out.jobs = self.set_view(View::ALL[(d - b'1') as usize]),
             b"t" => out.jobs = self.set_view(View::Tree),
             b"s" => out.jobs = self.set_view(View::Git),
             b"p" | b" " => {
@@ -861,8 +1028,8 @@ impl FilesPane {
         if dir {
             match self.view {
                 View::Tree => self.toggle(&p),
-                _ => {
-                    if self.view != View::List {
+                v => {
+                    if !v.flat() && v != View::Sizes {
                         out.jobs.extend(self.set_view(View::List));
                     }
                     out.jobs.extend(self.set_root(p));
@@ -899,7 +1066,7 @@ impl FilesPane {
     fn left(&mut self) -> Outcome {
         let out = Outcome::redraw();
         if self.view != View::Tree {
-            return if self.view == View::List {
+            return if self.view.flat() || self.view == View::Sizes {
                 self.up()
             } else {
                 out
@@ -1088,7 +1255,12 @@ impl FilesPane {
         let dim = Style::default().fg(DIM);
         // row 0: view switcher + flags
         let mut x = area.x + 1;
+        let full: usize = View::ALL.iter().map(|v| v.name().len() + 3).sum();
+        let fits = full + 12 <= area.width as usize;
         for v in View::ALL {
+            if !fits && v != self.view {
+                continue;
+            }
             let st = if v == self.view {
                 Style::default()
                     .bg(if focused { AMBER } else { FAINT })
@@ -1106,7 +1278,28 @@ impl FilesPane {
             );
             x = nx + 1;
         }
+        if !fits {
+            let i = View::ALL.iter().position(|v| *v == self.view).unwrap_or(0) + 1;
+            let (nx, _) = buf.set_stringn(
+                x,
+                area.y,
+                format!("{i}/{} tab", View::ALL.len()),
+                area.right().saturating_sub(x) as usize,
+                dim,
+            );
+            x = nx + 1;
+        }
         let mut flags = String::new();
+        if let (View::Sizes, Some((r, e, partial))) = (self.view, &self.sizes) {
+            if *r == self.root {
+                let total: u64 = e.iter().map(|x| x.bytes).sum();
+                flags.push_str(&format!(
+                    " {}{}",
+                    crate::sysmon::human(total),
+                    if *partial { "+ (stopped counting)" } else { "" }
+                ));
+            }
+        }
         if self.hidden {
             flags.push_str(" .hidden");
         }
@@ -1194,7 +1387,23 @@ impl FilesPane {
                 buf,
             );
         } else {
-            self.render_rows(body, buf, focused);
+            match self.view {
+                View::Grid => self.render_grid(body, buf, focused),
+                View::Columns if list_w >= 40 => {
+                    // parent folder on the left, this one (selected inside) on the right
+                    let pw = list_w * 2 / 5;
+                    self.render_parent(Rect::new(body.x, body.y, pw, body.height), buf);
+                    for yy in 0..body.height {
+                        buf.set_string(body.x + pw, body.y + yy, "│", Style::default().fg(FAINT));
+                    }
+                    self.render_rows(
+                        Rect::new(body.x + pw + 1, body.y, list_w - pw - 1, body.height),
+                        buf,
+                        focused,
+                    );
+                }
+                _ => self.render_rows(body, buf, focused),
+            }
             if split {
                 let px = area.x + list_w;
                 for yy in 0..body_h as u16 {
@@ -1217,6 +1426,11 @@ impl FilesPane {
         } else {
             match self.view {
                 View::Find => "/ edit · ⏎ open · i insert · p preview · esc back",
+                View::Grid => "←↑↓→ move · ⏎ open · ⌫ up · i insert · p preview · tab view",
+                View::Sizes => "⏎ into folder · ⌫ up · r recount · i insert · / filter · tab view",
+                View::Recent => {
+                    "newest first · ⏎ edit · i insert · p preview · r refresh · tab view"
+                }
                 _ => {
                     "⏎ open · i insert · c cd · e edit · p preview · / filter · . hidden · tab view"
                 }
@@ -1343,6 +1557,55 @@ impl FilesPane {
                         .unwrap_or_default();
                     (format!("  {p}"), base, None)
                 }
+                Row::Size(i) => {
+                    let Some((_, e, _)) = &self.sizes else {
+                        continue;
+                    };
+                    let Some(it) = e.get(*i) else { continue };
+                    let total: u64 = e.iter().map(|x| x.bytes).sum::<u64>().max(1);
+                    let biggest = e.first().map(|x| x.bytes).unwrap_or(1).max(1);
+                    let size = crate::sysmon::human(it.bytes);
+                    let pct = it.bytes * 100 / total;
+                    let bar_w = (w / 3).clamp(4, 24);
+                    let filled =
+                        ((it.bytes as f64 / biggest as f64) * bar_w as f64).round() as usize;
+                    let bar = format!(
+                        "{}{}",
+                        "█".repeat(filled),
+                        "░".repeat(bar_w - filled.min(bar_w))
+                    );
+                    let name = if it.dir {
+                        format!("▸ {}/", it.name)
+                    } else {
+                        format!("  {}", it.name)
+                    };
+                    let col = if pct >= 25 {
+                        AMBER
+                    } else if it.dir {
+                        CYAN
+                    } else {
+                        DIM
+                    };
+                    (
+                        name,
+                        if it.dir { base.fg(CYAN) } else { base },
+                        Some((format!("{bar} {size:>6} {pct:>3}% "), base.fg(col))),
+                    )
+                }
+                Row::Recent(i) => {
+                    let Some((_, f)) = &self.recent else { continue };
+                    let Some((p, t, size)) = f.get(*i) else {
+                        continue;
+                    };
+                    let right = if w > 40 {
+                        format!("{} {:>5} ", crate::sysmon::human(*size), ago(Some(*t)))
+                    } else {
+                        format!("{:>5} ", ago(Some(*t)))
+                    };
+                    let mark = git.and_then(|g| g.mark(&self.root.join(p)));
+                    let col = mark.map(mark_color).unwrap_or(FAINT);
+                    (format!("  {p}"), base, Some((right, base.fg(col))))
+                }
                 Row::Hit(i) => {
                     let Some(h) = self.find.hits.get(*i) else {
                         continue;
@@ -1361,6 +1624,134 @@ impl FilesPane {
                     buf.set_stringn(area.x + (w - right_w) as u16, y, r, right_w, rs);
                 }
             }
+        }
+    }
+
+    /// Columns view: the parent folder, with this folder highlighted.
+    fn render_parent(&self, area: Rect, buf: &mut Buffer) {
+        let Some(parent) = self.root.parent() else {
+            buf.set_stringn(
+                area.x + 1,
+                area.y,
+                "/",
+                area.width as usize,
+                Style::default().fg(FAINT),
+            );
+            return;
+        };
+        let names: Vec<(String, bool)> = match std::fs::read_dir(parent) {
+            Ok(rd) => {
+                let mut v: Vec<(String, bool)> = rd
+                    .flatten()
+                    .map(|e| {
+                        let dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                        (e.file_name().to_string_lossy().into_owned(), dir)
+                    })
+                    .filter(|(n, _)| self.hidden || !n.starts_with('.'))
+                    .take(MAX_DIR)
+                    .collect();
+                v.sort_by(|a, b| {
+                    b.1.cmp(&a.1)
+                        .then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase()))
+                });
+                v
+            }
+            Err(_) => Vec::new(),
+        };
+        let me = self
+            .root
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let h = area.height as usize;
+        let at = names.iter().position(|(n, _)| *n == me).unwrap_or(0);
+        let top = at.saturating_sub(h / 2).min(names.len().saturating_sub(h));
+        for (k, (n, dir)) in names.iter().enumerate().skip(top).take(h) {
+            let y = area.y + (k - top) as u16;
+            let here = *n == me;
+            let st = if here {
+                Style::default()
+                    .bg(FAINT)
+                    .fg(INK)
+                    .add_modifier(Modifier::BOLD)
+            } else if *dir {
+                Style::default().fg(CYAN)
+            } else {
+                Style::default().fg(DIM)
+            };
+            let text = format!(" {}{}", n, if *dir { "/" } else { "" });
+            if here {
+                buf.set_style(Rect::new(area.x, y, area.width, 1), st);
+            }
+            buf.set_stringn(
+                area.x,
+                y,
+                truncate(&text, area.width as usize),
+                area.width as usize,
+                st,
+            );
+        }
+    }
+
+    /// Grid view: names in cells, filled row by row.
+    fn render_grid(&self, area: Rect, buf: &mut Buffer, focused: bool) {
+        let cell = 20u16.min(area.width.max(1));
+        let cols = (area.width / cell).max(1) as usize;
+        self.grid_cols.set(cols);
+        let h = area.height as usize;
+        if h == 0 {
+            return;
+        }
+        let rows_needed = self.rows.len().div_ceil(cols);
+        let sel_row = self.sel / cols;
+        let mut top = self.scroll.get();
+        if sel_row < top {
+            top = sel_row;
+        } else if sel_row >= top + h {
+            top = sel_row + 1 - h;
+        }
+        top = top.min(rows_needed.saturating_sub(h));
+        self.scroll.set(top);
+        self.page.set((h * cols).max(1));
+        for (i, row) in self.rows.iter().enumerate().skip(top * cols).take(h * cols) {
+            let gy = area.y + (i / cols - top) as u16;
+            let gx = area.x + (i % cols) as u16 * cell;
+            let (label, st) = match row {
+                Row::Entry { idx, .. } => {
+                    let Some(it) = self.item(idx) else { continue };
+                    if it.dir {
+                        (format!("▸ {}/", it.name), Style::default().fg(CYAN))
+                    } else {
+                        let ext = it.name.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+                        let icon = match ext {
+                            "rs" | "py" | "js" | "ts" | "go" | "c" | "h" | "rb" | "sh"
+                            | "swift" => "λ",
+                            "md" | "txt" | "rst" => "¶",
+                            "json" | "yaml" | "yml" | "toml" | "csv" => "≡",
+                            "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" => "◩",
+                            _ => "·",
+                        };
+                        (format!("{icon} {}", it.name), Style::default())
+                    }
+                }
+                Row::More(n, _) => (format!("… {n} more"), Style::default().fg(FAINT)),
+                Row::Note(t) => (t.clone(), Style::default().fg(DIM)),
+                _ => continue,
+            };
+            let st = if i == self.sel {
+                st.bg(SEL_BG).add_modifier(if focused {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                })
+            } else {
+                st
+            };
+            let w = (cell - 1) as usize;
+            if i == self.sel {
+                buf.set_style(Rect::new(gx, gy, cell - 1, 1), st);
+            }
+            buf.set_stringn(gx, gy, truncate(&label, w), w, st);
         }
     }
 
@@ -1573,6 +1964,18 @@ pub fn run_job(job: Job) -> Done {
                 truncated,
             }
         }
+        Job::Sizes { root, hidden } => {
+            let (entries, partial) = sizes(&root, hidden);
+            Done::Sizes {
+                root,
+                entries,
+                partial,
+            }
+        }
+        Job::Recent { root } => {
+            let files = recent(&root, MAX_RECENT);
+            Done::Recent { root, files }
+        }
         Job::Diff { root, file } => {
             let out = std::process::Command::new("git")
                 .arg("-C")
@@ -1596,6 +1999,76 @@ pub fn run_job(job: Job) -> Done {
             Done::Diff { file, text }
         }
     }
+}
+
+/// The folder's entries with their total size (folders counted all the way
+/// down, without following links), biggest first.
+pub fn sizes(root: &Path, hidden: bool) -> (Vec<Sized>, bool) {
+    fn walk(dir: &Path, budget: &mut u64) -> (u64, u64) {
+        let (mut bytes, mut files) = (0, 0);
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return (0, 0);
+        };
+        for e in rd.flatten() {
+            if *budget == 0 {
+                break;
+            }
+            *budget -= 1;
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_dir() {
+                let (b, f) = walk(&e.path(), budget);
+                bytes += b;
+                files += f;
+            } else if ft.is_file() {
+                bytes += e.metadata().map(|m| m.len()).unwrap_or(0);
+                files += 1;
+            }
+        }
+        (bytes, files)
+    }
+    let mut budget = MAX_SIZE_WALK;
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(root) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if !hidden && name.starts_with('.') {
+                continue;
+            }
+            let Ok(ft) = e.file_type() else { continue };
+            let (bytes, files, dir) = if ft.is_dir() {
+                let (b, f) = walk(&e.path(), &mut budget);
+                (b, f, true)
+            } else if ft.is_file() {
+                (e.metadata().map(|m| m.len()).unwrap_or(0), 1, false)
+            } else {
+                continue;
+            };
+            out.push(Sized {
+                name,
+                dir,
+                bytes,
+                files,
+            });
+        }
+    }
+    out.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.name.cmp(&b.name)));
+    (out, budget == 0)
+}
+
+/// The most recently changed files under `root` (same list as Find: git's
+/// files, or a walk that skips heavy folders), newest first.
+pub fn recent(root: &Path, keep: usize) -> Vec<(String, SystemTime, u64)> {
+    let (files, _) = index(root, MAX_INDEX);
+    let mut out: Vec<(String, SystemTime, u64)> = files
+        .into_iter()
+        .filter_map(|rel| {
+            let m = std::fs::metadata(root.join(&rel)).ok()?;
+            Some((rel, m.modified().ok()?, m.len()))
+        })
+        .collect();
+    out.sort_by_key(|f| std::cmp::Reverse(f.1));
+    out.truncate(keep);
+    out
 }
 
 /// Files under `root` (relative paths): git's list if it's a repo (respects
@@ -1804,6 +2277,87 @@ mod tests {
         assert_eq!(out.acts, vec![Act::Edit(d.join("README.md"), None)]);
         p.key(b"\x1b"); // clear filter
         assert!(screen(&p).contains("docs/"));
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// Run the pane's background jobs right here.
+    fn settle(p: &mut FilesPane, jobs: Vec<Job>) {
+        for j in jobs {
+            let more = p.done(run_job(j)).jobs;
+            settle(p, more);
+        }
+    }
+
+    #[test]
+    fn columns_grid_sizes_and_recent_views() {
+        let d = tmp("views");
+        std::fs::write(d.join("docs/big.bin"), vec![0u8; 50_000]).unwrap();
+        let (mut p, jobs) = FilesPane::new(d.clone());
+        settle(&mut p, jobs);
+        // columns: the parent folder on the left, this one on the right
+        let out = p.key(b"3");
+        settle(&mut p, out.jobs);
+        assert_eq!(p.view, View::Columns);
+        let me = d.file_name().unwrap().to_string_lossy().to_string();
+        let s = screen(&p);
+        assert!(
+            s.contains(&me[..12]) && s.contains("│") && s.contains("README.md"),
+            "{s}"
+        );
+        // grid: arrows move across, ⏎ opens a folder
+        let out = p.key(b"4");
+        settle(&mut p, out.jobs);
+        assert_eq!(p.view, View::Grid);
+        let s = screen(&p);
+        assert!(
+            s.contains("▸ docs/") && s.contains("▸ src/") && s.contains("¶ README.md"),
+            "{s}"
+        );
+        assert_eq!(
+            s.lines()
+                .filter(|l| l.contains("docs/") && l.contains("src/"))
+                .count(),
+            1,
+            "same row: {s}"
+        );
+        p.key(b"\x1b[C"); // → src
+        let out = p.key(b"\r");
+        settle(&mut p, out.jobs);
+        assert_eq!(p.root, d.join("src"));
+        assert_eq!(p.view, View::Grid);
+        p.key(b"\x7f");
+        // sizes: biggest first, as bars
+        let out = p.key(b"7");
+        settle(&mut p, out.jobs);
+        assert_eq!(p.view, View::Sizes);
+        let s = screen(&p);
+        let docs = s.lines().position(|l| l.contains("docs/")).unwrap();
+        let src = s.lines().position(|l| l.contains("src/")).unwrap();
+        assert!(docs < src, "biggest first: {s}");
+        assert!(s.contains('█') && s.contains('%'), "{s}");
+        // into a folder and back
+        p.sel = p
+            .rows
+            .iter()
+            .position(|r| matches!(r, Row::Size(_)))
+            .unwrap();
+        let out = p.key(b"\r");
+        settle(&mut p, out.jobs);
+        assert_eq!(p.root, d.join("docs"));
+        assert!(screen(&p).contains("big.bin"));
+        let out = p.key(b"\x7f");
+        settle(&mut p, out.jobs);
+        // recent: newest first, anywhere below
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(d.join("src/core/new.py"), "x = 1\n").unwrap();
+        let out = p.key(b"8");
+        settle(&mut p, out.jobs);
+        let s = screen(&p);
+        let first = s
+            .lines()
+            .find(|l| l.contains(".py") || l.contains(".rs") || l.contains(".md"))
+            .unwrap_or("");
+        assert!(first.contains("src/core/new.py"), "{s}");
         let _ = std::fs::remove_dir_all(d);
     }
 

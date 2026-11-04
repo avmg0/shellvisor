@@ -3770,7 +3770,7 @@ impl App {
                         self.run_jobs(id, jobs);
                     }
                     _ => self.notice(format!(
-                        "sv files: unknown view `{view}` (tree, list, git, find)"
+                        "sv files: unknown view `{view}` (tree, list, columns, grid, git, find, size, recent)"
                     )),
                 }
                 Ok(())

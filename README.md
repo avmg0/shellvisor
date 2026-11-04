@@ -5,7 +5,7 @@
 Shellvisor is a full-screen terminal app (like `tmux`, `htop` or `vim`) that runs your own zsh or bash in tabs and splits, and — as it grows — adds panes for files, live system stats, a data-flow view of your pipelines, and coding agents working side by side. Every command, alias and full-screen program you use today keeps working unchanged.
 
 > **Status: early development (P0–P4 of 7 done).**
-> Working today: tabs and splits of real zsh/bash shells, a tab bar that shows what each tab is doing (running ⠋, downloading ◐, failed ✖, new output •), a status bar, split layouts, your tabs restored after a restart, custom keys, and a one-key switch to *basic view*, which looks exactly like a plain terminal. Plus a **files pane** (tree, list, git changes, find, preview) that follows your shell, a **system pane** (CPU, memory, disk, network, I/O, temperatures, processes), download/install progress for git, npm, pip, uv, brew, docker, cargo, curl and friends, **`sv` data commands** (nushell-style tables in bash/zsh) with an interactive table viewer, a **Flow pane** that shows the running job and meters pipelines stage by stage, and **coding agents side by side** (Claude Code, Codex, Gemini CLI, Aider or any command), each in its own git worktree, with one place to answer their approval prompts. Teams of agents and sub-agents arrive in P5. See [docs/ROADMAP.md](docs/ROADMAP.md).
+> Working today: tabs and splits of real zsh/bash shells, a tab bar that shows what each tab is doing (running ⠋, downloading ◐, failed ✖, new output •), a status bar, split layouts, your tabs restored after a restart, custom keys, and a one-key switch to *basic view*, which looks exactly like a plain terminal. Plus a **files pane** (tree, list, columns, grid, git changes, find, sizes, recent, preview) that follows your shell, a **system pane** (CPU, memory, disk, network, I/O, temperatures, processes), download/install progress for git, npm, pip, uv, brew, docker, cargo, curl and friends, **`sv` data commands** (nushell-style tables in bash/zsh) with an interactive table viewer, a **Flow pane** that shows the running job and meters pipelines stage by stage, and **coding agents side by side** (Claude Code, Codex, Gemini CLI, Aider or any command), each in its own git worktree, with one place to answer their approval prompts. Agents can start sub-agents, run as a team from `team.yaml`, or be planned from a goal on the agent board (`alt+g`). See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Why
 
@@ -64,7 +64,7 @@ shellvisor --shell bash    # or pick: zsh, bash, or a full path
 
 ### Files pane
 
-Four views — `1` tree · `2` list · `3` git changes · `4` find (`tab` cycles). It follows the folder your shell is in, and refreshes after every command.
+Eight views — `1` tree · `2` list · `3` columns (parent | folder | preview) · `4` grid · `5` git changes · `6` find · `7` size (what takes the space, as bars) · `8` recent (newest changed files anywhere below); `tab` cycles. It follows the folder your shell is in, and refreshes after every command.
 
 | Key | |
 |---|---|
