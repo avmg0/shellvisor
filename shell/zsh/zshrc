@@ -8,15 +8,15 @@ __sv_osc() { printf '\e]%s\a' "$1" }
 __sv_running=0
 __sv_precmd() {
   local ec=$?
-  (( __sv_running )) && __sv_osc "133;D;$ec"
+  (( __sv_running )) && __sv_osc "7770;end;$ec"
   __sv_running=0
   __sv_osc "7;file://${HOST}${PWD}"
-  __sv_osc "133;A"
+  __sv_osc "7770;prompt"
 }
 __sv_preexec() {
   __sv_running=1
   __sv_osc "7770;cmd;$(print -rn -- "$1" | base64 | tr -d '\n')"
-  __sv_osc "133;C"
+  __sv_osc "7770;start"
 }
 add-zsh-hook precmd __sv_precmd
 add-zsh-hook preexec __sv_preexec

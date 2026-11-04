@@ -158,9 +158,11 @@ Release profile: `opt-level = "z"` or `"s"` (measure), `lto = true`, `codegen-un
 | Sequence | Sender | Meaning |
 |---|---|---|
 | `OSC 7 ; file://host/path` | shell hook | current folder |
-| `OSC 133 ; A` | shell hook | prompt shown |
-| `OSC 133 ; C` | shell hook | command started |
-| `OSC 133 ; D ; <exit>` | shell hook | command finished + exit code |
+| `OSC 7770 ; prompt` | shell hook | prompt shown |
+| `OSC 7770 ; start` | shell hook | command started |
+| `OSC 7770 ; end ; <exit>` | shell hook | command finished + exit code |
+
+The common `OSC 133` marks are deliberately ignored: VTE's `vte.sh` (sourced by Ubuntu's `/etc/bash.bashrc`), kitty, iTerm2 and prompt frameworks print them too, and mixing them with ours made Shellvisor think commands were still running. In bash, `__sv_precmd` runs first and `__sv_ready` last in `PROMPT_COMMAND` (as array entries on bash 5.1+), so other `PROMPT_COMMAND` entries can't trip the DEBUG trap as a "command".
 | `OSC 7770 ; cmd ; <base64>` | shell hook | command text |
 | `OSC 7770 ; mode ; on\|off\|exit` | `sv on/off/exit` | switch view (planned) |
 | `OSC 7770 ; table ; <id>` | `sv` data cmds | "render this table inline" marker (planned) |

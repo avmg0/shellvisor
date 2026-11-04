@@ -39,6 +39,9 @@ jobs:
             echo "::error title=cargo test failed::$(awk '{gsub(/%/,"%25"); gsub(/\r/,""); printf "%s%%0A", $0}' fail.txt)"
             exit 1
           fi
+      - name: Shell diagnostics (only when tests failed)
+        if: failure()
+        run: python3 scripts/ci-shell-trace.py
       - run: cargo build --release
       - name: Performance budget
         run: cargo run --release --example bench -- --check

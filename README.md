@@ -236,7 +236,7 @@ Shellvisor adds small hooks to your shell *without editing your dotfiles*:
 - **bash** starts with `--rcfile`, which runs your normal login files, then adds a `PROMPT_COMMAND` and a `DEBUG` trap. Works with macOS's bash 3.2 and newer bash. *Note: this replaces an existing `DEBUG` trap.*
 - Other shells run fine, just without the hooks.
 
-The hooks print invisible escape sequences (`OSC 7`, `OSC 133`, `OSC 7770`) that Shellvisor reads and removes. Command history with exit codes and durations is kept in `~/.local/state/shellvisor/history.jsonl`.
+The hooks print invisible escape sequences (`OSC 7` for the folder, Shellvisor's own `OSC 7770` for the rest) that Shellvisor reads and removes. Command history with exit codes and durations is kept in `~/.local/state/shellvisor/history.jsonl`.
 
 ## Development
 

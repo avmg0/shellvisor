@@ -117,18 +117,18 @@ pub fn parse_osc(params: &[&[u8]]) -> Option<ShellEvent> {
             let url = rest.join(&b';');
             Some(ShellEvent::Cwd(path_from_file_url(&url)?))
         }
-        [b"133", kind, rest @ ..] => match *kind {
-            b"A" => Some(ShellEvent::PromptShown),
-            b"C" => Some(ShellEvent::CommandStarted),
-            b"D" => {
-                let code = rest
-                    .first()
-                    .and_then(|c| std::str::from_utf8(c).ok())
-                    .and_then(|c| c.parse::<i32>().ok());
-                Some(ShellEvent::CommandFinished(code))
-            }
-            _ => None,
-        },
+        // Our hooks' own start / end / prompt marks. The common OSC 133 is
+        // ignored on purpose: other integrations print it too (VTE's
+        // vte.sh, kitty, iTerm2, prompt frameworks) and would confuse us.
+        [id, b"start"] if *id == OSC_SHELLVISOR => Some(ShellEvent::CommandStarted),
+        [id, b"prompt"] if *id == OSC_SHELLVISOR => Some(ShellEvent::PromptShown),
+        [id, b"end", rest @ ..] if *id == OSC_SHELLVISOR => {
+            let code = rest
+                .first()
+                .and_then(|c| std::str::from_utf8(c).ok())
+                .and_then(|c| c.parse::<i32>().ok());
+            Some(ShellEvent::CommandFinished(code))
+        }
         [id, b"cmd", data] if *id == OSC_SHELLVISOR => {
             let raw = base64::engine::general_purpose::STANDARD
                 .decode(data)
@@ -213,16 +213,26 @@ mod tests {
 
     #[test]
     fn command_lifecycle() {
-        assert_eq!(parse_osc(&split("133;A")), Some(ShellEvent::PromptShown));
-        assert_eq!(parse_osc(&split("133;C")), Some(ShellEvent::CommandStarted));
         assert_eq!(
-            parse_osc(&split("133;D;1")),
+            parse_osc(&split("7770;prompt")),
+            Some(ShellEvent::PromptShown)
+        );
+        assert_eq!(
+            parse_osc(&split("7770;start")),
+            Some(ShellEvent::CommandStarted)
+        );
+        assert_eq!(
+            parse_osc(&split("7770;end;1")),
             Some(ShellEvent::CommandFinished(Some(1)))
         );
         assert_eq!(
-            parse_osc(&split("133;D")),
+            parse_osc(&split("7770;end")),
             Some(ShellEvent::CommandFinished(None))
         );
+        // other integrations' OSC 133 (VTE, kitty, iTerm2) is not ours
+        for foreign in ["133;A", "133;C", "133;D;0"] {
+            assert_eq!(parse_osc(&split(foreign)), None, "{foreign}");
+        }
         // "ls | wc -l" in base64
         assert_eq!(
             parse_osc(&split("7770;cmd;bHMgfCB3YyAtbA==")),

@@ -36,6 +36,9 @@ fn scratch(tag: &str) -> PathBuf {
     // Predictable prompts, while still going through the user-dotfile path.
     std::fs::write(d.join("home/.bash_profile"), "PS1='PROMPT> '\n").unwrap();
     std::fs::write(d.join("home/.zshrc"), "PROMPT='PROMPT> '\nunsetopt BEEP\n").unwrap();
+    // Debian/Ubuntu's /etc/zsh/zshrc runs compinit, which stops to ask about
+    // "insecure directories" on CI runners
+    std::fs::write(d.join("home/.zshenv"), "skip_global_compinit=1\n").unwrap();
     d
 }
 

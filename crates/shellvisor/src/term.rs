@@ -219,6 +219,18 @@ impl Pane {
         }
         cmd.env_remove("COLUMNS");
         cmd.env_remove("LINES");
+        // Shellvisor is the terminal now: the outer terminal's markers would
+        // make shell scripts (e.g. Ubuntu's vte.sh) think they run inside it
+        for k in [
+            "VTE_VERSION",
+            "ITERM_SESSION_ID",
+            "KITTY_WINDOW_ID",
+            "KITTY_PID",
+            "WEZTERM_PANE",
+            "TERM_SESSION_ID",
+        ] {
+            cmd.env_remove(k);
+        }
         for (k, v) in launch.env.iter().chain(extra_env) {
             cmd.env(k, v);
         }
@@ -430,7 +442,7 @@ mod tests {
     #[test]
     fn shellvisor_osc_becomes_event_and_is_not_drawn() {
         let mut p = parser();
-        p.process(b"hi\x1b]7;file://h/tmp\x07\x1b]133;D;2\x1b\\there");
+        p.process(b"hi\x1b]7;file://h/tmp\x07\x1b]7770;end;2\x1b\\there\x1b]133;C\x07");
         let fx = std::mem::take(&mut p.callbacks_mut().fx);
         assert_eq!(
             fx.events,
