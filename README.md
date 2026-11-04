@@ -13,21 +13,21 @@ Shellvisor is a full-screen terminal app (like `tmux`, `htop` or `vim`) that run
 - **Nothing to relearn.** Your `.zshrc` / `.bash_profile` load as usual; vim, less, fzf, ssh and git all behave as before.
 - **Off is one command away.** `sv off` hides the panels, `sv exit` leaves completely.
 
-## Install (from source)
+## Install
 
-Requires Rust 1.85+.
-
-```sh
-git clone https://github.com/avmg0/shellvisor
-cd shellvisor
-cargo install --path crates/shellvisor
-```
-
-This installs a single `shellvisor` binary. Inside Shellvisor, `sv` is available automatically. To use `sv on` from a plain terminal, link it once:
+macOS or Linux, with zsh or bash.
 
 ```sh
-ln -s "$(command -v shellvisor)" ~/.cargo/bin/sv
+brew install avmg0/tap/shellvisor                     # Homebrew (macOS, Linux)
+curl -fsSL https://raw.githubusercontent.com/avmg0/shellvisor/main/scripts/install.sh | sh   # or: prebuilt binary into ~/.local/bin, checksum-verified
+cargo install --git https://github.com/avmg0/shellvisor shellvisor                           # or: build it (Rust 1.85+)
 ```
+
+Then run `shellvisor`. Inside it, `sv` is always available; Homebrew and the install script also put `sv` next to `shellvisor` so `sv on` works from a plain terminal (after `cargo install`, link it once: `ln -s "$(command -v shellvisor)" ~/.cargo/bin/sv`).
+
+`sv autostart on` starts Shellvisor in every new terminal window (it adds a short, marked block to `~/.zshrc` or `~/.bashrc`; it skips tmux, SSH sessions and editor terminals, and quitting Shellvisor leaves you in your normal shell). `sv autostart off` removes it.
+
+Release archives are checksummed and carry a signed build-provenance attestation — see [docs/RELEASING.md](docs/RELEASING.md).
 
 ## Use
 

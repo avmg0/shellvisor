@@ -12,6 +12,7 @@ pub const NAME_LOWER: &str = "shellvisor";
 mod activity;
 mod agents;
 mod app;
+mod autostart;
 mod board;
 mod bus;
 mod cli;

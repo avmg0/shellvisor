@@ -21,6 +21,7 @@ usage:
   sv flowpane  open the Flow pane (what the shell is running, live)
   sv power on|off|auto            low-power mode (auto = on battery)
   sv theme light|dark|auto        colours of Shellvisor's own frames and panes
+  sv autostart on|off|status      start Shellvisor when a terminal opens (zsh, bash)
   sv agent new [claude|codex|gemini|aider] [--name N] [--here] ['first task']
   sv agent new --cmd '<command>' [--name N]   any other agent CLI
   sv agent attach   make the agent running in this shell an agent column
@@ -92,6 +93,7 @@ pub fn run(args: &[String]) -> i32 {
             }
         }
         "flow" => crate::flowrun::run(&args[1..]),
+        "autostart" => crate::autostart::run(&args[1..]),
         "agent" => agent(&args[1..]),
         "files" | "sys" | "system" | "flowpane" | "layout" | "power" | "theme" => {
             if !inside() {

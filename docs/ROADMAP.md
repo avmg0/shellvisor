@@ -1,6 +1,6 @@
 # Shellvisor — Roadmap & Phases
 
-Status: v0.8 · 2026-11-04 · **P0 – P5 done** · see [ARCHITECTURE.md](ARCHITECTURE.md)
+Status: v0.8 · 2026-11-04 · **P0 – P6 done** · ready for v1.0 · see [ARCHITECTURE.md](ARCHITECTURE.md)
 
 Each phase ends with something you can **run and use daily**, and must stay inside the performance budget before the next phase starts. Sizes are relative (S ≈ a few days, M ≈ 1–2 weeks, L ≈ 2–4 weeks of focused work) — not promises.
 
@@ -12,7 +12,7 @@ Each phase ends with something you can **run and use daily**, and must stay insi
 | **P3** ✅ | Data | M | data-flow view and `sv` structured commands | 2, 13 |
 | **P4** ✅ | Agents I | L | run several coding agents side by side, manually | 5, 8, 16 |
 | **P5** ✅ | Agents II | L | sub-agents, team.yaml, auto-plan | 7, 15, 16 |
-| **P6** | Polish & ship | M | the rest of the file views, layout editor, packaging | 4, 9, 10, 11 |
+| **P6** ✅ | Polish & ship | M | the rest of the file views, layout editor, packaging | 4, 9, 10, 11 |
 
 ---
 
@@ -138,7 +138,7 @@ Exit criteria: the board 16 team.yaml runs end-to-end; over-limit spawns are ref
 
 ---
 
-## P6 · Polish & ship
+## P6 · Polish & ship — ✅ done 2026-11-04
 **P6a done:** the rest of the file views — Columns (parent folder | this folder | preview), Grid (names in cells, arrows in two directions), Size (folders and files by total size as bars, drill in and out, stops counting past 400k files and says so) and Recent (newest changed files anywhere below, from git's file list or a bounded walk). `1`–`8` / tab switch views; the view bar shortens to "view n/8" when narrow. 118 unit + 36 end-to-end tests.
 
 **P6b done:** thermal view in the system pane (`t`): every sensor with its critical point, per-group history, CPU clock vs. top clock (Linux cpufreq) or macOS's `CPU_Speed_Limit` (read every 30 s, only in this view), and a one-time heat warning (≥ 95 °C, at a sensor's critical point, or slowed by heat) at most every 10 min. Themes: `theme: auto|dark|light` and `sv theme` — light remaps Shellvisor's own palette only (never your programs' colours inside shells); auto reads `$COLORFGBG`. Contrast: faint text raised from 240 to 243 (≈ 4.6:1 on a dark background); every status keeps a symbol as well as a colour (⠋ ✔ ✖ ⚑ ⏸ ▲). 120 unit + 36 end-to-end tests.
@@ -146,6 +146,10 @@ Exit criteria: the board 16 team.yaml runs end-to-end; over-limit spawns are ref
 **P6c done:** layout editor (`alt+e`, leader `E`): reshape the tab live — palette (shell, files, system, flow) with `1`–`4`/tab, split right `\` / below `-`, close `x`, resize `< > J K`, move with the arrows; save by name (`s`), as the default for new sessions (`d`) or for this folder and below (`f`); open a saved one (`o`, or `sv layout <name>`; `sv layout` lists them). Layouts are YAML in `~/.config/shellvisor/layouts/` (no folders inside, so they open wherever you are); default and per-folder choices in `~/.local/state/shellvisor/layouts.yaml`, applied on a fresh start. Drag the border between any two splits with the mouse to resize. Long notices are cut to fit instead of not showing. 123 unit + 37 end-to-end tests.
 
 *Changes from plan:* the editor works on the live tab (what you see is the layout) rather than a separate mini-map.
+
+**P6d done — P6 complete:** packaging and start-up. Release workflow on `v*` tags: macOS arm64/x86_64 and Linux x86_64/arm64 archives, SHA256SUMS, signed build-provenance attestations (Sigstore), optional macOS codesign + notarization when the Apple secrets exist, GitHub release with notes. Homebrew formula template (`packaging/homebrew`, filled by `scripts/brew-formula.sh` for the `avmg0/homebrew-tap` tap), a checksum-verifying `scripts/install.sh`, and `cargo install --git`. `sv autostart on|off|status` adds/removes a marked block in `~/.zshrc` or `~/.bashrc` (+ `~/.bash_profile`) that starts Shellvisor only in an interactive terminal outside Shellvisor, tmux, screen, SSH and editor terminals, never `exec` (quitting leaves your shell). docs/RELEASING.md. 126 unit + 37 end-to-end tests.
+
+*Not done here:* crates.io (the patched vt100 is a path dependency); the tap repository itself and the Apple signing secrets need your accounts.
 
 Deliverables
 - Remaining file views: Columns, Grid, Size map, Recent activity.
