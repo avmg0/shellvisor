@@ -4,7 +4,7 @@ Checked 2026-11-05 against Shellvisor 1.0.0 plus the v1.0.1 work in `main`
 (layout editor screen, settings screen, `ls` as a table). One row per thing a
 board shows. ✅ built · ◐ built differently or in part · ✗ not built.
 
-Totals: **17 boards · 111 items · 78 ✅ built · 11 ◐ partly or differently · 22 ✗ not built**.
+Totals: **17 boards · 111 items · 79 ✅ built · 11 ◐ partly or differently · 21 ✗ not built**.
 
 ## 1 · Default workspace (`sv layout dev`)
 
@@ -27,7 +27,7 @@ Totals: **17 boards · 111 items · 78 ✅ built · 11 ◐ partly or differently
 | Output tail, stderr per stage | ✅ | |
 | `s` send to shell, `r` run again | ✅ | |
 | Live job view | ✅ | pipe links on Linux only |
-| Throughput graph per stage (bytes/s, last 30 s) | ✗ | numbers only, no graph |
+| Throughput graph per stage (bytes/s, last 30 s) | ✅ | v1.0.1, with the stage cards and arrows as on the board |
 | Summary printed in the shell at the end | ✅ | |
 
 ## 3 · Focus mode
@@ -212,4 +212,4 @@ install script / signed releases, `sv agent emit|usage|budget`.
 1. File views: view numbers as on the boards; list sorting and multi-select; git groups (staged / untracked / by agent); size `x` delete.
 2. Tabs: ✔ mark, `?` waiting for input, pinned tabs, compact bar, more tab-menu items.
 3. Agents: broadcast, diff view, keys for pause-all in the agents tab, promote / spawn from the tree.
-4. Focus status strip, basic-view hint, flow throughput graph.
+4. Focus status strip, basic-view hint.

@@ -67,8 +67,6 @@ pub struct Options {
     pub low_power: LowPower,
     /// Light theme for Shellvisor's own UI.
     pub light: bool,
-    /// The outer terminal shows 24-bit colour.
-    pub truecolor: bool,
     /// New agents get their own git worktree.
     pub agent_worktree: bool,
     pub agent_limits: agents::Limits,
@@ -211,6 +209,10 @@ pub struct Finished {
     pub cmd: String,
     pub target: Option<PathBuf>,
     pub ok: bool,
+    pub code: Option<i32>,
+    /// "412 MB", as far as the tool said.
+    pub amount: Option<String>,
+    pub src: String,
     /// Seconds it ran.
     pub took: u64,
     pub at: Instant,
@@ -220,6 +222,15 @@ pub struct Finished {
 
 /// How long a finished download's actions stay on offer.
 pub const TOAST_ACT: Duration = Duration::from_secs(12);
+
+/// How long a finish toast shows: longer when it offers c / o.
+pub fn toast_life(d: &Finished) -> Duration {
+    if d.ok && d.target.is_some() {
+        TOAST_ACT
+    } else {
+        Duration::from_secs(6)
+    }
+}
 
 /// One shell and what we know about it.
 pub struct PaneState {
@@ -460,7 +471,7 @@ pub fn run(opts: Options) -> io::Result<i32> {
         bus_log: std::collections::VecDeque::new(),
         low_power,
         light: opts.light,
-        truecolor: opts.truecolor,
+        truecolor: crate::settings::Settings::load().true_color(),
         power_manual: !auto_power,
         focus_tick: 0,
         last_focus: 0,
@@ -1026,6 +1037,14 @@ impl App {
             self.sync_modes(&mut term)?;
             self.sync_tools();
 
+            if self
+                .toast_act
+                .as_ref()
+                .is_some_and(|(d, at)| at.elapsed() >= toast_life(d))
+            {
+                self.toast_act = None;
+                self.dirty = true;
+            }
             if let Some((_, at)) = &self.notice {
                 if at.elapsed() >= NOTICE {
                     self.notice = None;
@@ -1459,6 +1478,9 @@ impl App {
         if let Some((_, at)) = &self.notice {
             t = t.min((*at + NOTICE).saturating_duration_since(Instant::now()));
         }
+        if let Some((d, at)) = &self.toast_act {
+            t = t.min((*at + toast_life(d)).saturating_duration_since(Instant::now()));
+        }
         if self.session_dirty {
             t = t.min((self.last_save + SAVE_EVERY).saturating_duration_since(Instant::now()));
         }
@@ -1620,42 +1642,18 @@ impl App {
                         cmd: a.cmd.clone(),
                         target: a.target.clone().filter(|t| t.exists()),
                         ok,
+                        code,
+                        amount: a.amount.clone(),
+                        src: a.src.clone(),
                         took,
                         at: Instant::now(),
                         pane: id,
                     };
-                    let what = d
-                        .target
-                        .as_ref()
-                        .and_then(|t| t.file_name())
-                        .map(|n| format!(" · {}", n.to_string_lossy()))
-                        .unwrap_or_default();
-                    let mut msg = if ok {
-                        format!("✔ {} finished{what} · {}", a.label, ui::fmt_secs(took))
-                    } else {
-                        format!(
-                            "✖ {} failed (exit {}) · {}",
-                            a.label,
-                            code.unwrap_or(-1),
-                            ui::fmt_secs(took)
-                        )
-                    };
                     self.done.push_front(d.clone());
                     self.done.truncate(20);
-                    if ok && d.target.is_some() {
-                        let dir = d.target.as_ref().is_some_and(|t| t.is_dir());
-                        msg.push_str(if dir {
-                            " · ctrl+] c cd · o open in files"
-                        } else {
-                            " · ctrl+] o show in files"
-                        });
-                        self.toast_act = Some((d, Instant::now()));
-                        // stays up as long as its actions are on offer
-                        self.notice = Some((msg, Instant::now() + (TOAST_ACT - NOTICE)));
-                        self.dirty = true;
-                    } else {
-                        self.notice(msg);
-                    }
+                    // the finish toast (ui draws it; ctrl+] c / o while it shows)
+                    self.toast_act = Some((d, Instant::now()));
+                    self.dirty = true;
                     self.update_loading_marks();
                 }
                 if let Some((name, files, branch)) = agent_done {
@@ -1876,7 +1874,7 @@ impl App {
                     let offer = self
                         .toast_act
                         .as_ref()
-                        .filter(|(_, at)| at.elapsed() < TOAST_ACT)
+                        .filter(|(d, at)| at.elapsed() < TOAST_ACT && d.ok && d.target.is_some())
                         .map(|(d, _)| d.clone());
                     if key == [0x1d] {
                         forward.push(0x1d); // ctrl+] twice = a real ctrl+]
@@ -4061,6 +4059,9 @@ impl App {
                 if ev.is_left_press() {
                     if let Some(i) = ui::tab_at(self, ev.x) {
                         self.switch_tab(i);
+                    } else if ev.x > bar.x + bar.width / 2 && !self.activities().is_empty() {
+                        self.acts_list = Some(0);
+                        self.dirty = true;
                     }
                 }
                 return Ok(());
@@ -4364,6 +4365,7 @@ impl App {
         }
         crate::loading::set_style(&s.spinner);
         crate::loading::set_bar(s.progress_bar);
+        self.truecolor = s.true_color();
         match s.theme.as_str() {
             "light" => self.light = true,
             "dark" => self.light = false,

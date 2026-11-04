@@ -39,6 +39,7 @@ mod sysmon;
 mod tableview;
 mod team;
 mod term;
+mod termcolors;
 mod ui;
 mod workspace;
 
@@ -164,12 +165,14 @@ fn main() {
         }
     };
 
-    // before COLORTERM is set for our own shells below
-    let truecolor = palette::truecolor_terminal();
     let mut env = vec![
         ("TERM".to_string(), "xterm-256color".to_string()),
         ("COLORTERM".into(), "truecolor".into()),
         ("TERM_PROGRAM".into(), "Shellvisor".into()),
+        (
+            "SHELLVISOR_OUTER_TERM".into(),
+            std::env::var("TERM_PROGRAM").unwrap_or_default(),
+        ),
         (
             "TERM_PROGRAM_VERSION".into(),
             env!("CARGO_PKG_VERSION").into(),
@@ -212,7 +215,6 @@ fn main() {
         keymap,
         restore: cfg.restore,
         low_power: cfg.low_power,
-        truecolor,
         light: {
             // the settings screen's theme wins over config.yaml
             let ui = settings::Settings::load();

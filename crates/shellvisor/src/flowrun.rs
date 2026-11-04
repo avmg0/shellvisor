@@ -28,6 +28,9 @@ pub struct StageStats {
     pub pull_wait_ms: u64,
     pub stderr: Vec<String>,
     pub exit: Option<i32>,
+    /// The latest whole line it wrote (shown on its card).
+    #[serde(default)]
+    pub sample: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -108,6 +111,19 @@ pub fn split_stages(line: &str) -> Result<Vec<String>, String> {
 
 type Shared = Arc<Mutex<FlowStats>>;
 
+/// The last complete line in a chunk (up to 160 characters).
+fn last_line(b: &[u8]) -> Option<String> {
+    let end = b.iter().rposition(|&c| c == b'\n')?;
+    let start = b[..end]
+        .iter()
+        .rposition(|&c| c == b'\n')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let l = String::from_utf8_lossy(&b[start..end]);
+    let l = l.trim_end_matches('\r').trim();
+    (!l.is_empty()).then(|| l.chars().take(160).collect())
+}
+
 fn count_lines(b: &[u8]) -> u64 {
     b.iter().filter(|&&c| c == b'\n').count() as u64
 }
@@ -131,6 +147,7 @@ fn copier(
         };
         let pulled = t.elapsed();
         let lines = count_lines(&buf[..n]);
+        let sample = last_line(&buf[..n]);
         let t = Instant::now();
         let ok = to
             .write_all(&buf[..n])
@@ -142,6 +159,9 @@ fn copier(
             let st = &mut s.stages[src];
             st.bytes_out += n as u64;
             st.lines_out += lines;
+            if let Some(l) = sample {
+                st.sample = l;
+            }
             st.pull_wait_ms += pulled.as_millis() as u64;
             match dst {
                 Some(d) => {

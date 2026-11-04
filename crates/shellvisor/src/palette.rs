@@ -5,7 +5,10 @@
 //! Panes are drawn with Shellvisor's indexed colours; this pass turns them
 //! into the design's colours after each frame. Inside shell panes only the
 //! default background and text change, so programs keep their own colours.
-//! Terminals without 24-bit colour get the nearest of the 256 colours.
+//! Terminals without 24-bit colour get the nearest of the 256 colours —
+//! except the page, panel and shell backgrounds, which are left to the
+//! terminal's own background there (256 colours have no very dark blue, only
+//! greys; `sv terminal-colors` gives Terminal.app the design's background).
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -28,10 +31,80 @@ pub const RED: (u8, u8, u8) = (0xf0, 0x71, 0x78);
 pub const BLUE: (u8, u8, u8) = (0x82, 0xaa, 0xff);
 pub const MAGENTA: (u8, u8, u8) = (0xc7, 0x92, 0xea);
 pub const SHELL_TINT: (u8, u8, u8) = (0x3a, 0x2f, 0x1a);
+/// Cards (flow stages, downloads).
+pub const CARD: (u8, u8, u8) = (0x12, 0x18, 0x21);
+/// Small badges ("1", "2" on stage cards).
+pub const BADGE: (u8, u8, u8) = (0x2a, 0x31, 0x40);
+/// Outlines of cards, the command box, pills.
+pub const STROKE: (u8, u8, u8) = (0x2f, 0x36, 0x42);
+pub const ERR_BG: (u8, u8, u8) = (0x16, 0x0f, 0x12);
+pub const ERR_BORDER: (u8, u8, u8) = (0x4a, 0x2a, 0x30);
+
+/// Colours some panes draw with directly (cards, pills, tracks): exact in
+/// the design palette, plain indexed colours otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    Card,
+    Badge,
+    Stroke,
+    /// The empty part of a progress bar.
+    Track,
+    Bar,
+    ErrBg,
+    ErrBorder,
+}
+
+use std::sync::atomic::{AtomicU8, Ordering};
+/// 0: not the design palette (terminal background, light), 1: design in
+/// 256 colours, 2: design in 24-bit colour.
+static MODE: AtomicU8 = AtomicU8::new(0);
+
+pub fn set_mode(design: bool, true_color: bool) {
+    MODE.store(
+        match (design, true_color) {
+            (false, _) => 0,
+            (true, false) => 1,
+            (true, true) => 2,
+        },
+        Ordering::Relaxed,
+    );
+}
+
+pub fn role(r: Role) -> Color {
+    let c = match r {
+        Role::Card => CARD,
+        Role::Badge => BADGE,
+        Role::Stroke => STROKE,
+        Role::Track => SELECT,
+        Role::Bar => BAR,
+        Role::ErrBg => ERR_BG,
+        Role::ErrBorder => ERR_BORDER,
+    };
+    match MODE.load(Ordering::Relaxed) {
+        2 => Color::Rgb(c.0, c.1, c.2),
+        1 => match r {
+            // too close to the page in 256 colours: no fill
+            Role::Card | Role::ErrBg => Color::Reset,
+            _ => Color::Indexed(nearest_256(c)),
+        },
+        _ => match r {
+            Role::Card | Role::ErrBg => Color::Reset,
+            Role::Badge => Color::Indexed(238),
+            Role::Stroke => Color::Indexed(240),
+            Role::Track => Color::Indexed(237),
+            Role::Bar => Color::Indexed(236),
+            Role::ErrBorder => Color::Indexed(167),
+        },
+    }
+}
 
 /// Does the outer terminal show 24-bit colour? ($COLORTERM, or a terminal
 /// known to.) Read before Shellvisor sets these for its own shells.
 pub fn truecolor_terminal() -> bool {
+    if std::env::var("TERM_PROGRAM").as_deref() == Ok("Apple_Terminal") {
+        // Terminal.app shows 24-bit colour from macOS 26 on
+        return macos_major().is_some_and(|v| v >= 26);
+    }
     let ct = std::env::var("COLORTERM")
         .unwrap_or_default()
         .to_lowercase();
@@ -46,6 +119,19 @@ pub fn truecolor_terminal() -> bool {
     ) || term.contains("kitty")
         || term.contains("alacritty")
         || term.contains("direct")
+}
+
+/// macOS's major version (26 for macOS 26 "Tahoe"), from SystemVersion.plist.
+pub fn macos_major() -> Option<u32> {
+    let t = std::fs::read_to_string("/System/Library/CoreServices/SystemVersion.plist").ok()?;
+    let i = t.find("<key>ProductVersion</key>")?;
+    let rest = &t[i..];
+    let s = rest.find("<string>")? + 8;
+    let e = rest[s..]
+        .find('.')
+        .map(|e| s + e)
+        .or_else(|| rest[s..].find('<').map(|e| s + e))?;
+    rest[s..e].trim().parse().ok()
 }
 
 /// The xterm 256-colour index closest to an RGB colour.
@@ -79,6 +165,9 @@ pub fn nearest_256((r, g, b): (u8, u8, u8)) -> u8 {
 fn rgb(c: (u8, u8, u8), true_color: bool) -> Color {
     if true_color {
         Color::Rgb(c.0, c.1, c.2)
+    } else if c == BG || c == SHELL || c == PANEL {
+        // 256 colours only have greys this dark: keep the terminal's own
+        Color::Reset
     } else {
         Color::Indexed(nearest_256(c))
     }

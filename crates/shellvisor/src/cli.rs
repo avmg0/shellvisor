@@ -22,6 +22,7 @@ usage:
   sv power on|off|auto            low-power mode (auto = on battery)
   sv theme light|dark|auto        colours of Shellvisor's own frames and panes
   sv autostart on|off|status      start Shellvisor when a terminal opens (zsh, bash)
+  sv terminal-colors [undo]       give Terminal.app the design's dark blue background
   sv settings     folder colours (prompt, lists), ls as a table, table borders, theme (also alt+s)
   sv activity     downloads & installs: progress, speed, time left, cd / open (also ctrl+] j)
   sv agent new [claude|codex|gemini|aider] [--name N] [--here] ['first task']
@@ -96,6 +97,7 @@ pub fn run(args: &[String]) -> i32 {
         }
         "flow" => crate::flowrun::run(&args[1..]),
         "autostart" => crate::autostart::run(&args[1..]),
+        "terminal-colors" | "terminal-colours" => crate::termcolors::run(&args[1..]),
         "activity" | "downloads" => {
             if !inside() {
                 return not_running("activity");

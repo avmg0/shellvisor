@@ -779,7 +779,7 @@ fn downloads_show_a_loading_circle_and_a_toast() {
     s.send("curl https://example.invalid/file\r");
     s.wait_until("progress bar in the pane title", |t| {
         let title = t.lines().nth(1).unwrap_or("");
-        title.contains("curl ▕") && title.contains("▏ 42%")
+        title.contains(" curl ━") && title.contains(" 42%")
     });
     s.wait_for("✔ curl finished");
 }
@@ -794,9 +794,12 @@ fn activity_list_speed_files_mark_and_toast_actions() {
          printf 'Receiving objects:  42%% (42/100), 1.20 MiB | 3.00 MiB/s\\n'; sleep 4; }",
     );
     s.send("git clone https://example.invalid/me/repo.git\r");
-    s.wait_until("bar, speed in the title", |t| {
+    s.wait_until("bar in the title, the header badge", |t| {
         let title = t.lines().nth(1).unwrap_or("");
-        title.contains("git clone ▕") && title.contains("42% · 3.00 MiB/s")
+        let header = t.lines().next().unwrap_or("");
+        title.contains("git clone ━")
+            && title.contains(" 42%")
+            && header.contains("1 download · 42%")
     });
     // the files pane marks the folder being filled
     s.send("\x1bOQ"); // F2
@@ -807,11 +810,14 @@ fn activity_list_speed_files_mark_and_toast_actions() {
     s.send("\x1d");
     s.send("j");
     s.wait_until("activity list", |t| {
-        t.contains("downloads & installs · 1 running") && t.contains("3.00 MiB/s")
+        t.contains("ACTIVITY · downloads & installs")
+            && t.contains("git clone example.invalid/me/repo.git")
+            && t.contains("3.00 MiB/s")
+            && t.contains("Receiving objects")
     });
     s.send("\x1b");
-    s.wait_for("✔ git clone finished · repo");
-    s.wait_for("ctrl+] c cd");
+    s.wait_for("✔ git clone finished · 1.20 MiB in");
+    s.wait_for("ctrl+] c cd into repo");
     // ctrl+] c: cd into the clone
     s.send("\x1d");
     s.send("c");
@@ -821,8 +827,8 @@ fn activity_list_speed_files_mark_and_toast_actions() {
     // the list keeps it; o opens it in the files pane
     s.send("\x1d");
     s.send("j");
-    s.wait_until("finished row", |t| {
-        t.contains("✔ git clone") && t.contains("c cd · o open")
+    s.wait_until("finished card", |t| {
+        t.contains("✔") && t.contains("done in") && t.contains("c cd into it · o open in files")
     });
     s.send("o");
     s.wait_until("files pane shows the clone", |t| t.contains("inside.txt"));

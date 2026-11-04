@@ -6,13 +6,14 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::Instant;
 
 /// Spinner styles offered in settings: (name, frames).
-pub const STYLES: [(&str, &[&str]); 6] = [
-    ("circle", &["◐", "◓", "◑", "◒"]),
-    ("dots", &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
-    ("arc", &["◜", "◠", "◝", "◞", "◡", "◟"]),
-    ("line", &["|", "/", "-", "\\"]),
-    ("pulse", &["·", "•", "●", "•"]),
-    ("bounce", &["⠁", "⠂", "⠄", "⡀", "⢀", "⠠", "⠐", "⠈"]),
+pub const STYLES: [(&str, &[&str]); 3] = [
+    // the boards' ring: a circle with its marked quarter going round
+    ("ring", &["◴", "◷", "◶", "◵"]),
+    (
+        "braille",
+        &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
+    ),
+    ("bar", &["▰▱▱▱", "▱▰▱▱", "▱▱▰▱", "▱▱▱▰", "▱▱▰▱", "▱▰▱▱"]),
 ];
 
 static STYLE: AtomicU8 = AtomicU8::new(0);
@@ -24,7 +25,7 @@ fn epoch() -> Instant {
     *E.get_or_init(Instant::now)
 }
 
-/// Use this spinner style (a name from `STYLES`; unknown names: circle).
+/// Use this spinner style (a name from `STYLES`; unknown names: ring).
 pub fn set_style(name: &str) {
     let i = STYLES.iter().position(|(n, _)| *n == name).unwrap_or(0);
     STYLE.store(i as u8, Ordering::Relaxed);
@@ -58,8 +59,7 @@ pub fn frame_of(style: &str) -> &'static str {
     let every = if LOW_POWER.load(Ordering::Relaxed) {
         250
     } else {
-        // the circle turns at half speed: four big frames look calmer
-        if frames.len() <= 4 { 200 } else { 100 }
+        if frames.len() <= 4 { 150 } else { 100 }
     };
     let t = (epoch().elapsed().as_millis() / every) as usize;
     frames[t % frames.len()]
@@ -103,6 +103,20 @@ pub fn bar(progress: Option<u8>, width: usize) -> String {
             )
         }
     }
+}
+
+/// The sliding piece of a bar with no %: (start, end) cells, moving left to
+/// right over and over like the boards' (30 % of the width).
+pub fn slide(width: usize) -> (usize, usize) {
+    if width == 0 {
+        return (0, 0);
+    }
+    let piece = (width * 3 / 10).max(1);
+    let cycle = width + piece;
+    let t = (epoch().elapsed().as_millis() / 60) as usize % cycle;
+    let end = t.min(width);
+    let start = t.saturating_sub(piece);
+    (start.min(width), end)
 }
 
 /// "12s", "3m 05s", "1h 02m".

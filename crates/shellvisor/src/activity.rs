@@ -22,6 +22,12 @@ pub struct Activity {
     pub speed: Option<String>,
     /// Seconds left.
     pub eta: Option<u64>,
+    /// "256 / 412 MB", as far as the tool says.
+    pub amount: Option<String>,
+    /// The tool's latest progress line ("Receiving objects 62% (148221/239067)").
+    pub phase: Option<String>,
+    /// Where it downloads from: "github.com", "registry.npmjs.org"…
+    pub src: String,
     /// What it makes: the cloned folder, node_modules, the downloaded file.
     pub target: Option<PathBuf>,
     pub started: Instant,
@@ -37,6 +43,9 @@ impl Activity {
             progress: None,
             speed: None,
             eta: None,
+            amount: None,
+            phase: None,
+            src: String::new(),
             target: None,
             started: Instant::now(),
             base: None,
@@ -45,7 +54,19 @@ impl Activity {
 
     /// Take a new reading of the screen. True if anything shown changed.
     pub fn update(&mut self, r: Reading) -> bool {
-        let before = (self.progress, self.speed.clone(), self.eta);
+        let before = (
+            self.progress,
+            self.speed.clone(),
+            self.eta,
+            self.amount.clone(),
+            self.phase.clone(),
+        );
+        if r.amount.is_some() {
+            self.amount = r.amount;
+        }
+        if r.phase.is_some() {
+            self.phase = r.phase;
+        }
         if let Some(p) = r.progress {
             // a new phase (git: receiving, then resolving) starts over
             match self.base {
@@ -66,7 +87,14 @@ impl Activity {
             }
             Some((secs * (100 - p) as f64 / (p - p0) as f64).round() as u64)
         });
-        before != (self.progress, self.speed.clone(), self.eta)
+        before
+            != (
+                self.progress,
+                self.speed.clone(),
+                self.eta,
+                self.amount.clone(),
+                self.phase.clone(),
+            )
     }
 }
 
@@ -76,6 +104,8 @@ pub struct Reading {
     pub progress: Option<u8>,
     pub speed: Option<String>,
     pub eta: Option<u64>,
+    pub amount: Option<String>,
+    pub phase: Option<String>,
 }
 
 /// (program, sub-commands that count — empty means any)
@@ -146,7 +176,127 @@ pub fn start(cmd: &str, cwd: &Path) -> Option<Activity> {
     let mut a = classify(cmd)?;
     a.cmd = cmd.to_string();
     a.target = target(cmd, cwd);
+    a.src = source(cmd, &a.label);
     Some(a)
+}
+
+/// Where a download comes from: the URL's host, else the tool's registry.
+pub fn source(cmd: &str, label: &str) -> String {
+    for w in cmd.split_whitespace() {
+        let w = w.trim_matches(['\'', '"']);
+        if let Some((_, rest)) = w.split_once("://") {
+            let host = rest.split(['/', ':', '?']).next().unwrap_or("");
+            let host = host.rsplit('@').next().unwrap_or(host);
+            if !host.is_empty() {
+                return host.to_string();
+            }
+        }
+        // git@github.com:me/repo.git
+        if let Some((user, rest)) = w.split_once('@') {
+            if !user.contains('/') && rest.contains(':') {
+                return rest.split(':').next().unwrap_or("").to_string();
+            }
+        }
+    }
+    let prog = label.split_whitespace().next().unwrap_or("");
+    match prog {
+        "npm" | "pnpm" | "yarn" | "bun" => "registry.npmjs.org",
+        "pip" | "pip3" | "uv" | "poetry" => "pypi.org",
+        "conda" => "conda.anaconda.org",
+        "brew" => "ghcr.io",
+        "docker" | "podman" => "docker.io",
+        "cargo" => "crates.io",
+        "go" => "proxy.golang.org",
+        "gem" | "bundle" => "rubygems.org",
+        "ollama" => "ollama.com",
+        "huggingface-cli" => "huggingface.co",
+        "apt" | "apt-get" => "apt mirrors",
+        _ => "",
+    }
+    .to_string()
+}
+
+/// "3.00 MiB/s" → bytes per second (for adding speeds up).
+pub fn rate_bytes(s: &str) -> Option<f64> {
+    let s = s.trim().trim_end_matches("/s");
+    let (num, unit) = s.split_at(s.find(|c: char| c.is_ascii_alphabetic())?);
+    let v: f64 = num.trim().parse().ok()?;
+    let mul = match unit {
+        "B" => 1.0,
+        "kB" | "KB" => 1e3,
+        "KiB" => 1024.0,
+        "MB" => 1e6,
+        "MiB" => 1048576.0,
+        "GB" => 1e9,
+        "GiB" => 1073741824.0,
+        _ => return None,
+    };
+    Some(v * mul)
+}
+
+const BYTE_UNITS: [&str; 12] = [
+    "B", "kB", "KB", "KiB", "MB", "MiB", "GB", "GiB", "k", "K", "M", "G",
+];
+
+/// An amount like "12.3/30.0 MB" → "12.3 / 30.0 MB"; "1.20 MiB |" → "1.20 MiB".
+fn amount(row: &str) -> Option<String> {
+    let toks: Vec<&str> = row
+        .split(|c: char| c.is_whitespace() || c == ',' || c == '|' || c == '(' || c == ')')
+        .filter(|t| !t.is_empty())
+        .collect();
+    let num_unit = |t: &str| -> Option<(String, String)> {
+        let i = t.find(|c: char| !(c.is_ascii_digit() || c == '.'))?;
+        let (n, u) = t.split_at(i);
+        (!n.is_empty() && BYTE_UNITS.contains(&u)).then(|| (n.to_string(), u.to_string()))
+    };
+    for (i, t) in toks.iter().enumerate() {
+        // "12.3/30.0" "MB" or "1.2G/3G"
+        if let Some((a, b)) = t.split_once('/') {
+            if b == "s" || b.starts_with("s") {
+                continue;
+            }
+            let (an, au) = match num_unit(a) {
+                Some(x) => x,
+                None if a.parse::<f64>().is_ok() => (a.to_string(), String::new()),
+                None => continue,
+            };
+            let (bn, bu) = match num_unit(b) {
+                Some(x) => x,
+                None if b.parse::<f64>().is_ok() => match toks.get(i + 1) {
+                    Some(u) if BYTE_UNITS.contains(u) => (b.to_string(), u.to_string()),
+                    _ => continue,
+                },
+                None => continue,
+            };
+            return Some(if au.is_empty() || au == bu {
+                format!("{an} / {bn} {bu}")
+            } else {
+                format!("{an} {au} / {bn} {bu}")
+            });
+        }
+    }
+    // a single amount not followed by /s
+    for (i, t) in toks.iter().enumerate() {
+        if t.parse::<f64>().is_ok() {
+            if let Some(u) = toks.get(i + 1) {
+                if BYTE_UNITS.contains(u) && u.len() > 1 {
+                    return Some(format!("{t} {u}"));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// A screen row as a tidy one-line phase description.
+fn phase(row: &str) -> String {
+    let t: String = row
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_matches(|c: char| "│|━─#=>[]".contains(c) || c.is_whitespace())
+        .to_string();
+    t.chars().take(120).collect()
 }
 
 /// Flags that take a value, per program (so the value isn't read as an argument).
@@ -343,8 +493,18 @@ pub fn read_screen<'a>(rows: impl DoubleEndedIterator<Item = &'a str>) -> Readin
         if let Some(c) = curl_row(row) {
             return c;
         }
+        if r.phase.is_none() {
+            r.phase = Some(phase(row)).filter(|p| !p.is_empty());
+        }
         if r.progress.is_none() {
             r.progress = last_percent(row);
+            if r.progress.is_some() {
+                // the line with the % says best what is going on
+                r.phase = Some(phase(row));
+            }
+        }
+        if r.amount.is_none() {
+            r.amount = amount(row);
         }
         if r.speed.is_none() {
             r.speed = speed(row);
@@ -370,6 +530,8 @@ fn curl_row(row: &str) -> Option<Reading> {
         progress,
         speed,
         eta,
+        amount: Some(format!("{} / {}", t[3], t[1])),
+        phase: Some(format!("{}% of {}", t[0], t[1])),
     })
 }
 
@@ -684,6 +846,43 @@ mod tests {
         assert_eq!(r.speed.as_deref(), Some("3.3 MB/s"));
         let r = read_screen(["12.3it/s 40%"].iter().copied());
         assert_eq!((r.progress, r.speed), (Some(40), None), "not bytes");
+    }
+
+    #[test]
+    fn amounts_sources_phases() {
+        let r = read_screen(
+            ["   ━━━━━━━━━━━━━━━━ 12.3/30.0 MB 3.1 MB/s eta 0:00:06"]
+                .iter()
+                .copied(),
+        );
+        assert_eq!(r.amount.as_deref(), Some("12.3 / 30.0 MB"));
+        let r = read_screen(
+            ["Receiving objects:  45% (450/1000), 1.20 MiB | 3.00 MiB/s"]
+                .iter()
+                .copied(),
+        );
+        assert_eq!(r.amount.as_deref(), Some("1.20 MiB"));
+        assert_eq!(
+            r.phase.as_deref(),
+            Some("Receiving objects: 45% (450/1000), 1.20 MiB | 3.00 MiB/s")
+        );
+        let r = read_screen(
+            [" 42%|████ | 1.2G/3G [00:12<00:18, 98.3MB/s]"]
+                .iter()
+                .copied(),
+        );
+        assert_eq!(r.amount.as_deref(), Some("1.2 / 3 G"));
+        assert_eq!(
+            source("git clone https://github.com/a/b", "git clone"),
+            "github.com"
+        );
+        assert_eq!(
+            source("git clone git@gitlab.com:a/b.git", "git clone"),
+            "gitlab.com"
+        );
+        assert_eq!(source("npm install", "npm install"), "registry.npmjs.org");
+        assert_eq!(rate_bytes("3.00 MiB/s"), Some(3.0 * 1048576.0));
+        assert_eq!(rate_bytes("510 kB/s"), Some(510e3));
     }
 
     #[test]

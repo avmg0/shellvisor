@@ -180,6 +180,10 @@ Deliverables
 
 - Downloads & installs, board 6 (done): a filling progress bar (eighth-block precision; a sliding block when there's no %) beside the spinner in the tab, pane title and status bar; speed and time left read from what tools print (git, curl's meter, wget, pip/rich, tqdm, "eta"/"left") or worked out from the progress, restarting per phase; activity list (`ctrl+] j`, `sv activity`, click the status bar) with running and the last 20 finished; the target of a download (clone folder, node_modules, target/, .venv, curl -o/-O, wget -O/-P, hf --local-dir; `cd x &&` followed) gets the spinner in the files pane; finish toast offers `ctrl+] c` cd into it / `ctrl+] o` open in files for 12 s; agents' installs from their screen (`Bash(…)`, `$ …`, `Running …`) on their column; settings for spinner style (circle, dots, arc, line, pulse, bounce) and bar on/off.
 
+- Downloads restyled to board 6 (done): the ring spinner (◴◷◶◵; braille and bar styles), thin line bars (━ on a dark track, a sliding cyan piece without a %), the header badge with count / average % / total speed, `job: …` in the status bar, activity list as cards (command, source host, bar in the tool's colour, the tool's progress line, amount / speed / ETA), two-line finish toast, ✔ / ✖ on the tab for 5 s.
+- Flow pane as on board 2 (done) when it has room (≥ 90 × 26, cards ≥ 18 wide): the command box with state and keys, a card per stage with status, in / out / rate / kept, sparkline and latest line (new `sample` in the stats file), arrows with kept %, a throughput chart per lane over the last 30 s, the slowest stage and why, output and tagged stderr (repeats counted); the table stays for small panes.
+- Colours (done): Terminal.app on macOS 26+ counts as 24-bit; a "Colours" setting (auto / 24-bit / 256); in 256 colours the page, panel and shell backgrounds are left to the terminal (256 colours have no dark blue); `sv terminal-colors [undo]` sets Terminal.app's profile to the design's background and text.
+
 Exit criteria: `sv resize` covered by an end-to-end test; a `v1.0.1` tag releases with one macOS job; CI and Release runs show no deprecation warnings.
 
 ---

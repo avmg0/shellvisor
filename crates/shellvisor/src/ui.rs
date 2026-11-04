@@ -22,6 +22,7 @@ const INK: Color = Color::Indexed(16);
 const GREEN: Color = Color::Indexed(108);
 const RED: Color = Color::Indexed(167);
 const CYAN: Color = Color::Indexed(73);
+const TEXT: Color = Color::Indexed(252);
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -39,23 +40,81 @@ fn circle(_app: &App) -> &'static str {
     crate::loading::frame()
 }
 
-/// "◐ npm install ▕████▌   ▏ 42% · 3.0 MB/s · 12s left" (`bar` cells wide;
-/// 0, or bars off in settings: no bar).
-pub fn activity_text(app: &App, a: &Activity, bar: usize) -> String {
-    let mut s = format!("{} {}", circle(app), a.label);
-    if bar > 0 && crate::loading::bar_on() {
-        s.push_str(&format!(" ▕{}▏", crate::loading::bar(a.progress, bar)));
+/// A tool's colour on the boards: git amber, pip cyan, docker magenta.
+fn tool_fg(label: &str) -> Color {
+    match label.split_whitespace().next().unwrap_or("") {
+        "pip" | "pip3" | "uv" | "poetry" | "conda" => CYAN,
+        "docker" | "podman" => Color::Indexed(170),
+        _ => AMBER,
+    }
+}
+
+/// The boards' thin progress bar: "━━━━╸━━━━" with the filled part in
+/// `color` on a dark track. No % yet: a short cyan piece slides along.
+pub fn thin_bar(progress: Option<u8>, width: usize, color: Color) -> Vec<Span<'static>> {
+    let track = Style::default().fg(crate::palette::role(crate::palette::Role::Track));
+    let fill = Style::default().fg(color);
+    let mut v = Vec::new();
+    match progress {
+        Some(p) => {
+            let halves = p.min(100) as usize * width * 2 / 100;
+            let full = halves / 2;
+            let half = halves % 2 == 1;
+            v.push(Span::styled("━".repeat(full), fill));
+            if half {
+                v.push(Span::styled("╸", fill));
+            }
+            let used = full + usize::from(half);
+            v.push(Span::styled("━".repeat(width.saturating_sub(used)), track));
+        }
+        None => {
+            let (a, b) = crate::loading::slide(width);
+            v.push(Span::styled("━".repeat(a), track));
+            v.push(Span::styled("━".repeat(b - a), Style::default().fg(CYAN)));
+            v.push(Span::styled("━".repeat(width - b), track));
+        }
+    }
+    v
+}
+
+/// "ETA 38s"
+fn eta_text(a: &Activity) -> Option<String> {
+    a.eta.map(|e| format!("ETA {}", crate::loading::eta(e)))
+}
+
+/// Spans for a download in a pane title: "◜ npm install ━━━━╸━━━ 42% · ETA 6s".
+fn activity_spans(app: &App, a: &Activity) -> Vec<Span<'static>> {
+    let mut v = vec![
+        Span::styled(circle(app).to_string(), Style::default().fg(AMBER)),
+        Span::styled(format!(" {}", a.label), Style::default().fg(DIM)),
+    ];
+    if crate::loading::bar_on() {
+        v.push(Span::raw(" "));
+        v.extend(thin_bar(a.progress, 10, tool_fg(&a.label)));
     }
     if let Some(p) = a.progress {
-        s.push_str(&format!(" {p}%"));
+        v.push(Span::styled(format!(" {p}%"), Style::default().fg(TEXT)));
     }
-    if let Some(sp) = &a.speed {
-        s.push_str(&format!(" · {sp}"));
+    if let Some(e) = eta_text(a) {
+        v.push(Span::styled(format!(" · {e}"), Style::default().fg(DIM)));
     }
-    if let Some(e) = a.eta {
-        s.push_str(&format!(" · {} left", crate::loading::eta(e)));
-    }
-    s
+    v
+}
+
+/// A pane frame with a title made of spans (the first in the frame's style).
+fn pane_block_line(first: String, rest: Vec<Span<'static>>, is_focus: bool) -> Block<'static> {
+    let border = Style::default().fg(if is_focus { AMBER } else { FAINT });
+    let head = if is_focus {
+        border.add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(DIM)
+    };
+    let mut spans = vec![Span::styled(first, head)];
+    spans.extend(rest);
+    Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(border)
+        .title(Line::from(spans))
 }
 
 fn pane_block(title: String, is_focus: bool) -> Block<'static> {
@@ -74,9 +133,10 @@ fn pane_block(title: String, is_focus: bool) -> Block<'static> {
 }
 
 pub fn draw(f: &mut Frame, app: &App) {
-    draw_all(f, app);
     // basic view looks exactly like your plain terminal: no palette there
     let design = !app.light && app.ui.background != "terminal" && app.view == View::Full;
+    crate::palette::set_mode(design, app.truecolor);
+    draw_all(f, app);
     if !app.light && !design {
         return;
     }
@@ -181,7 +241,8 @@ fn draw_all(f: &mut Frame, app: &App) {
             };
             title.push_str(&format!("· {status} "));
             if let Some(act) = &p.agent_act {
-                title.push_str(&format!("· {} ", activity_text(app, act, 8)));
+                let pct = act.progress.map(|p| format!(" {p}%")).unwrap_or_default();
+                title.push_str(&format!("· {} {}{pct} ", circle(app), act.label));
             }
             let files = a.files_summary();
             if !files.is_empty() {
@@ -237,14 +298,17 @@ fn draw_all(f: &mut Frame, app: &App) {
             };
             f.render_widget(block, outer);
         } else if full {
-            let mut title = format!(" {} · {} ", p.shell, short_path(&p.cwd));
+            let title = format!(" {} · {} ", p.shell, short_path(&p.cwd));
+            let mut rest = Vec::new();
             if let Some(a) = &p.activity {
-                title.push_str(&format!("· {} ", activity_text(app, a, 10)));
+                rest.push(Span::styled("· ", Style::default().fg(DIM)));
+                rest.extend(activity_spans(app, a));
+                rest.push(Span::raw(" "));
             }
             if zoomed {
-                title.push_str("· zoomed ");
+                rest.push(Span::styled("· zoomed ", Style::default().fg(DIM)));
             }
-            f.render_widget(pane_block(title, is_focus), outer);
+            f.render_widget(pane_block_line(title, rest, is_focus), outer);
         }
         f.render_widget(TermView(p.pane.screen()), inner);
         if p.pane.scroll() > 0 {
@@ -320,6 +384,9 @@ fn draw_all(f: &mut Frame, app: &App) {
         let (_, content, _) = app.regions();
         badge(f, content, if full { 1 } else { 0 }, &format!(" {msg} "));
     }
+    if let Some((d, _)) = &app.toast_act {
+        draw_finish_toast(f, app, d);
+    }
 
     match &app.modal {
         Modal::NewAgent(form) => {
@@ -373,7 +440,9 @@ fn draw_all(f: &mut Frame, app: &App) {
             let offer = app
                 .toast_act
                 .as_ref()
-                .filter(|(_, at)| at.elapsed() < crate::app::TOAST_ACT)
+                .filter(|(d, at)| {
+                    at.elapsed() < crate::app::TOAST_ACT && d.ok && d.target.is_some()
+                })
                 .map(|(d, _)| {
                     let name = d
                         .target
@@ -558,8 +627,19 @@ fn tab_label(app: &App, i: usize) -> (String, Option<(String, Color)>) {
         };
         return (format!("{} agents · {n}", i + 1), icon);
     }
+    let ids = tab.root.panes();
+    let just_done = app
+        .done
+        .iter()
+        .find(|d| d.at.elapsed() < std::time::Duration::from_secs(5) && ids.contains(&d.pane));
     let icon = if panes.iter().any(|p| p.activity.is_some()) {
         Some((circle(app).to_string(), AMBER))
+    } else if let Some(d) = just_done {
+        Some(if d.ok {
+            ("✔".to_string(), GREEN)
+        } else {
+            ("✖".to_string(), RED)
+        })
     } else if panes.iter().any(|p| p.running) {
         Some((spinner(app).to_string(), AMBER))
     } else if let Some(code) = panes.iter().filter_map(|p| p.last_exit).find(|c| *c != 0) {
@@ -619,6 +699,44 @@ fn draw_tabs(f: &mut Frame, app: &App, r: Rect) {
     }
     spans.push(Span::styled("+ alt+t", Style::default().bg(BAR).fg(FAINT)));
     f.render_widget(Paragraph::new(Line::from(spans)), r);
+    // the boards' header badge: "◜ 4 downloads · 58% · 9.6 MB/s"
+    let acts = app.activities();
+    if !acts.is_empty() {
+        let n = acts.len();
+        let pcts: Vec<u32> = acts
+            .iter()
+            .filter_map(|(_, a, _)| a.progress.map(u32::from))
+            .collect();
+        let mut t = format!("{} download{}", n, if n == 1 { "" } else { "s" });
+        if !pcts.is_empty() {
+            t.push_str(&format!(
+                " · {}%",
+                pcts.iter().sum::<u32>() / pcts.len() as u32
+            ));
+        }
+        let rate: f64 = acts
+            .iter()
+            .filter_map(|(_, a, _)| a.speed.as_deref().and_then(crate::activity::rate_bytes))
+            .sum();
+        if rate > 0.0 {
+            t.push_str(&format!(" · {}/s", crate::sysmon::human(rate as u64)));
+        }
+        let w = t.chars().count() as u16 + 5;
+        if r.width > w + 20 {
+            let pill = Style::default()
+                .bg(crate::palette::role(crate::palette::Role::Badge))
+                .fg(TEXT);
+            let line = Line::from(vec![
+                Span::styled(" ", pill),
+                Span::styled(circle(app).to_string(), pill.fg(AMBER)),
+                Span::styled(format!(" {t} "), pill),
+            ]);
+            f.render_widget(
+                Paragraph::new(line),
+                Rect::new(r.right() - w - 1, r.y, w, 1),
+            );
+        }
+    }
 }
 
 fn draw_status(f: &mut Frame, app: &App, r: Rect) {
@@ -672,14 +790,25 @@ fn draw_status(f: &mut Frame, app: &App, r: Rect) {
     // Downloads anywhere (other tabs, agents too) show here; a click lists them.
     let acts = app.activities();
     if let Some((_, first, _)) = acts.first() {
-        let more = if acts.len() > 1 {
-            format!(" +{}", acts.len() - 1)
-        } else {
-            String::new()
-        };
+        // the boards' "job: ◜ pip 52% · ETA 1m"
+        let mut t = first.label.clone();
+        if let Some(p) = first.progress {
+            t.push_str(&format!(" {p}%"));
+        }
+        if let Some(e) = eta_text(first) {
+            t.push_str(&format!(" · {e}"));
+        }
+        if acts.len() > 1 {
+            t.push_str(&format!(" · +{}", acts.len() - 1));
+        }
+        left.push(Span::styled(" job: ", Style::default().fg(DIM).bg(BAR)));
         left.push(Span::styled(
-            format!(" {}{more} ", activity_text(app, first, 8)),
+            circle(app).to_string(),
             Style::default().fg(AMBER).bg(BAR),
+        ));
+        left.push(Span::styled(
+            format!(" {t} "),
+            Style::default().fg(TEXT).bg(BAR),
         ));
     } else if let Some(cmd) = &app.bar_running {
         left.push(Span::styled(
@@ -1126,184 +1255,246 @@ fn draw_menu(f: &mut Frame, app: &App, sel: usize) {
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-/// The activity list: downloads and installs running (with bar, speed,
-/// time left) and the ones that finished.
-fn draw_activity(f: &mut Frame, app: &App, sel: usize) {
+/// The boards' toast on finish: "✔ git clone finished · 412 MB in 38s",
+/// then what you can do with it.
+fn draw_finish_toast(f: &mut Frame, app: &App, d: &crate::app::Finished) {
     let (_, content, _) = app.regions();
-    let w = content.width.min(110);
-    let h = content.height.min(26);
-    if w < 30 || h < 8 {
+    let took = fmt_secs(d.took);
+    let (icon, color, line1) = if d.ok {
+        let what = match &d.amount {
+            Some(a) => format!(" · {a} in {took}"),
+            None => format!(" · {took}"),
+        };
+        ("✔", GREEN, format!(" {} finished{what}", d.label))
+    } else {
+        (
+            "✖",
+            RED,
+            format!(
+                " {} failed · exit {} after {took}",
+                d.label,
+                d.code.unwrap_or(1)
+            ),
+        )
+    };
+    let name = d
+        .target
+        .as_ref()
+        .and_then(|t| t.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let line2 = match &d.target {
+        Some(t) if d.ok && t.is_dir() => {
+            Some(format!("ctrl+] c cd into {name} · o open in files pane"))
+        }
+        Some(_) if d.ok => Some(format!("ctrl+] o show {name} in the files pane")),
+        _ => None,
+    };
+    let w = (line1.chars().count() + 1).max(line2.as_ref().map(|l| l.chars().count()).unwrap_or(0))
+        as u16
+        + 4;
+    let h = if line2.is_some() { 4 } else { 3 };
+    if content.width < w + 2 || content.height < h + 2 {
         return;
     }
-    let r = Rect::new(
-        content.x + (content.width - w) / 2,
-        content.y + (content.height - h) / 2,
-        w,
-        h,
-    );
+    let r = Rect::new(content.right() - w - 1, content.bottom() - h - 1, w, h);
+    use crate::palette::{Role, role};
     f.render_widget(Clear, r);
-    let running = app.activities();
-    let title = format!(
-        " {} downloads & installs · {} running · {} finished ",
-        circle(app),
-        running.len(),
-        app.done.len()
-    );
-    let block = pane_block(title, true);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(role(Role::Stroke)))
+        .style(Style::default().bg(role(Role::Bar)));
     let inner = block.inner(r);
     f.render_widget(block, r);
+    let mut lines = vec![Line::from(vec![
+        Span::styled(format!(" {icon}"), Style::default().fg(color)),
+        Span::styled(line1, Style::default().fg(TEXT)),
+    ])];
+    if let Some(l) = line2 {
+        lines.push(Line::styled(format!(" {l}"), Style::default().fg(DIM)));
+    }
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The activity list as on the boards: one card per download with the
+/// spinner, the command and where it comes from, a thin bar, the tool's own
+/// progress line, and amount / speed / time left on the right.
+fn draw_activity(f: &mut Frame, app: &App, sel: usize) {
+    use crate::palette::{Role, role};
+    let (_, content, _) = app.regions();
+    if content.width < 40 || content.height < 10 {
+        return;
+    }
+    f.render_widget(Clear, content);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(AMBER))
+        .title(Span::styled(
+            " ACTIVITY · downloads & installs ",
+            Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(content);
+    f.render_widget(block, content);
     let buf = f.buffer_mut();
-    let text = Style::default().fg(Color::Indexed(252));
     let dim = Style::default().fg(DIM);
-    let faint = Style::default().fg(FAINT);
-    let amber = Style::default().fg(AMBER);
-    let put = |buf: &mut ratatui::buffer::Buffer, x: u16, y: u16, s: &str, st: Style| {
+    let text = Style::default().fg(TEXT);
+    let put = |buf: &mut ratatui::buffer::Buffer, x: u16, y: u16, s: &str, st: Style, w: u16| {
         if y < inner.bottom() && x < inner.right() {
-            buf.set_stringn(x, y, s, (inner.right() - x) as usize, st);
+            let w = w.min(inner.right() - x);
+            buf.set_stringn(x, y, s, w as usize, st);
         }
     };
-    let x0 = inner.x + 1;
-    let wide = inner.width >= 96;
-    let mut y = inner.y;
-    // the name of what it makes, else the rest of the command
-    let what = |label: &str, cmd: &str, target: &Option<std::path::PathBuf>| -> String {
-        let s = match target.as_ref().and_then(|t| t.file_name()) {
-            Some(n) => n.to_string_lossy().into_owned(),
-            None => {
-                let rest = cmd.split_once(label).map(|(_, r)| r).unwrap_or(cmd);
-                rest.trim().to_string()
-            }
-        };
-        let mut s: String = s.chars().take(22).collect();
-        if s.chars().count() == 22 {
-            s.pop();
-            s.push('…');
-        }
-        s
-    };
-    let tab_name = |id| {
-        app.tab_of(id)
-            .map(|t| format!("tab {}", t + 1))
-            .unwrap_or_else(|| "closed".into())
-    };
-    let row_style = |i: usize| {
-        if i == sel {
-            Style::default()
-                .bg(Color::Indexed(238))
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-        }
-    };
-    put(buf, x0, y, "Running", dim);
-    y += 1;
-    if running.is_empty() {
-        put(buf, x0 + 2, y, "nothing downloading right now", faint);
-        y += 1;
+    put(
+        buf,
+        inner.x + 1,
+        inner.y,
+        "Spotted from shell commands (git, npm, pnpm, pip, uv, brew, docker, cargo, curl, wget…) — progress, speed and time left read from their output.",
+        dim,
+        inner.width - 2,
+    );
+    struct Card {
+        state: u8, // 0 running, 1 done, 2 failed
+        cmd: String,
+        src: String,
+        progress: Option<u8>,
+        color: Color,
+        phase: String,
+        amount: String,
+        rate: String,
+        eta: String,
     }
-    for (i, (id, a, agent)) in running.iter().enumerate() {
-        let st = row_style(i);
-        buf.set_style(Rect::new(inner.x, y, inner.width, 1), st);
-        put(
-            buf,
-            x0,
-            y,
-            &format!("{} {:<14}", circle(app), a.label),
-            amber.patch(st),
-        );
-        put(
-            buf,
-            x0 + 17,
-            y,
-            &what(&a.label, &a.cmd, &a.target),
-            text.patch(st),
-        );
-        let mut x = x0 + 41;
-        put(buf, x, y, "▕", faint.patch(st));
-        put(
-            buf,
-            x + 1,
-            y,
-            &crate::loading::bar(a.progress, 14),
-            amber.patch(st),
-        );
-        put(buf, x + 15, y, "▏", faint.patch(st));
-        x += 17;
-        let pct = a
-            .progress
-            .map(|p| format!("{p:>3}%"))
-            .unwrap_or_else(|| "   …".into());
-        put(buf, x, y, &pct, text.patch(st));
-        x += 6;
-        if wide {
-            put(buf, x, y, a.speed.as_deref().unwrap_or("—"), text.patch(st));
-            x += 12;
+    let tidy = |c: &str| {
+        c.replace("https://", "")
+            .replace("http://", "")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let mut cards: Vec<Card> = Vec::new();
+    for (_, a, agent) in app.activities() {
+        let mut phase = a.phase.clone().unwrap_or_else(|| "starting…".into());
+        if let Some(n) = agent {
+            phase = format!("agent {n} · {phase}");
         }
-        let left = match a.eta {
-            Some(e) => format!("{} left", crate::loading::eta(e)),
-            None => format!("{} so far", fmt_secs(a.started.elapsed().as_secs())),
-        };
-        put(buf, x, y, &left, dim.patch(st));
-        x += 14;
-        let place = match agent {
-            Some(n) => format!("agent {n}"),
-            None => tab_name(*id),
-        };
-        put(buf, x, y, &place, faint.patch(st));
-        y += 1;
+        cards.push(Card {
+            state: 0,
+            cmd: tidy(&a.cmd),
+            src: a.src.clone(),
+            progress: a.progress,
+            color: tool_fg(&a.label),
+            phase,
+            amount: a.amount.clone().unwrap_or_default(),
+            rate: a.speed.clone().unwrap_or_else(|| "—".into()),
+            eta: eta_text(a)
+                .unwrap_or_else(|| format!("{} so far", fmt_secs(a.started.elapsed().as_secs()))),
+        });
     }
-    y += 1;
-    put(buf, x0, y, "Finished", dim);
-    y += 1;
-    if app.done.is_empty() {
-        put(buf, x0 + 2, y, "nothing yet", faint);
-    }
-    let footer = inner.bottom().saturating_sub(2);
+    let running = cards.len();
     for (j, d) in app.done.iter().enumerate() {
-        if y >= footer {
-            break;
-        }
-        let i = running.len() + j;
-        let st = row_style(i);
-        buf.set_style(Rect::new(inner.x, y, inner.width, 1), st);
-        let (icon, c) = if d.ok { ("✔", GREEN) } else { ("✖", RED) };
-        put(buf, x0, y, icon, Style::default().fg(c).patch(st));
-        put(buf, x0 + 2, y, &format!("{:<14}", d.label), text.patch(st));
-        put(
-            buf,
-            x0 + 17,
-            y,
-            &what(&d.label, &d.cmd, &d.target),
-            text.patch(st),
-        );
-        let ago = d.at.elapsed().as_secs();
-        let ago = if ago < 60 {
-            "just now".to_string()
+        let selected = running + j == sel;
+        let mut phase = if d.ok {
+            format!("done in {}", fmt_secs(d.took))
         } else {
-            format!("{} ago", fmt_secs(ago))
+            format!(
+                "failed · exit {} after {}",
+                d.code.unwrap_or(1),
+                fmt_secs(d.took)
+            )
         };
+        if selected && d.ok {
+            match &d.target {
+                Some(t) if t.is_dir() => phase.push_str(" · c cd into it · o open in files"),
+                Some(_) => phase.push_str(" · o show in files"),
+                None => {}
+            }
+        }
+        cards.push(Card {
+            state: if d.ok { 1 } else { 2 },
+            cmd: tidy(&d.cmd),
+            src: d.src.clone(),
+            progress: Some(100),
+            color: if d.ok { GREEN } else { RED },
+            phase,
+            amount: d.amount.clone().unwrap_or_default(),
+            rate: String::new(),
+            eta: String::new(),
+        });
+    }
+    let top = inner.y + 2;
+    let footer = inner.bottom().saturating_sub(1);
+    let fits = ((footer.saturating_sub(top)) / 5).max(1) as usize;
+    if cards.is_empty() {
         put(
             buf,
-            x0 + 41,
-            y,
-            &format!("took {} · {ago}", fmt_secs(d.took)),
-            dim.patch(st),
+            inner.x + 2,
+            top + 1,
+            "Nothing downloaded or installed yet in this session.",
+            dim,
+            inner.width,
         );
-        let acts = match &d.target {
-            Some(t) if t.is_dir() => "c cd · o open",
-            Some(_) => "o show",
-            None => "",
+    }
+    let first = sel
+        .saturating_sub(fits - 1)
+        .min(cards.len().saturating_sub(fits));
+    let mut y = top;
+    for (i, c) in cards.iter().enumerate().skip(first).take(fits) {
+        let r = Rect::new(inner.x + 1, y, inner.width - 2, 5);
+        let card = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(if i == sel { AMBER } else { role(Role::Stroke) }))
+            .style(Style::default().bg(role(Role::Card)));
+        let ci = card.inner(r);
+        ratatui::widgets::Widget::render(card, r, buf);
+        // icon
+        let (icon, ist) = match c.state {
+            0 => (circle(app).to_string(), Style::default().fg(AMBER)),
+            1 => ("✔".to_string(), Style::default().fg(GREEN)),
+            _ => ("✖".to_string(), Style::default().fg(RED)),
         };
-        put(buf, x0 + 75, y, acts, amber.patch(st));
-        put(buf, x0 + 90, y, &tab_name(d.pane), faint.patch(st));
-        y += 1;
+        put(buf, ci.x + 2, ci.y + 1, &icon, ist, 4);
+        // right column
+        let rw = 18u16.min(ci.width / 3);
+        let rx = ci.right().saturating_sub(rw + 1);
+        for (k, (t, st)) in [
+            (&c.amount, text),
+            (&c.rate, Style::default().fg(AMBER)),
+            (&c.eta, dim),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let n = t.chars().count() as u16;
+            put(buf, rx + rw.saturating_sub(n), ci.y + k as u16, t, *st, rw);
+        }
+        // middle
+        let mx = ci.x + 6;
+        let mw = rx.saturating_sub(mx + 2);
+        let src_w = c.src.chars().count() as u16;
+        put(
+            buf,
+            mx,
+            ci.y,
+            &c.cmd,
+            text.add_modifier(Modifier::BOLD),
+            mw.saturating_sub(src_w + 2),
+        );
+        put(buf, mx + mw.saturating_sub(src_w), ci.y, &c.src, dim, src_w);
+        let mut bx = mx;
+        for sp in thin_bar(c.progress, mw as usize, c.color) {
+            let n = sp.content.chars().count() as u16;
+            put(buf, bx, ci.y + 1, &sp.content, sp.style, n);
+            bx += n;
+        }
+        put(buf, mx, ci.y + 2, &c.phase, dim, mw);
+        y += 5;
     }
     put(
         buf,
-        x0,
-        inner.bottom().saturating_sub(1),
+        inner.x + 1,
+        footer,
         "↑↓ select · ⏎ go to its shell · c cd into it · o open in files · x clear finished · esc close",
-        faint,
+        Style::default().fg(FAINT),
+        inner.width - 2,
     );
 }
 

@@ -60,6 +60,8 @@ pub struct Settings {
     pub spinner: String,
     /// Downloads show a filling bar (or only the percentage).
     pub progress_bar: bool,
+    /// Colour depth: "auto" (what the terminal says), "24-bit" or "256".
+    pub colors: String,
 }
 
 impl Default for Settings {
@@ -74,8 +76,9 @@ impl Default for Settings {
             table_borders: "rounded".into(),
             theme: String::new(),
             background: "design".into(),
-            spinner: "circle".into(),
+            spinner: "ring".into(),
             progress_bar: true,
+            colors: "auto".into(),
         }
     }
 }
@@ -140,6 +143,15 @@ impl Settings {
             .map(|i| format!("\x1b[{}38;5;{i}m", if self.list_bold { "1;" } else { "" }))
     }
 
+    /// Use 24-bit colour (the setting, or what the terminal says).
+    pub fn true_color(&self) -> bool {
+        match self.colors.as_str() {
+            "24-bit" => true,
+            "256" => false,
+            _ => crate::palette::truecolor_terminal(),
+        }
+    }
+
     pub fn boxed(&self) -> bool {
         self.table_borders != "plain"
     }
@@ -151,7 +163,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
-const ROWS: [&str; 11] = [
+const ROWS: [&str; 12] = [
     "Folder colour in the prompt",
     "Folder in the prompt bold",
     "Commands you type",
@@ -163,6 +175,7 @@ const ROWS: [&str; 11] = [
     "Dark background",
     "Loading spinner",
     "Download progress",
+    "Colours",
 ];
 
 /// The settings screen (alt+s, `sv settings`): ↑↓ pick, ←→ change.
@@ -221,6 +234,7 @@ impl Screen {
                 s.spinner = cycle(&names, &s.spinner, by);
             }
             10 => s.progress_bar = !s.progress_bar,
+            11 => s.colors = cycle(&["auto", "24-bit", "256"], &s.colors, by),
             _ => {
                 let cur = if s.theme.is_empty() {
                     "config"
@@ -256,6 +270,11 @@ impl Screen {
                 "percent only"
             }
             .to_string(),
+            11 => match s.colors.as_str() {
+                "24-bit" | "256" => s.colors.clone(),
+                _ if crate::palette::truecolor_terminal() => "auto · 24-bit".into(),
+                _ => "auto · 256 (no 24-bit from this terminal)".into(),
+            },
             8 => {
                 if s.background == "terminal" {
                     "your terminal's".into()
@@ -480,6 +499,16 @@ impl Screen {
                 put(buf, x0 + 30, y, when, text);
             }
         }
+        if !self.s.true_color() && std::env::var("TERM_PROGRAM").as_deref() == Ok("Apple_Terminal")
+        {
+            put(
+                buf,
+                x0,
+                area.bottom().saturating_sub(2),
+                "Terminal.app before macOS 26 has 256 colours: run `sv terminal-colors` for the design's dark blue",
+                Style::default().fg(amber),
+            );
+        }
         let hint =
             "↑↓ setting · ←→ change · esc close  ·  `ls -l` and other flags always run the real ls";
         put(buf, x0, area.bottom().saturating_sub(1), hint, faint);
@@ -552,10 +581,11 @@ mod tests {
         for _ in 0..10 {
             sc.key(b"\x1b[B");
         }
-        assert_eq!(sc.sel, 10, "stops at the last row");
+        assert_eq!(sc.sel, 11, "stops at the last row");
+        sc.key(b"\x1b[A");
         sc.key(b"\x1b[A");
         sc.key(b"\x1b[C");
-        assert_eq!(sc.s.spinner, "dots");
+        assert_eq!(sc.s.spinner, "braille");
         sc.key(b"\x1b[B");
         sc.key(b"\r");
         assert!(!sc.s.progress_bar);

@@ -1585,7 +1585,7 @@ impl FilesPane {
                                 loading
                                     .flatten()
                                     .map(|p| format!("{p:>3}%"))
-                                    .unwrap_or_else(|| "    ".into())
+                                    .unwrap_or_else(|| "writing…".into())
                             ),
                             base.fg(AMBER),
                         )),
