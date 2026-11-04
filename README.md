@@ -5,7 +5,7 @@
 Shellvisor is a full-screen terminal app (like `tmux`, `htop` or `vim`) that runs your own zsh or bash in tabs and splits, and — as it grows — adds panes for files, live system stats, a data-flow view of your pipelines, and coding agents working side by side. Every command, alias and full-screen program you use today keeps working unchanged.
 
 > **Status: early development (P0–P4 of 7 done).**
-> Working today: tabs and splits of real zsh/bash shells, a tab bar that shows what each tab is doing (running ⠋, downloading ◐, failed ✖, new output •), a status bar, split layouts, your tabs restored after a restart, custom keys, and a one-key switch to *basic view*, which looks exactly like a plain terminal. Plus a **files pane** (tree, list, columns, grid, git changes, find, sizes, recent, preview) that follows your shell, a **system pane** (CPU, memory, disk, network, I/O, temperatures, processes), download/install progress for git, npm, pip, uv, brew, docker, cargo, curl and friends, **`sv` data commands** (nushell-style tables in bash/zsh) with an interactive table viewer, a **Flow pane** that shows the running job and meters pipelines stage by stage, and **coding agents side by side** (Claude Code, Codex, Gemini CLI, Aider or any command), each in its own git worktree, with one place to answer their approval prompts. Agents can start sub-agents, run as a team from `team.yaml`, or be planned from a goal on the agent board (`alt+g`). See [docs/ROADMAP.md](docs/ROADMAP.md).
+> Working today: tabs and splits of real zsh/bash shells, a tab bar that shows what each tab is doing (running ⠋, downloading ◐ with a progress bar, failed ✖, new output •), a status bar, split layouts, your tabs restored after a restart, custom keys, and a one-key switch to *basic view*, which looks exactly like a plain terminal. Plus a **files pane** (tree, list, columns, grid, git changes, find, sizes, recent, preview) that follows your shell, a **system pane** (CPU, memory, disk, network, I/O, temperatures, processes), download/install progress for git, npm, pip, uv, brew, docker, cargo, curl and friends, **`sv` data commands** (nushell-style tables in bash/zsh) with an interactive table viewer, a **Flow pane** that shows the running job and meters pipelines stage by stage, and **coding agents side by side** (Claude Code, Codex, Gemini CLI, Aider or any command), each in its own git worktree, with one place to answer their approval prompts. Agents can start sub-agents, run as a team from `team.yaml`, or be planned from a goal on the agent board (`alt+g`). See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Why
 
@@ -55,6 +55,7 @@ shellvisor --shell bash    # or pick: zsh, bash, or a full path
 | `alt+a` | agents waiting for approval: `y` allow · `n` deny · `a` always |
 | `sv layout dev` | files + shell + system + flow (also `monitor`, `files`, `data`, `agents`; or `alt+m`) |
 | `alt+e` | layout editor: start from a preset or a saved layout, add shell / files / git / system / thermals / flow panes, remove, resize (keys or mouse), undo; nothing changes until ⏎, esc puts it back. Save by name, as the default, or for this folder (`sv layout <name>` opens a saved one) |
+| `ctrl+]` `j` · `sv activity` | downloads & installs: progress bar, speed, time left; finished ones with `c` cd into it · `o` open in files (or click the download in the status bar) |
 | `alt+s` · `sv settings` | settings: colour of the folder in your prompt, of the commands you type and of folders in lists, `ls` as a table, table borders, theme |
 | `alt+m` | tab menu |
 | ``alt+` `` · `sv off` / `sv on` | basic view ⇄ full view |
@@ -93,6 +94,20 @@ CPU (history and per core), memory, swap, disks, network, disk I/O, load, temper
 
 Inside Shellvisor, `ls` (and `ls <folder>`, `ls -a`) prints a table like nushell's — name, type, size, modified — with folders in your folder colour, and `F4` explores it. `ls -l` and any other flag, `ls` in a pipe or script, and `command ls` are the real ls. Turn it off in settings (`alt+s`).
 
+### Downloads & installs
+
+Commands that download or install — `git clone/pull`, `npm/pnpm/yarn/bun install`, `pip`, `uv`, `poetry`, `conda`, `brew`, `apt`, `docker pull`, `cargo`, `go`, `gem`, `curl`, `wget`, `rsync`, `ollama pull`, `huggingface-cli download` and more — get a loading spinner and a filling progress bar in the tab, the pane title and the status bar, with the speed and time left when the tool prints them (git, curl, wget, pip, tqdm…; otherwise the time left is worked out from the progress):
+
+```
+◐ git clone ▕██████▌     ▏ 62% · 3.00 MiB/s · 6s left
+```
+
+- The **files pane** puts the spinner and % on the folder or file being filled (the clone, `node_modules`, the downloaded file).
+- **Coding agents** that run an install show it on their column too (spotted on screen: Claude Code's `Bash(npm install)`, `$ …` lines).
+- When it's done, a toast says so; for a clone or a download Shellvisor can find, **`ctrl+]` `c`** cds into it and **`ctrl+]` `o`** opens it in the files pane (for about 12 s, while the toast shows).
+- **`ctrl+]` `j`** (or `sv activity`, or a click on the download in the status bar) lists everything running and the last 20 that finished: bar, %, speed, time left, which tab; `⏎` goes to its shell, `c` / `o` as above, `x` clears the finished list.
+- Settings: spinner style (circle ◐, dots ⠋, arc ◜, line |, pulse ●, bounce ⠁) and bar or percent only.
+
 ### Settings
 
 `alt+s` (or `sv settings`) opens a settings screen with a live preview:
@@ -101,6 +116,7 @@ Inside Shellvisor, `ls` (and `ls <folder>`, `ls -a`) prints a table like nushell
 - the **colour of the commands you type** — light blue by default (the design's `#82aaff`), so your commands stand apart from their output, which stays in the normal text colour; `none` turns it off. With zsh-syntax-highlighting its colours win
 - the **colour of folders in lists** — the files pane and `ls` / `sv` tables
 - `ls` as a table on/off, table borders (rounded or plain), theme
+- **loading spinner** style and **download progress** as a bar or percent only
 - **dark background**: *design* (default) paints Shellvisor in the design's palette — a very dark blue-grey page `#0b0e12`, panels `#11151b`, shells on `#0e1217`, borders `#262c36`, text `#d6dbe3`, amber / cyan / green / red accents — or *terminal* to keep your terminal's own background. Programs inside shells keep their own colours; basic view always looks like your plain terminal. Terminals without 24-bit colour (e.g. older Terminal.app) get the nearest 256-colour shades
 
 Choices are saved in `~/.local/state/shellvisor/settings.yaml` (your config.yaml is never rewritten) and shells pick them up at the next prompt.

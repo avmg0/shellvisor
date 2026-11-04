@@ -178,6 +178,8 @@ Deliverables
 
 - Design palette (done): in full view, Shellvisor's frames, bars, panes and the shells' default background use the boards' colours (page #0b0e12, panels #11151b, shells #0e1217, bars #151a21, borders #262c36, text #d6dbe3, accents amber #e0a84a, cyan #6cc9d6, green #8fd18f, red #f07178). 24-bit where the terminal supports it, nearest 256-colour otherwise. Setting *Dark background: design / terminal*.
 
+- Downloads & installs, board 6 (done): a filling progress bar (eighth-block precision; a sliding block when there's no %) beside the spinner in the tab, pane title and status bar; speed and time left read from what tools print (git, curl's meter, wget, pip/rich, tqdm, "eta"/"left") or worked out from the progress, restarting per phase; activity list (`ctrl+] j`, `sv activity`, click the status bar) with running and the last 20 finished; the target of a download (clone folder, node_modules, target/, .venv, curl -o/-O, wget -O/-P, hf --local-dir; `cd x &&` followed) gets the spinner in the files pane; finish toast offers `ctrl+] c` cd into it / `ctrl+] o` open in files for 12 s; agents' installs from their screen (`Bash(…)`, `$ …`, `Running …`) on their column; settings for spinner style (circle, dots, arc, line, pulse, bounce) and bar on/off.
+
 Exit criteria: `sv resize` covered by an end-to-end test; a `v1.0.1` tag releases with one macOS job; CI and Release runs show no deprecation warnings.
 
 ---

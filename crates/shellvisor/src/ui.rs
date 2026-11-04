@@ -25,9 +25,6 @@ const CYAN: Color = Color::Indexed(73);
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-/// The loading circle for downloads and installs.
-const CIRCLE: [&str; 4] = ["◐", "◓", "◑", "◒"];
-
 fn tick(app: &App) -> usize {
     let every = if app.low_power { 250 } else { 100 };
     (app.epoch.elapsed().as_millis() / every) as usize
@@ -37,16 +34,28 @@ fn spinner(app: &App) -> &'static str {
     SPINNER[tick(app) % SPINNER.len()]
 }
 
-fn circle(app: &App) -> &'static str {
-    CIRCLE[(tick(app) / 2) % CIRCLE.len()]
+/// The loading spinner for downloads and installs (style from settings).
+fn circle(_app: &App) -> &'static str {
+    crate::loading::frame()
 }
 
-/// "◐ npm install 42%"
-fn activity_text(app: &App, a: &Activity) -> String {
-    match a.progress {
-        Some(p) => format!("{} {} {p}%", circle(app), a.label),
-        None => format!("{} {}", circle(app), a.label),
+/// "◐ npm install ▕████▌   ▏ 42% · 3.0 MB/s · 12s left" (`bar` cells wide;
+/// 0, or bars off in settings: no bar).
+pub fn activity_text(app: &App, a: &Activity, bar: usize) -> String {
+    let mut s = format!("{} {}", circle(app), a.label);
+    if bar > 0 && crate::loading::bar_on() {
+        s.push_str(&format!(" ▕{}▏", crate::loading::bar(a.progress, bar)));
     }
+    if let Some(p) = a.progress {
+        s.push_str(&format!(" {p}%"));
+    }
+    if let Some(sp) = &a.speed {
+        s.push_str(&format!(" · {sp}"));
+    }
+    if let Some(e) = a.eta {
+        s.push_str(&format!(" · {} left", crate::loading::eta(e)));
+    }
+    s
 }
 
 fn pane_block(title: String, is_focus: bool) -> Block<'static> {
@@ -76,6 +85,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         || app.table.is_some()
         || app.editor.is_some()
         || app.settings.is_some()
+        || app.acts_list.is_some()
         || !matches!(app.modal, Modal::None);
     let mut areas = crate::palette::Areas::default();
     if !covered {
@@ -170,6 +180,9 @@ fn draw_all(f: &mut Frame, app: &App) {
                 s => s.label(),
             };
             title.push_str(&format!("· {status} "));
+            if let Some(act) = &p.agent_act {
+                title.push_str(&format!("· {} ", activity_text(app, act, 8)));
+            }
             let files = a.files_summary();
             if !files.is_empty() {
                 title.push_str(&format!("· {files} "));
@@ -226,7 +239,7 @@ fn draw_all(f: &mut Frame, app: &App) {
         } else if full {
             let mut title = format!(" {} · {} ", p.shell, short_path(&p.cwd));
             if let Some(a) = &p.activity {
-                title.push_str(&format!("· {} ", activity_text(app, a)));
+                title.push_str(&format!("· {} ", activity_text(app, a, 10)));
             }
             if zoomed {
                 title.push_str("· zoomed ");
@@ -288,6 +301,10 @@ fn draw_all(f: &mut Frame, app: &App) {
             .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
             .unwrap_or_else(|| "~".into());
         sc.render(inner, f.buffer_mut(), &sc.who, &folder);
+    }
+
+    if let Some(sel) = app.acts_list {
+        draw_activity(f, app, sel);
     }
 
     if let Some(ed) = &app.editor {
@@ -352,8 +369,30 @@ fn draw_all(f: &mut Frame, app: &App) {
                 1,
             ));
             f.render_widget(Clear, row);
+            // a download just finished: its actions come first
+            let offer = app
+                .toast_act
+                .as_ref()
+                .filter(|(_, at)| at.elapsed() < crate::app::TOAST_ACT)
+                .map(|(d, _)| {
+                    let name = d
+                        .target
+                        .as_ref()
+                        .and_then(|t| t.file_name())
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    if d.target.as_ref().is_some_and(|t| t.is_dir()) {
+                        format!(" ctrl+] → c cd into {name} · o open {name} in files ·")
+                    } else {
+                        format!(" ctrl+] → o show {name} in files ·")
+                    }
+                });
+            let hint = match offer {
+                Some(o) => format!("{o}{}", keys::LEADER_HINT.trim_start_matches(" ctrl+] →")),
+                None => keys::LEADER_HINT.to_string(),
+            };
             f.render_widget(
-                Paragraph::new(keys::LEADER_HINT).style(Style::default().bg(AMBER).fg(INK)),
+                Paragraph::new(hint).style(Style::default().bg(AMBER).fg(INK)),
                 row,
             );
         }
@@ -401,7 +440,12 @@ fn draw_all(f: &mut Frame, app: &App) {
         Modal::None => {}
     }
 
-    if !matches!(app.modal, Modal::Help) && app.table.is_none() && app.board.is_none() {
+    let overlay = app.table.is_some()
+        || app.board.is_some()
+        || app.settings.is_some()
+        || app.acts_list.is_some()
+        || app.editor.is_some();
+    if !matches!(app.modal, Modal::Help) && !overlay {
         if let Some((_, _, inner)) = app.visible().into_iter().find(|(id, _, _)| *id == focused) {
             if let Some((x, y)) = app.panes.get(&focused).and_then(|p| p.pane.cursor()) {
                 if x < inner.width && y < inner.height {
@@ -502,6 +546,8 @@ fn tab_label(app: &App, i: usize) -> (String, Option<(String, Color)>) {
         let n = agents_here.len();
         let icon = if agents_here.iter().any(|a| a.approval().is_some()) {
             Some(("⚑".to_string(), AMBER))
+        } else if panes.iter().any(|p| p.agent_act.is_some()) {
+            Some((circle(app).to_string(), AMBER))
         } else if agents_here
             .iter()
             .any(|a| matches!(a.status, agents::Status::Working | agents::Status::Starting))
@@ -623,20 +669,16 @@ fn draw_status(f: &mut Frame, app: &App, r: Rect) {
             ));
         }
     }
-    // Downloads anywhere (other tabs too) show here.
-    let acts: Vec<&Activity> = app
-        .panes
-        .values()
-        .filter_map(|p| p.activity.as_ref())
-        .collect();
-    if let Some(first) = acts.first() {
+    // Downloads anywhere (other tabs, agents too) show here; a click lists them.
+    let acts = app.activities();
+    if let Some((_, first, _)) = acts.first() {
         let more = if acts.len() > 1 {
             format!(" +{}", acts.len() - 1)
         } else {
             String::new()
         };
         left.push(Span::styled(
-            format!(" {}{more} ", activity_text(app, first)),
+            format!(" {}{more} ", activity_text(app, first, 8)),
             Style::default().fg(AMBER).bg(BAR),
         ));
     } else if let Some(cmd) = &app.bar_running {
@@ -1082,6 +1124,187 @@ fn draw_menu(f: &mut Frame, app: &App, sel: usize) {
         ))
         .title_bottom(Span::styled(" ↑↓ ⏎ · esc ", Style::default().fg(DIM)));
     f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// The activity list: downloads and installs running (with bar, speed,
+/// time left) and the ones that finished.
+fn draw_activity(f: &mut Frame, app: &App, sel: usize) {
+    let (_, content, _) = app.regions();
+    let w = content.width.min(110);
+    let h = content.height.min(26);
+    if w < 30 || h < 8 {
+        return;
+    }
+    let r = Rect::new(
+        content.x + (content.width - w) / 2,
+        content.y + (content.height - h) / 2,
+        w,
+        h,
+    );
+    f.render_widget(Clear, r);
+    let running = app.activities();
+    let title = format!(
+        " {} downloads & installs · {} running · {} finished ",
+        circle(app),
+        running.len(),
+        app.done.len()
+    );
+    let block = pane_block(title, true);
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    let buf = f.buffer_mut();
+    let text = Style::default().fg(Color::Indexed(252));
+    let dim = Style::default().fg(DIM);
+    let faint = Style::default().fg(FAINT);
+    let amber = Style::default().fg(AMBER);
+    let put = |buf: &mut ratatui::buffer::Buffer, x: u16, y: u16, s: &str, st: Style| {
+        if y < inner.bottom() && x < inner.right() {
+            buf.set_stringn(x, y, s, (inner.right() - x) as usize, st);
+        }
+    };
+    let x0 = inner.x + 1;
+    let wide = inner.width >= 96;
+    let mut y = inner.y;
+    // the name of what it makes, else the rest of the command
+    let what = |label: &str, cmd: &str, target: &Option<std::path::PathBuf>| -> String {
+        let s = match target.as_ref().and_then(|t| t.file_name()) {
+            Some(n) => n.to_string_lossy().into_owned(),
+            None => {
+                let rest = cmd.split_once(label).map(|(_, r)| r).unwrap_or(cmd);
+                rest.trim().to_string()
+            }
+        };
+        let mut s: String = s.chars().take(22).collect();
+        if s.chars().count() == 22 {
+            s.pop();
+            s.push('…');
+        }
+        s
+    };
+    let tab_name = |id| {
+        app.tab_of(id)
+            .map(|t| format!("tab {}", t + 1))
+            .unwrap_or_else(|| "closed".into())
+    };
+    let row_style = |i: usize| {
+        if i == sel {
+            Style::default()
+                .bg(Color::Indexed(238))
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        }
+    };
+    put(buf, x0, y, "Running", dim);
+    y += 1;
+    if running.is_empty() {
+        put(buf, x0 + 2, y, "nothing downloading right now", faint);
+        y += 1;
+    }
+    for (i, (id, a, agent)) in running.iter().enumerate() {
+        let st = row_style(i);
+        buf.set_style(Rect::new(inner.x, y, inner.width, 1), st);
+        put(
+            buf,
+            x0,
+            y,
+            &format!("{} {:<14}", circle(app), a.label),
+            amber.patch(st),
+        );
+        put(
+            buf,
+            x0 + 17,
+            y,
+            &what(&a.label, &a.cmd, &a.target),
+            text.patch(st),
+        );
+        let mut x = x0 + 41;
+        put(buf, x, y, "▕", faint.patch(st));
+        put(
+            buf,
+            x + 1,
+            y,
+            &crate::loading::bar(a.progress, 14),
+            amber.patch(st),
+        );
+        put(buf, x + 15, y, "▏", faint.patch(st));
+        x += 17;
+        let pct = a
+            .progress
+            .map(|p| format!("{p:>3}%"))
+            .unwrap_or_else(|| "   …".into());
+        put(buf, x, y, &pct, text.patch(st));
+        x += 6;
+        if wide {
+            put(buf, x, y, a.speed.as_deref().unwrap_or("—"), text.patch(st));
+            x += 12;
+        }
+        let left = match a.eta {
+            Some(e) => format!("{} left", crate::loading::eta(e)),
+            None => format!("{} so far", fmt_secs(a.started.elapsed().as_secs())),
+        };
+        put(buf, x, y, &left, dim.patch(st));
+        x += 14;
+        let place = match agent {
+            Some(n) => format!("agent {n}"),
+            None => tab_name(*id),
+        };
+        put(buf, x, y, &place, faint.patch(st));
+        y += 1;
+    }
+    y += 1;
+    put(buf, x0, y, "Finished", dim);
+    y += 1;
+    if app.done.is_empty() {
+        put(buf, x0 + 2, y, "nothing yet", faint);
+    }
+    let footer = inner.bottom().saturating_sub(2);
+    for (j, d) in app.done.iter().enumerate() {
+        if y >= footer {
+            break;
+        }
+        let i = running.len() + j;
+        let st = row_style(i);
+        buf.set_style(Rect::new(inner.x, y, inner.width, 1), st);
+        let (icon, c) = if d.ok { ("✔", GREEN) } else { ("✖", RED) };
+        put(buf, x0, y, icon, Style::default().fg(c).patch(st));
+        put(buf, x0 + 2, y, &format!("{:<14}", d.label), text.patch(st));
+        put(
+            buf,
+            x0 + 17,
+            y,
+            &what(&d.label, &d.cmd, &d.target),
+            text.patch(st),
+        );
+        let ago = d.at.elapsed().as_secs();
+        let ago = if ago < 60 {
+            "just now".to_string()
+        } else {
+            format!("{} ago", fmt_secs(ago))
+        };
+        put(
+            buf,
+            x0 + 41,
+            y,
+            &format!("took {} · {ago}", fmt_secs(d.took)),
+            dim.patch(st),
+        );
+        let acts = match &d.target {
+            Some(t) if t.is_dir() => "c cd · o open",
+            Some(_) => "o show",
+            None => "",
+        };
+        put(buf, x0 + 75, y, acts, amber.patch(st));
+        put(buf, x0 + 90, y, &tab_name(d.pane), faint.patch(st));
+        y += 1;
+    }
+    put(
+        buf,
+        x0,
+        inner.bottom().saturating_sub(1),
+        "↑↓ select · ⏎ go to its shell · c cd into it · o open in files · x clear finished · esc close",
+        faint,
+    );
 }
 
 #[cfg(test)]

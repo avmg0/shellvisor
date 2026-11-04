@@ -204,6 +204,23 @@ enum Ev {
     Quit,
 }
 
+/// A download/install that finished.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Finished {
+    pub label: String,
+    pub cmd: String,
+    pub target: Option<PathBuf>,
+    pub ok: bool,
+    /// Seconds it ran.
+    pub took: u64,
+    pub at: Instant,
+    /// The shell it ran in.
+    pub pane: PaneId,
+}
+
+/// How long a finished download's actions stay on offer.
+pub const TOAST_ACT: Duration = Duration::from_secs(12);
+
 /// One shell and what we know about it.
 pub struct PaneState {
     pub pane: Pane,
@@ -218,6 +235,8 @@ pub struct PaneState {
     pub bell: bool,
     /// A download/install spotted from the command line.
     pub activity: Option<Activity>,
+    /// A download/install a coding agent in this pane is running (from its screen).
+    pub agent_act: Option<Activity>,
     /// Rows of the last table `sv` printed here (for F4).
     pub table: Option<PathBuf>,
     /// Stats file of the last `sv flow` run here.
@@ -335,6 +354,12 @@ pub struct App {
     pub editor: Option<crate::layouted::Editor>,
     /// The settings screen (alt+s).
     pub settings: Option<crate::settings::Screen>,
+    /// The activity list (ctrl+] j, `sv activity`), with the selected row.
+    pub acts_list: Option<usize>,
+    /// Downloads and installs that finished, newest first.
+    pub done: std::collections::VecDeque<Finished>,
+    /// The last finished download's actions (ctrl+] c cd · o open), while its toast shows.
+    pub toast_act: Option<(Finished, Instant)>,
     /// Current settings (folder colours …).
     pub ui: crate::settings::Settings,
     /// Kept while the board is closed, so the plan survives.
@@ -428,6 +453,9 @@ pub fn run(opts: Options) -> io::Result<i32> {
         drag: None,
         editor: None,
         settings: None,
+        acts_list: None,
+        done: std::collections::VecDeque::new(),
+        toast_act: None,
         ui: crate::settings::Settings::load(),
         bus_log: std::collections::VecDeque::new(),
         low_power,
@@ -454,6 +482,9 @@ pub fn run(opts: Options) -> io::Result<i32> {
         session_locked: false,
         last_save: Instant::now(),
     };
+    crate::loading::set_style(&app.ui.spinner);
+    crate::loading::set_bar(app.ui.progress_bar);
+    crate::loading::set_low_power(app.low_power);
     let first = app.new_pane(None)?;
     app.tabs.push(Tab::new(first));
     app.offer_restore()?;
@@ -750,6 +781,7 @@ impl App {
                 unseen: false,
                 bell: false,
                 activity: None,
+                agent_act: None,
                 table: None,
                 flow: None,
                 agent: None,
@@ -800,6 +832,7 @@ impl App {
             Tool::Files(f)
         };
         self.tools.insert(id, tool);
+        self.update_loading_marks();
         id
     }
 
@@ -1027,20 +1060,212 @@ impl App {
         let Some(p) = self.panes.get_mut(&id) else {
             return;
         };
-        if !p.progress_due || p.activity.is_none() || p.progress_at.elapsed() < PROGRESS_EVERY {
+        if !p.progress_due
+            || (p.activity.is_none() && p.agent.is_none())
+            || p.progress_at.elapsed() < PROGRESS_EVERY
+        {
             return;
         }
         p.progress_due = false;
         p.progress_at = Instant::now();
         let cols = p.size.1;
         let rows: Vec<String> = p.pane.screen().rows(0, cols).collect();
-        let progress = activity::progress(rows.iter().map(String::as_str));
+        let reading = activity::read_screen(rows.iter().map(String::as_str));
+        let mut marks = false;
         if let Some(a) = p.activity.as_mut() {
-            if progress.is_some() && progress != a.progress {
-                a.progress = progress;
+            let before = a.progress;
+            if a.update(reading.clone()) {
                 self.dirty = true;
             }
+            marks |= a.progress != before || a.target.is_some() && before.is_none();
         }
+        // a coding agent running an install: from what its screen shows
+        if let Some(agent) = p.agent.as_ref() {
+            let working = matches!(agent.status, agents::Status::Working) && !agent.paused;
+            let cmd = working
+                .then(|| activity::agent_command(rows.iter().map(String::as_str)))
+                .flatten();
+            match cmd {
+                Some(cmd) => {
+                    if p.agent_act.as_ref().is_none_or(|a| a.cmd != cmd) {
+                        p.agent_act = activity::start(&cmd, Path::new(&p.cwd));
+                        marks = true;
+                    }
+                    if let Some(a) = p.agent_act.as_mut() {
+                        a.update(reading);
+                    }
+                    self.dirty = true;
+                }
+                None if p.agent_act.is_some() => {
+                    p.agent_act = None;
+                    marks = true;
+                    self.dirty = true;
+                }
+                None => {}
+            }
+        }
+        if marks {
+            self.update_loading_marks();
+        }
+    }
+
+    /// Show a loading mark on the folders downloads are filling (files panes).
+    fn update_loading_marks(&mut self) {
+        let mut marks: HashMap<PathBuf, Option<u8>> = HashMap::new();
+        for p in self.panes.values() {
+            for a in [p.activity.as_ref(), p.agent_act.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                if let Some(t) = &a.target {
+                    marks.insert(t.clone(), a.progress);
+                }
+            }
+        }
+        for t in self.tools.values_mut() {
+            if let Tool::Files(fp) = t {
+                if fp.loading.keys().ne(marks.keys()) || fp.loading != marks {
+                    fp.loading = marks.clone();
+                    self.dirty = true;
+                }
+            }
+        }
+    }
+
+    /// Every download and install in flight: (shell pane, activity, agent name).
+    pub fn activities(&self) -> Vec<(PaneId, &Activity, Option<&str>)> {
+        let mut v: Vec<(PaneId, &Activity, Option<&str>)> = Vec::new();
+        for (id, p) in &self.panes {
+            if let Some(a) = &p.activity {
+                v.push((*id, a, None));
+            }
+            if let Some(a) = &p.agent_act {
+                v.push((*id, a, p.agent.as_ref().map(|g| g.name.as_str())));
+            }
+        }
+        v.sort_by_key(|(_, a, _)| a.started);
+        v
+    }
+
+    /// cd into a finished download (its folder), in the shell it ran in.
+    fn done_cd(&mut self, d: &Finished) {
+        let Some(target) = d.target.clone() else {
+            return;
+        };
+        let dir = if target.is_dir() {
+            target
+        } else {
+            match target.parent() {
+                Some(p) => p.to_path_buf(),
+                None => return,
+            }
+        };
+        let id = if self.panes.contains_key(&d.pane) {
+            d.pane
+        } else {
+            self.focused()
+        };
+        let Some(p) = self.panes.get_mut(&id) else {
+            return;
+        };
+        if p.running {
+            self.notice("the shell is busy — wait for the command to finish");
+            return;
+        }
+        let cwd = PathBuf::from(&p.cwd);
+        let text = format!("\x05\x15cd {}\r", shell_quote(&relative(&dir, &cwd)));
+        let _ = p.pane.write(text.as_bytes());
+        self.focus_pane(id);
+        self.toast_act = None;
+        self.notice = None;
+        self.dirty = true;
+    }
+
+    /// Open a finished download in the files pane of its tab (a folder: its
+    /// contents; a file: selected in its folder).
+    fn done_open(&mut self, d: &Finished) -> io::Result<()> {
+        let Some(target) = d.target.clone() else {
+            return Ok(());
+        };
+        if let Some(t) = self.tab_of(d.pane) {
+            self.switch_tab(t);
+        }
+        if self.view == View::Basic {
+            self.set_view(View::Full);
+        }
+        let tab = self.active;
+        let existing = self.tabs[tab]
+            .root
+            .panes()
+            .into_iter()
+            .find(|id| matches!(self.tools.get(id), Some(Tool::Files(_))));
+        let fid = match existing {
+            Some(id) => id,
+            None => {
+                self.show_tool("files", false)?;
+                self.focused()
+            }
+        };
+        if let Some(Tool::Files(f)) = self.tools.get_mut(&fid) {
+            let jobs = f.reveal(&target);
+            self.run_jobs(fid, jobs);
+        }
+        let t = &mut self.tabs[tab];
+        t.focus = fid;
+        t.zoomed = false;
+        self.toast_act = None;
+        self.notice = None;
+        self.relayout();
+        Ok(())
+    }
+
+    /// Keys in the activity list.
+    fn acts_key(&mut self, key: &[u8]) -> io::Result<()> {
+        self.dirty = true;
+        let Some(sel) = self.acts_list else {
+            return Ok(());
+        };
+        let running: Vec<PaneId> = self.activities().iter().map(|(id, _, _)| *id).collect();
+        let n = running.len() + self.done.len();
+        match key {
+            b"\x1b[A" | b"\x1bOA" | b"k" => self.acts_list = Some(sel.saturating_sub(1)),
+            b"\x1b[B" | b"\x1bOB" | b"j" => {
+                self.acts_list = Some((sel + 1).min(n.saturating_sub(1)))
+            }
+            b"\r" => {
+                self.acts_list = None;
+                let id = if sel < running.len() {
+                    Some(running[sel])
+                } else {
+                    self.done.get(sel - running.len()).map(|d| d.pane)
+                };
+                if let Some(id) = id.filter(|id| self.panes.contains_key(id)) {
+                    self.focus_pane(id);
+                }
+            }
+            b"c" | b"o" if sel >= running.len() => {
+                if let Some(d) = self.done.get(sel - running.len()).cloned() {
+                    if d.target.is_none() {
+                        self.notice("nothing to open: Shellvisor can't tell where that went");
+                    } else {
+                        self.acts_list = None;
+                        if key == b"c" {
+                            self.done_cd(&d);
+                        } else {
+                            self.done_open(&d)?;
+                        }
+                    }
+                }
+            }
+            b"c" | b"o" => self.notice("still running — c and o work once it has finished"),
+            b"x" => {
+                self.done.clear();
+                self.acts_list = Some(sel.min(running.len().saturating_sub(1)));
+            }
+            b"\x1b" | b"q" => self.acts_list = None,
+            _ => {}
+        }
+        Ok(())
     }
 
     /// Tool panes on screen right now.
@@ -1264,7 +1489,7 @@ impl App {
 
     // ---------------------------------------------------------------- output
 
-    fn tab_of(&self, id: PaneId) -> Option<usize> {
+    pub fn tab_of(&self, id: PaneId) -> Option<usize> {
         self.tabs.iter().position(|t| t.root.contains(id))
     }
 
@@ -1302,7 +1527,7 @@ impl App {
         }
         // After the events: the command may have started in this same chunk.
         if let Some(p) = self.panes.get_mut(&id) {
-            if p.activity.is_some() {
+            if p.activity.is_some() || p.agent.is_some() {
                 p.progress_due = true;
             }
             if let Some(a) = p.agent.as_mut() {
@@ -1336,13 +1561,13 @@ impl App {
             ShellEvent::CommandText(t) => {
                 p.command = t;
                 if p.running {
-                    p.activity = activity::classify(&p.command);
+                    p.activity = activity::start(&p.command, Path::new(&p.cwd));
                 }
             }
             ShellEvent::CommandStarted => {
                 p.started = Some(Instant::now());
                 p.running = true;
-                p.activity = activity::classify(&p.command);
+                p.activity = activity::start(&p.command, Path::new(&p.cwd));
                 if let Some(a) = p.agent.as_mut() {
                     // the agent (or another command) runs again in its column
                     let cli = Cli::of_command(&p.command);
@@ -1389,14 +1614,49 @@ impl App {
                 p.command.clear();
                 self.dirty = true;
                 if let Some(a) = done {
-                    self.notice(match code {
-                        Some(0) | None => {
-                            format!("✔ {} finished · {}", a.label, ui::fmt_secs(took))
-                        }
-                        Some(c) => {
-                            format!("✖ {} failed (exit {c}) · {}", a.label, ui::fmt_secs(took))
-                        }
-                    });
+                    let ok = matches!(code, Some(0) | None);
+                    let d = Finished {
+                        label: a.label.clone(),
+                        cmd: a.cmd.clone(),
+                        target: a.target.clone().filter(|t| t.exists()),
+                        ok,
+                        took,
+                        at: Instant::now(),
+                        pane: id,
+                    };
+                    let what = d
+                        .target
+                        .as_ref()
+                        .and_then(|t| t.file_name())
+                        .map(|n| format!(" · {}", n.to_string_lossy()))
+                        .unwrap_or_default();
+                    let mut msg = if ok {
+                        format!("✔ {} finished{what} · {}", a.label, ui::fmt_secs(took))
+                    } else {
+                        format!(
+                            "✖ {} failed (exit {}) · {}",
+                            a.label,
+                            code.unwrap_or(-1),
+                            ui::fmt_secs(took)
+                        )
+                    };
+                    self.done.push_front(d.clone());
+                    self.done.truncate(20);
+                    if ok && d.target.is_some() {
+                        let dir = d.target.as_ref().is_some_and(|t| t.is_dir());
+                        msg.push_str(if dir {
+                            " · ctrl+] c cd · o open in files"
+                        } else {
+                            " · ctrl+] o show in files"
+                        });
+                        self.toast_act = Some((d, Instant::now()));
+                        // stays up as long as its actions are on offer
+                        self.notice = Some((msg, Instant::now() + (TOAST_ACT - NOTICE)));
+                        self.dirty = true;
+                    } else {
+                        self.notice(msg);
+                    }
+                    self.update_loading_marks();
                 }
                 if let Some((name, files, branch)) = agent_done {
                     let what = if files.is_empty() {
@@ -1504,6 +1764,11 @@ impl App {
                 self.settings_key(key);
                 continue;
             }
+            if self.acts_list.is_some() && self.modal == Modal::None {
+                self.flush_forward(&mut forward)?;
+                self.acts_key(key)?;
+                continue;
+            }
             if self.editor.is_some() && self.modal == Modal::None && self.table.is_none() {
                 self.editor_key(key)?;
                 continue;
@@ -1608,8 +1873,24 @@ impl App {
                 Modal::Leader => {
                     self.modal = Modal::None;
                     self.dirty = true;
+                    let offer = self
+                        .toast_act
+                        .as_ref()
+                        .filter(|(_, at)| at.elapsed() < TOAST_ACT)
+                        .map(|(d, _)| d.clone());
                     if key == [0x1d] {
                         forward.push(0x1d); // ctrl+] twice = a real ctrl+]
+                    } else if let (Some(d), b"c") = (&offer, key) {
+                        if d.target.as_ref().is_some_and(|t| t.is_dir()) {
+                            self.flush_forward(&mut forward)?;
+                            self.done_cd(d);
+                        } else if let Some(cmd) = keys::after_leader(key) {
+                            self.flush_forward(&mut forward)?;
+                            self.run_cmd(cmd)?;
+                        }
+                    } else if let (Some(d), b"o") = (&offer, key) {
+                        self.flush_forward(&mut forward)?;
+                        self.done_open(d)?;
                     } else if let Some(cmd) = keys::after_leader(key) {
                         self.flush_forward(&mut forward)?;
                         self.run_cmd(cmd)?;
@@ -3584,6 +3865,23 @@ impl App {
     /// Idle detection, trailing approval checks, and git change polling.
     fn tick_agents(&mut self) {
         self.check_waiters();
+        // an agent that stopped working isn't installing anything any more
+        let mut cleared = false;
+        for p in self.panes.values_mut() {
+            let stale = p.agent.as_ref().is_none_or(|a| {
+                !matches!(a.status, agents::Status::Working)
+                    || a.paused
+                    || a.last_output.elapsed() > Duration::from_secs(30)
+            });
+            if p.agent_act.is_some() && stale {
+                p.agent_act = None;
+                cleared = true;
+            }
+        }
+        if cleared {
+            self.update_loading_marks();
+            self.dirty = true;
+        }
         let ids = self.agent_ids();
         if ids.is_empty() {
             if !self.agents_json.is_empty() && self.agents_json != "[]" {
@@ -3748,7 +4046,16 @@ impl App {
                 return Ok(());
             }
         }
-        let (tabbar, _, _) = self.regions();
+        let (tabbar, _, status) = self.regions();
+        if let Some(st) = status {
+            if ev.y == st.y && ev.is_left_press() && ev.x < st.x + st.width / 2 {
+                if !self.activities().is_empty() || !self.done.is_empty() {
+                    self.acts_list = Some(0);
+                    self.dirty = true;
+                }
+                return Ok(());
+            }
+        }
         if let Some(bar) = tabbar {
             if ev.y == bar.y {
                 if ev.is_left_press() {
@@ -3856,6 +4163,11 @@ impl App {
                 Ok(())
             }
             ["system"] => self.show_tool("system", false),
+            ["activity"] => {
+                self.acts_list = Some(0);
+                self.dirty = true;
+                Ok(())
+            }
             ["settings"] => {
                 self.settings = Some(crate::settings::Screen::new());
                 self.dirty = true;
@@ -3962,6 +4274,7 @@ impl App {
 
     fn set_low_power(&mut self, on: bool) {
         self.low_power = on;
+        crate::loading::set_low_power(on);
         self.notice(format!("low-power mode {}", if on { "on" } else { "off" }));
     }
 
@@ -4049,6 +4362,8 @@ impl App {
                 f.folder_style = style;
             }
         }
+        crate::loading::set_style(&s.spinner);
+        crate::loading::set_bar(s.progress_bar);
         match s.theme.as_str() {
             "light" => self.light = true,
             "dark" => self.light = false,
@@ -4490,6 +4805,7 @@ impl App {
             Cmd::Settings => {
                 self.settings = Some(crate::settings::Screen::new());
             }
+            Cmd::Activity => self.acts_list = Some(0),
             Cmd::LayoutEditor => {
                 if self.view == View::Basic {
                     self.set_view(View::Full);

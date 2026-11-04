@@ -56,6 +56,10 @@ pub struct Settings {
     /// Dark theme background: "design" (the boards' dark blue-grey and
     /// colours) or "terminal" (your terminal's own background).
     pub background: String,
+    /// Spinner for downloads and installs: circle, dots, arc, line, pulse, bounce.
+    pub spinner: String,
+    /// Downloads show a filling bar (or only the percentage).
+    pub progress_bar: bool,
 }
 
 impl Default for Settings {
@@ -70,6 +74,8 @@ impl Default for Settings {
             table_borders: "rounded".into(),
             theme: String::new(),
             background: "design".into(),
+            spinner: "circle".into(),
+            progress_bar: true,
         }
     }
 }
@@ -145,7 +151,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
-const ROWS: [&str; 9] = [
+const ROWS: [&str; 11] = [
     "Folder colour in the prompt",
     "Folder in the prompt bold",
     "Commands you type",
@@ -155,6 +161,8 @@ const ROWS: [&str; 9] = [
     "Table borders",
     "Theme",
     "Dark background",
+    "Loading spinner",
+    "Download progress",
 ];
 
 /// The settings screen (alt+s, `sv settings`): ↑↓ pick, ←→ change.
@@ -208,6 +216,11 @@ impl Screen {
             5 => s.ls_table = !s.ls_table,
             6 => s.table_borders = cycle(&["rounded", "plain"], &s.table_borders, by),
             8 => s.background = cycle(&["design", "terminal"], &s.background, by),
+            9 => {
+                let names: Vec<&str> = crate::loading::STYLES.iter().map(|(n, _)| *n).collect();
+                s.spinner = cycle(&names, &s.spinner, by);
+            }
+            10 => s.progress_bar = !s.progress_bar,
             _ => {
                 let cur = if s.theme.is_empty() {
                     "config"
@@ -236,6 +249,13 @@ impl Screen {
             4 => on(s.list_bold),
             5 => on(s.ls_table),
             6 => s.table_borders.clone(),
+            9 => format!("{} {}", crate::loading::frame_of(&s.spinner), s.spinner),
+            10 => if s.progress_bar {
+                "bar"
+            } else {
+                "percent only"
+            }
+            .to_string(),
             8 => {
                 if s.background == "terminal" {
                     "your terminal's".into()
@@ -337,6 +357,19 @@ impl Screen {
             .map(|c| Style::default().fg(Color::Indexed(c)))
             .unwrap_or(text);
         put(buf, x, y, "ls", tst);
+        y += 1;
+        // download preview
+        let frame = crate::loading::frame_of(&self.s.spinner);
+        let amber_st = Style::default().fg(amber);
+        put(buf, x0 + 1, y, &format!("{frame} git clone"), amber_st);
+        let mut dx = x0 + 13;
+        if self.s.progress_bar {
+            put(buf, dx, y, "▕", faint);
+            put(buf, dx + 1, y, &crate::loading::bar(Some(45), 12), amber_st);
+            put(buf, dx + 13, y, "▏", faint);
+            dx += 15;
+        }
+        put(buf, dx, y, "45% · 3.0 MB/s · 12s left", text);
         y += 1;
         // ls preview
         let mut lst = text;
@@ -516,6 +549,16 @@ mod tests {
         }
         sc.key(b" ");
         assert!(!sc.s.ls_table);
+        for _ in 0..10 {
+            sc.key(b"\x1b[B");
+        }
+        assert_eq!(sc.sel, 10, "stops at the last row");
+        sc.key(b"\x1b[A");
+        sc.key(b"\x1b[C");
+        assert_eq!(sc.s.spinner, "dots");
+        sc.key(b"\x1b[B");
+        sc.key(b"\r");
+        assert!(!sc.s.progress_bar);
         assert_eq!(sc.key(b"\x1b"), (false, true));
         let area = Rect::new(0, 0, 100, 30);
         let mut buf = Buffer::empty(area);

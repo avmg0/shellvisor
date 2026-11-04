@@ -112,6 +112,7 @@ pub enum Cmd {
     LayoutEditor,
     Settings,
     AttachAgent,
+    Activity,
 }
 
 /// Ready-made layouts for a tab.
@@ -285,6 +286,12 @@ pub const ACTIONS: &[(&str, Cmd, &[&str], &str)] = &[
         Cmd::Settings,
         &["alt+s"],
         "settings: folder colours (prompt, lists), ls as a table, table borders, theme",
+    ),
+    (
+        "activity",
+        Cmd::Activity,
+        &[],
+        "downloads & installs: progress, speed, time left; c cd · o open (also: ctrl+] j, sv activity)",
     ),
     (
         "layout_editor",
@@ -568,6 +575,7 @@ pub fn after_leader(key: &[u8]) -> Option<Cmd> {
         b"e" => AgentBoard,
         b"E" => LayoutEditor,
         b"," => Settings,
+        b"j" => Activity,
         b"\x1b[A" => Focus(Dir::Up),
         b"\x1b[B" => Focus(Dir::Down),
         b"\x1b[C" => Focus(Dir::Right),
@@ -577,7 +585,7 @@ pub fn after_leader(key: &[u8]) -> Option<Cmd> {
     })
 }
 
-pub const LEADER_HINT: &str = " ctrl+] → t tab · w close tab · x close split · \\ split │ · - split ─ · o next split · z zoom · l layout · m menu · f files · s system · d flow · g agents · + new agent · a approvals · e agent board · E layout editor · , settings · ; command bar · v table · b basic view · r rename · 1-9 tab · ? help · ctrl+] send ctrl+] ";
+pub const LEADER_HINT: &str = " ctrl+] → t tab · w close tab · x close split · \\ split │ · - split ─ · o next split · z zoom · l layout · m menu · f files · s system · d flow · g agents · + new agent · a approvals · e agent board · E layout editor · , settings · j downloads · ; command bar · v table · b basic view · r rename · 1-9 tab · ? help · ctrl+] send ctrl+] ";
 
 /// On macOS, Option+key types these characters unless the terminal is set to
 /// send Option as Alt/Meta. Seeing one alone means alt shortcuts can't work.

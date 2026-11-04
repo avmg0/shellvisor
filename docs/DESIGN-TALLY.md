@@ -4,7 +4,7 @@ Checked 2026-11-05 against Shellvisor 1.0.0 plus the v1.0.1 work in `main`
 (layout editor screen, settings screen, `ls` as a table). One row per thing a
 board shows. ✅ built · ◐ built differently or in part · ✗ not built.
 
-Totals: **17 boards · 111 items · 75 ✅ built · 10 ◐ partly or differently · 26 ✗ not built**.
+Totals: **17 boards · 111 items · 78 ✅ built · 11 ◐ partly or differently · 22 ✗ not built**.
 
 ## 1 · Default workspace (`sv layout dev`)
 
@@ -78,12 +78,12 @@ Totals: **17 boards · 111 items · 75 ✅ built · 10 ◐ partly or differently
 | Item | | Notes |
 |---|---|---|
 | Detected from git, npm, pip, uv, brew, docker, cargo, curl … | ✅ | |
-| Loading circle + % in tab, pane title, status bar | ✅ | |
+| Loading circle + % in tab, pane title, status bar | ✅ | v1.0.1 adds a filling progress bar, speed and time left |
 | ✔ / ✖ then a toast with duration | ✅ | |
-| Activity list with ETA and rate per download | ✗ | |
-| Spinner style setting | ✗ | |
-| Toast actions (`c` cd into it, `o` open in files) | ✗ | |
-| Loading state in agent column / file tree node | ✗ | |
+| Activity list with ETA and rate per download | ✅ | v1.0.1; `ctrl+] j`, `sv activity`, click the status bar |
+| Spinner style setting | ✅ | v1.0.1; circle, dots, arc, line, pulse, bounce; bar or percent |
+| Toast actions (`c` cd into it, `o` open in files) | ◐ | v1.0.1; `ctrl+] c` / `ctrl+] o` while the toast shows (plain `c` would go to your shell); plain `c` / `o` in the activity list |
+| Loading state in agent column / file tree node | ✅ | v1.0.1; agents' installs spotted on their screen |
 
 ## 7 · Agents, Auto-plan
 
@@ -212,5 +212,4 @@ install script / signed releases, `sv agent emit|usage|budget`.
 1. File views: view numbers as on the boards; list sorting and multi-select; git groups (staged / untracked / by agent); size `x` delete.
 2. Tabs: ✔ mark, `?` waiting for input, pinned tabs, compact bar, more tab-menu items.
 3. Agents: broadcast, diff view, keys for pause-all in the agents tab, promote / spawn from the tree.
-4. Activity list with ETA, toast actions.
-5. Focus status strip, basic-view hint, flow throughput graph.
+4. Focus status strip, basic-view hint, flow throughput graph.

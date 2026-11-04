@@ -23,6 +23,7 @@ usage:
   sv theme light|dark|auto        colours of Shellvisor's own frames and panes
   sv autostart on|off|status      start Shellvisor when a terminal opens (zsh, bash)
   sv settings     folder colours (prompt, lists), ls as a table, table borders, theme (also alt+s)
+  sv activity     downloads & installs: progress, speed, time left, cd / open (also ctrl+] j)
   sv agent new [claude|codex|gemini|aider] [--name N] [--here] ['first task']
   sv agent new --cmd '<command>' [--name N]   any other agent CLI
   sv agent attach   make the agent running in this shell an agent column
@@ -95,6 +96,12 @@ pub fn run(args: &[String]) -> i32 {
         }
         "flow" => crate::flowrun::run(&args[1..]),
         "autostart" => crate::autostart::run(&args[1..]),
+        "activity" | "downloads" => {
+            if !inside() {
+                return not_running("activity");
+            }
+            send_seq(request_sequence(&["activity"]))
+        }
         "settings" => {
             if !inside() {
                 return not_running("settings");

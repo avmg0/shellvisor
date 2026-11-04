@@ -777,10 +777,55 @@ fn downloads_show_a_loading_circle_and_a_toast() {
     // A stand-in `curl` that prints progress like the real one.
     s.run("curl() { printf 'got 42%%\\n'; sleep 2; }");
     s.send("curl https://example.invalid/file\r");
-    s.wait_until("progress in the pane title", |t| {
-        t.lines().nth(1).unwrap_or("").contains("curl 42%")
+    s.wait_until("progress bar in the pane title", |t| {
+        let title = t.lines().nth(1).unwrap_or("");
+        title.contains("curl ▕") && title.contains("▏ 42%")
     });
     s.wait_for("✔ curl finished");
+}
+
+#[test]
+fn activity_list_speed_files_mark_and_toast_actions() {
+    let mut s = Session::start_full("activity2");
+    s.wait_for("PROMPT>");
+    // a stand-in `git clone`: makes the folder, prints git's progress line
+    s.run(
+        "git() { mkdir -p repo; echo hi > repo/inside.txt; \
+         printf 'Receiving objects:  42%% (42/100), 1.20 MiB | 3.00 MiB/s\\n'; sleep 4; }",
+    );
+    s.send("git clone https://example.invalid/me/repo.git\r");
+    s.wait_until("bar, speed in the title", |t| {
+        let title = t.lines().nth(1).unwrap_or("");
+        title.contains("git clone ▕") && title.contains("42% · 3.00 MiB/s")
+    });
+    // the files pane marks the folder being filled
+    s.send("\x1bOQ"); // F2
+    s.wait_until("loading mark on repo/", |t| {
+        t.lines().any(|l| l.contains("repo/") && l.contains("42%"))
+    });
+    // the activity list
+    s.send("\x1d");
+    s.send("j");
+    s.wait_until("activity list", |t| {
+        t.contains("downloads & installs · 1 running") && t.contains("3.00 MiB/s")
+    });
+    s.send("\x1b");
+    s.wait_for("✔ git clone finished · repo");
+    s.wait_for("ctrl+] c cd");
+    // ctrl+] c: cd into the clone
+    s.send("\x1d");
+    s.send("c");
+    s.pump(Duration::from_millis(500));
+    s.run("pwd");
+    s.wait_until("in the clone", |t| t.contains("work/repo"));
+    // the list keeps it; o opens it in the files pane
+    s.send("\x1d");
+    s.send("j");
+    s.wait_until("finished row", |t| {
+        t.contains("✔ git clone") && t.contains("c cd · o open")
+    });
+    s.send("o");
+    s.wait_until("files pane shows the clone", |t| t.contains("inside.txt"));
 }
 
 // ------------------------------------------------------------------ P3 data

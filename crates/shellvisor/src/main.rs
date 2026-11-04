@@ -27,6 +27,7 @@ mod highlight;
 mod history;
 mod keys;
 mod layouted;
+mod loading;
 mod mouse;
 mod osinfo;
 mod palette;

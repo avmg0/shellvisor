@@ -313,6 +313,8 @@ pub struct FilesPane {
     grid_cols: Cell<usize>,
     /// How folder names look (settings screen: colour, bold).
     pub folder_style: Style,
+    /// What downloads are filling right now: path → progress (a spinner on it).
+    pub loading: HashMap<PathBuf, Option<u8>>,
 }
 
 impl FilesPane {
@@ -343,6 +345,7 @@ impl FilesPane {
             recent: None,
             grid_cols: Cell::new(1),
             folder_style: Style::default().fg(CYAN),
+            loading: HashMap::new(),
         };
         let jobs = p.set_root(root);
         (p, jobs)
@@ -370,6 +373,53 @@ impl FilesPane {
         jobs.extend(self.view_job());
         self.rebuild();
         jobs
+    }
+
+    /// Show a path: a folder's contents, or a file selected in its folder.
+    /// Stops following the shell, so it stays put.
+    pub fn reveal(&mut self, path: &Path) -> Vec<Job> {
+        self.follow = false;
+        if path.is_dir() {
+            let jobs = self.set_root(path.to_path_buf());
+            if jobs.is_empty() {
+                return self.refresh();
+            }
+            return jobs;
+        }
+        let Some(dir) = path.parent() else {
+            return Vec::new();
+        };
+        let mut jobs = Vec::new();
+        if !matches!(self.view, View::Tree | View::List) {
+            jobs.extend(self.set_view(View::Tree));
+        }
+        if dir == self.root {
+            jobs.extend(self.refresh());
+        } else {
+            jobs.extend(self.set_root(dir.to_path_buf()));
+        }
+        if let Some(i) = self.rows.iter().position(|r| match r {
+            Row::Entry { idx, .. } => self.item(idx).is_some_and(|it| it.path == path),
+            _ => false,
+        }) {
+            self.sel = i;
+        }
+        jobs
+    }
+
+    /// A download filling this path (or something under a closed folder).
+    fn loading_at(&self, path: &Path, dir: bool) -> Option<Option<u8>> {
+        if let Some(p) = self.loading.get(path) {
+            return Some(*p);
+        }
+        if dir && !(self.view == View::Tree && self.expanded.contains(path)) {
+            return self
+                .loading
+                .iter()
+                .find(|(k, _)| k.starts_with(path))
+                .map(|(_, v)| *v);
+        }
+        None
     }
 
     /// The background work the size and recent views need for this folder.
@@ -1303,6 +1353,12 @@ impl FilesPane {
                 ));
             }
         }
+        if let Some(p) = self.loading.get(&self.root) {
+            flags.push_str(&format!(" {}", crate::loading::frame()));
+            if let Some(p) = p {
+                flags.push_str(&format!(" {p}%"));
+            }
+        }
         if self.hidden {
             flags.push_str(" .hidden");
         }
@@ -1519,7 +1575,20 @@ impl FilesPane {
                         right.push_str(&format!(" {:>4}", ago(it.mtime)));
                     }
                     let agent = self.agent_marks.get(&it.path);
+                    let loading = self.loading_at(&it.path, it.dir);
                     let right = match (agent, mark) {
+                        // a download is filling it: "◐ 42%"
+                        _ if loading.is_some() => Some((
+                            format!(
+                                "{} {} ",
+                                crate::loading::frame(),
+                                loading
+                                    .flatten()
+                                    .map(|p| format!("{p:>3}%"))
+                                    .unwrap_or_else(|| "    ".into())
+                            ),
+                            base.fg(AMBER),
+                        )),
                         // a coding agent changed it (on its branch): "◆ api M"
                         (Some((who, c)), m) => Some((
                             format!("◆ {who}{right} {}", m.map(|m| m.symbol()).unwrap_or(" ")),
