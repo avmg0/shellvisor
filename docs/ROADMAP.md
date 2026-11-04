@@ -163,6 +163,18 @@ Exit criteria: v1.0 — all boards implemented, budget met, install in one comma
 
 ---
 
+## v1.0.1 · planned
+**Goal:** small additions and release fixes after 1.0.
+
+Deliverables
+- `sv resize left|right|up|down [steps]` — move the focused pane's border from the command line (same as `alt+shift+arrows`, which need Option-as-Meta on macOS); `sv resize 30%` sets the focused pane's share of its split directly.
+- Release workflow: build both macOS targets (arm64 and x86_64) on one Mac runner, so a release needs a single Mac machine (GitHub's Mac runners were short on capacity for 1.0.0).
+- Update GitHub Actions to Node 24 versions (`actions/checkout`, `upload-artifact`, `download-artifact`, `attest-build-provenance`) to clear the deprecation warnings.
+
+Exit criteria: `sv resize` covered by an end-to-end test; a `v1.0.1` tag releases with one macOS job; CI and Release runs show no deprecation warnings.
+
+---
+
 ## Cross-cutting, every phase
 - Budget checks in CI (size, idle RSS, idle CPU).
 - Snapshot tests for every new pane against the wireframes.
