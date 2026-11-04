@@ -22,12 +22,21 @@ add-zsh-hook precmd __sv_precmd
 add-zsh-hook preexec __sv_preexec
 
 # ---- Shellvisor settings (settings screen / `sv settings`), read at each
-# prompt from $SHELLVISOR_UI: the folder's colour in the prompt, `ls` as a table
-__sv_palette=(37 39 35 178 208 170 167 245)
-__sv_prompt_last= __sv_prompt_base= __sv_lt=1
+# prompt from $SHELLVISOR_UI: the folder's colour in the prompt, the colour of
+# the commands you type, `ls` as a table
+__sv_palette=(37 39 111 35 178 208 170 167 245)
+__sv_prompt_last= __sv_prompt_base= __sv_lt=1 __sv_zh=
 __sv_style() {
-  local c=- b=0 t i p
-  [[ -r $SHELLVISOR_UI ]] && { read -r c; read -r b; read -r __sv_lt } < $SHELLVISOR_UI
+  local c=- b=0 tc=- t i p
+  [[ -r $SHELLVISOR_UI ]] && { read -r c; read -r b; read -r __sv_lt; read -r tc } < $SHELLVISOR_UI
+  # typed commands: zle's default highlight (only while editing, so output
+  # keeps the normal colour); a `default:` of your own wins
+  [[ -n $__sv_zh ]] && zle_highlight=(${zle_highlight:#$__sv_zh})
+  __sv_zh=
+  if [[ $tc != - && -n $tc && -z ${(M)zle_highlight:#default:*} ]]; then
+    __sv_zh="default:fg=$tc"
+    zle_highlight+=($__sv_zh)
+  fi
   # the prompt changed under us (a theme, conda…): that is the new base
   [[ $PROMPT != $__sv_prompt_last ]] && __sv_prompt_base=$PROMPT
   p=$__sv_prompt_base

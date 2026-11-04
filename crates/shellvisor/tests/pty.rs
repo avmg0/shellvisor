@@ -1292,6 +1292,41 @@ fn settings_colour_the_prompt_folder_and_ls_prints_a_table() {
             }
         }
         assert!(found, "{shell}: prompt folder not coloured:\n{}", s.text());
+        // what you type is light blue (111); the output is not
+        let colour_of = |s: &Session, needle: &str| -> Option<vt100::Color> {
+            let screen = s.screen.screen();
+            let (rows, cols) = screen.size();
+            for r in (0..rows).rev() {
+                let line: String = (0..cols)
+                    .map(|c| screen.cell(r, c).map(|x| x.contents()).unwrap_or_default())
+                    .collect();
+                if let Some(i) = line.find(needle) {
+                    let col = line[..i].chars().count() as u16;
+                    return screen.cell(r, col).map(|x| x.fgcolor());
+                }
+            }
+            None
+        };
+        s.send("clear\r");
+        s.pump(Duration::from_millis(300));
+        s.send("echo typed-$((40+2))");
+        s.wait_for("echo typed-");
+        s.pump(Duration::from_millis(200));
+        assert_eq!(
+            colour_of(&s, "echo typed-"),
+            Some(vt100::Color::Idx(111)),
+            "{shell}: typed command colour:\n{}",
+            s.text()
+        );
+        s.send("\r");
+        s.wait_for("typed-42");
+        s.pump(Duration::from_millis(300));
+        let out = colour_of(&s, "typed-42");
+        assert!(
+            out.is_some() && out != Some(vt100::Color::Idx(111)),
+            "{shell}: output must not keep the typed colour: {out:?}\n{}",
+            s.text()
+        );
         // turning the table off gives the plain ls back
         let mut st = std::fs::read_to_string(dir.join("state/settings.yaml")).unwrap();
         st = st.replace("ls_table: true", "ls_table: false");

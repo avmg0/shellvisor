@@ -55,7 +55,7 @@ shellvisor --shell bash    # or pick: zsh, bash, or a full path
 | `alt+a` | agents waiting for approval: `y` allow · `n` deny · `a` always |
 | `sv layout dev` | files + shell + system + flow (also `monitor`, `files`, `data`, `agents`; or `alt+m`) |
 | `alt+e` | layout editor: start from a preset or a saved layout, add shell / files / git / system / thermals / flow panes, remove, resize (keys or mouse), undo; nothing changes until ⏎, esc puts it back. Save by name, as the default, or for this folder (`sv layout <name>` opens a saved one) |
-| `alt+s` · `sv settings` | settings: colour of the folder in your prompt and of folders in lists, `ls` as a table, table borders, theme |
+| `alt+s` · `sv settings` | settings: colour of the folder in your prompt, of the commands you type and of folders in lists, `ls` as a table, table borders, theme |
 | `alt+m` | tab menu |
 | ``alt+` `` · `sv off` / `sv on` | basic view ⇄ full view |
 | `ctrl+]` then a letter | leader key — every shortcut, in every terminal (`ctrl+] ?` lists them) |
@@ -98,6 +98,7 @@ Inside Shellvisor, `ls` (and `ls <folder>`, `ls -a`) prints a table like nushell
 `alt+s` (or `sv settings`) opens a settings screen with a live preview:
 
 - the **colour of the folder in your prompt** (and bold) — Shellvisor's hooks colour `%1~` / `%~` (zsh) or `\W` / `\w` (bash) in whatever prompt you have, no dotfile editing; prompts drawn by tools like starship are left as they are
+- the **colour of the commands you type** — light blue by default (the design's `#82aaff`), so your commands stand apart from their output, which stays in the normal text colour; `none` turns it off. With zsh-syntax-highlighting its colours win
 - the **colour of folders in lists** — the files pane and `ls` / `sv` tables
 - `ls` as a table on/off, table borders (rounded or plain), theme
 - **dark background**: *design* (default) paints Shellvisor in the design's palette — a very dark blue-grey page `#0b0e12`, panels `#11151b`, shells on `#0e1217`, borders `#262c36`, text `#d6dbe3`, amber / cyan / green / red accents — or *terminal* to keep your terminal's own background. Programs inside shells keep their own colours; basic view always looks like your plain terminal. Terminals without 24-bit colour (e.g. older Terminal.app) get the nearest 256-colour shades

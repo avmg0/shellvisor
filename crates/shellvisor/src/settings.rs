@@ -1,10 +1,11 @@
 //! Settings changed from inside Shellvisor (the settings screen, `sv
-//! settings`): colours for the folder in your prompt and for folders in
-//! lists, whether `ls` prints a table, table borders, theme.
+//! settings`): colours for the folder in your prompt, for the commands you
+//! type and for folders in lists, whether `ls` prints a table, table
+//! borders, theme.
 //!
 //! Kept in `~/.local/state/shellvisor/settings.yaml`, apart from your own
 //! config.yaml, which Shellvisor never rewrites. The shell hooks read a tiny
-//! companion file (`ui.env`, three lines) at every prompt with the shell's
+//! companion file (`ui.env`, four lines) at every prompt with the shell's
 //! own `read`, so a change shows at the next prompt without starting a
 //! process.
 
@@ -12,10 +13,12 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Colours offered: (name, 256-colour index). "none" leaves things as they are.
-pub const COLORS: [(&str, u8); 9] = [
+pub const COLORS: [(&str, u8); 10] = [
     ("none", 0),
     ("cyan", 37),
     ("blue", 39),
+    // the boards' soft blue (#82aaff ≈ 111): the commands you type
+    ("light blue", 111),
     ("green", 35),
     ("yellow", 178),
     ("orange", 208),
@@ -38,6 +41,9 @@ pub struct Settings {
     /// Colour of the folder in the shell prompt ("none": your prompt as is).
     pub prompt_folder: String,
     pub prompt_bold: bool,
+    /// Colour of the commands you type at the prompt ("none": your
+    /// terminal's text colour); output stays in the normal colour.
+    pub typed: String,
     /// Colour of folder names in the files pane and in `ls` / `sv` tables.
     pub list_folder: String,
     pub list_bold: bool,
@@ -57,6 +63,7 @@ impl Default for Settings {
         Settings {
             prompt_folder: "none".into(),
             prompt_bold: false,
+            typed: "light blue".into(),
             list_folder: "cyan".into(),
             list_bold: true,
             ls_table: true,
@@ -104,12 +111,21 @@ impl Settings {
         std::fs::write(ui, self.ui_env())
     }
 
-    /// Three lines for the hooks: prompt colour index (or -), bold 0/1, ls table 0/1.
+    /// Four lines for the hooks: prompt colour index (or -), bold 0/1,
+    /// ls table 0/1, typed-command colour index (or -).
     pub fn ui_env(&self) -> String {
-        let c = color_index(&self.prompt_folder)
-            .map(|i| i.to_string())
-            .unwrap_or_else(|| "-".into());
-        format!("{c}\n{}\n{}\n", self.prompt_bold as u8, self.ls_table as u8)
+        let idx = |name: &str| {
+            color_index(name)
+                .map(|i| i.to_string())
+                .unwrap_or_else(|| "-".into())
+        };
+        format!(
+            "{}\n{}\n{}\n{}\n",
+            idx(&self.prompt_folder),
+            self.prompt_bold as u8,
+            self.ls_table as u8,
+            idx(&self.typed)
+        )
     }
 
     /// ANSI start for folder names in tables (None: no colour).
@@ -129,9 +145,10 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
-const ROWS: [&str; 8] = [
+const ROWS: [&str; 9] = [
     "Folder colour in the prompt",
     "Folder in the prompt bold",
+    "Commands you type",
     "Folder colour in lists",
     "Folders bold in lists",
     "ls prints a table",
@@ -185,11 +202,12 @@ impl Screen {
         match self.sel {
             0 => s.prompt_folder = cycle(&names, &s.prompt_folder, by),
             1 => s.prompt_bold = !s.prompt_bold,
-            2 => s.list_folder = cycle(&names, &s.list_folder, by),
-            3 => s.list_bold = !s.list_bold,
-            4 => s.ls_table = !s.ls_table,
-            5 => s.table_borders = cycle(&["rounded", "plain"], &s.table_borders, by),
-            7 => s.background = cycle(&["design", "terminal"], &s.background, by),
+            2 => s.typed = cycle(&names, &s.typed, by),
+            3 => s.list_folder = cycle(&names, &s.list_folder, by),
+            4 => s.list_bold = !s.list_bold,
+            5 => s.ls_table = !s.ls_table,
+            6 => s.table_borders = cycle(&["rounded", "plain"], &s.table_borders, by),
+            8 => s.background = cycle(&["design", "terminal"], &s.background, by),
             _ => {
                 let cur = if s.theme.is_empty() {
                     "config"
@@ -213,11 +231,12 @@ impl Screen {
         match row {
             0 => s.prompt_folder.clone(),
             1 => on(s.prompt_bold),
-            2 => s.list_folder.clone(),
-            3 => on(s.list_bold),
-            4 => on(s.ls_table),
-            5 => s.table_borders.clone(),
-            7 => {
+            2 => s.typed.clone(),
+            3 => s.list_folder.clone(),
+            4 => on(s.list_bold),
+            5 => on(s.ls_table),
+            6 => s.table_borders.clone(),
+            8 => {
                 if s.background == "terminal" {
                     "your terminal's".into()
                 } else {
@@ -269,7 +288,7 @@ impl Screen {
             let v = self.value(i);
             let vx = x0 + 32;
             let color = match i {
-                0 | 2 => color_index(&v).map(Color::Indexed),
+                0 | 2 | 3 => color_index(&v).map(Color::Indexed),
                 _ => None,
             };
             let vst = match color {
@@ -312,7 +331,12 @@ impl Screen {
         }
         put(buf, x, y, folder, fst);
         x += folder.chars().count() as u16;
-        put(buf, x, y, " % ls", text);
+        put(buf, x, y, " % ", text);
+        x += 3;
+        let tst = color_index(&self.s.typed)
+            .map(|c| Style::default().fg(Color::Indexed(c)))
+            .unwrap_or(text);
+        put(buf, x, y, "ls", tst);
         y += 1;
         // ls preview
         let mut lst = text;
@@ -446,15 +470,16 @@ mod tests {
         let mut s = Settings::default();
         assert_eq!(
             s.ui_env(),
-            "-\n0\n1\n",
-            "the prompt is left alone by default"
+            "-\n0\n1\n111\n",
+            "the prompt is left alone by default; typed commands in light blue"
         );
         s.prompt_folder = "orange".into();
         s.prompt_bold = true;
         s.ls_table = false;
+        s.typed = "none".into();
         s.save_to(&p, &ui).unwrap();
         assert_eq!(Settings::load_from(&p), s);
-        assert_eq!(std::fs::read_to_string(&ui).unwrap(), "208\n1\n0\n");
+        assert_eq!(std::fs::read_to_string(&ui).unwrap(), "208\n1\n0\n-\n");
         assert_eq!(
             Settings::default().folder_ansi().unwrap(),
             "\x1b[1;38;5;37m"
@@ -483,6 +508,9 @@ mod tests {
         sc.key(b"\x1b[B");
         sc.key(b"\r");
         assert!(sc.s.prompt_bold);
+        sc.key(b"\x1b[B");
+        sc.key(b"\x1b[D");
+        assert_eq!(sc.s.typed, "blue");
         for _ in 0..3 {
             sc.key(b"\x1b[B");
         }

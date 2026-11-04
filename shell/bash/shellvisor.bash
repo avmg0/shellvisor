@@ -27,6 +27,7 @@ __sv_preexec() {
   [ -n "$COMP_LINE" ] && return 0
   __sv_at_prompt=0
   __sv_running=1
+  printf '\033[0m'  # the typed-command colour ends where output begins
   local cmd
   cmd=$(HISTTIMEFORMAT= builtin history 1 | sed 's/^ *[0-9]*[* ]*//')
   [ -n "$cmd" ] || cmd=$BASH_COMMAND
@@ -38,6 +39,7 @@ __sv_preexec() {
 __sv_precmd() {
   local ec=$?
   __sv_at_prompt=0
+  printf '\033[0m'  # an empty line or ctrl+c: no colour left over
   if [ "$__sv_running" = 1 ]; then __sv_osc "7770;end;$ec"; fi
   __sv_running=0
   __sv_osc "7;file://${HOSTNAME}${PWD}"
@@ -55,15 +57,17 @@ __sv_ready() {
 }
 
 # ---- Shellvisor settings (settings screen / `sv settings`), read at each
-# prompt from $SHELLVISOR_UI: the folder's colour in the prompt, `ls` as a table
-__sv_palette="37 39 35 178 208 170 167 245"
+# prompt from $SHELLVISOR_UI: the folder's colour in the prompt, the colour of
+# the commands you type, `ls` as a table
+__sv_palette="37 39 111 35 178 208 170 167 245"
 __sv_ps1_last= ; __sv_ps1_base= ; __sv_lt=1
 __sv_style() {
-  local c=- b=0 i p o e
-  if [ -r "$SHELLVISOR_UI" ]; then { read -r c; read -r b; read -r __sv_lt; } < "$SHELLVISOR_UI"; fi
+  local c=- b=0 tc=- i p o e
+  if [ -r "$SHELLVISOR_UI" ]; then { read -r c; read -r b; read -r __sv_lt; read -r tc; } < "$SHELLVISOR_UI"; fi
   # the prompt changed under us (a theme, conda…): that is the new base
   [ "$PS1" != "$__sv_ps1_last" ] && __sv_ps1_base=$PS1
   p=$__sv_ps1_base
+  p=${p%'\[\e[0;38;5;'*'m\]'}
   for i in $__sv_palette; do
     p=${p//"\[\e[1;38;5;${i}m\]"/}
     p=${p//"\[\e[38;5;${i}m\]"/}
@@ -76,6 +80,9 @@ __sv_style() {
     p=${p//'\w'/$o'\w'$e}
     p=${p//'\W'/$o'\W'$e}
   fi
+  # typed commands: the colour starts at the end of the prompt; the hooks
+  # reset it before the command runs
+  if [ "$tc" != - ] && [ -n "$tc" ]; then p="$p\[\e[0;38;5;${tc}m\]"; fi
   PS1=$p
   __sv_ps1_last=$p
 }
