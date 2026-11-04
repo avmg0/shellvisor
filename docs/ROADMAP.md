@@ -1,6 +1,6 @@
 # Shellvisor — Roadmap & Phases
 
-Status: v0.8 · 2026-11-04 · **P0 – P6 done** · ready for v1.0 · see [ARCHITECTURE.md](ARCHITECTURE.md)
+Status: v1.0 · 2026-11-04 · **P0 – P6 done** · released as v1.0.0 · see [ARCHITECTURE.md](ARCHITECTURE.md)
 
 Each phase ends with something you can **run and use daily**, and must stay inside the performance budget before the next phase starts. Sizes are relative (S ≈ a few days, M ≈ 1–2 weeks, L ≈ 2–4 weeks of focused work) — not promises.
 
