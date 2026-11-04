@@ -20,11 +20,17 @@ pub const ENV_AGENT: &str = "SHELLVISOR_AGENT";
 /// Set in an agent's shell: the task it was started with.
 pub const ENV_TASK: &str = "SHELLVISOR_TASK";
 
-/// The socket path for this Shellvisor process.
+/// The socket path for this Shellvisor process. Unix socket paths are
+/// limited (104 bytes on macOS, 108 on Linux); if the state folder is too
+/// deep, a private folder in /tmp is used instead.
 pub fn socket_path(state: &Path) -> PathBuf {
-    state
-        .join("run")
-        .join(format!("bus-{}.sock", std::process::id()))
+    let name = format!("bus-{}.sock", std::process::id());
+    let p = state.join("run").join(&name);
+    if p.as_os_str().len() < 100 {
+        return p;
+    }
+    let uid = unsafe { libc::getuid() };
+    PathBuf::from(format!("/tmp/shellvisor-{uid}")).join(name)
 }
 
 /// Start listening. Every request is handed to `deliver` with a sender for
@@ -152,6 +158,14 @@ mod tests {
             std::env::set_var(ENV_AGENT, "api");
         }
         let v = call(json!({"op": "hi"}), Some(Duration::from_secs(2))).unwrap();
+        let deep = Path::new(
+            "/var/folders/xy/abcdefghijklmnopqrstuvwxyz0123/T/some-long-test-folder-name/state",
+        );
+        assert!(
+            socket_path(deep).as_os_str().len() < 104,
+            "{}",
+            socket_path(deep).display()
+        );
         assert_eq!(v["echo"], "hi");
         assert_eq!(v["caller"], "api");
         assert_eq!(call(json!({"op": "later"}), None).unwrap()["done"], true);

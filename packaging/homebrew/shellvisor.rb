@@ -5,7 +5,7 @@
 #   brew install avmg0/tap/shellvisor
 #
 # After each release, set `version` and the four sha256 values from the
-# release's SHA256SUMS file (scripts/brew-formula.sh prints them filled in).
+# release's SHA256SUMS file (scripts/brew-formula.sh <version> <this file> fills them in).
 class Shellvisor < Formula
   desc "Multi-pane terminal workspace: your real shell plus files, system, data flow and coding agents"
   homepage "https://github.com/avmg0/shellvisor"
