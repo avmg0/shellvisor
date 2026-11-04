@@ -1,6 +1,6 @@
 # Shellvisor — Roadmap & Phases
 
-Status: v0.4 · 2026-11-04 · **P0 done · P1 done** · see [ARCHITECTURE.md](ARCHITECTURE.md)
+Status: v0.5 · 2026-11-04 · **P0 · P1 · P2 done** · see [ARCHITECTURE.md](ARCHITECTURE.md)
 
 Each phase ends with something you can **run and use daily**, and must stay inside the performance budget before the next phase starts. Sizes are relative (S ≈ a few days, M ≈ 1–2 weeks, L ≈ 2–4 weeks of focused work) — not promises.
 
@@ -8,7 +8,7 @@ Each phase ends with something you can **run and use daily**, and must stay insi
 |---|---|---|---|---|
 | **P0** ✅ | Foundations | M | Shellvisor as a plain, fast shell wrapper (basic view) | 11, 14 |
 | **P1** ✅ | Workspace | L | tabs, splits, layouts, keymap — a tmux-like daily driver | 3, 4, 4b, 12, 14 |
-| **P2** | Core panes | L | the default 4-pane workspace (files, stats, activity) | 1, 6, 9, 10 |
+| **P2** ✅ | Core panes | L | the default 4-pane workspace (files, stats, activity) | 1, 6, 9, 10 |
 | **P3** | Data | M | data-flow view and `sv` structured commands | 2, 13 |
 | **P4** | Agents I | L | run several coding agents side by side, manually | 5, 8, 16 |
 | **P5** | Agents II | L | sub-agents, team.yaml, auto-plan | 7, 15, 16 |
@@ -62,8 +62,12 @@ Exit criteria: usable as a daily tmux-replacement; idle RSS ≤ 10 MB with 3 tab
 
 ---
 
-## P2 · Core panes
+## P2 · Core panes — ✅ done 2026-11-04
 **Goal:** board 1 working for real.
+
+**Result:** files pane (Tree, List, Git changes and Find views; lazy folders re-read only when their mtime changes; git badges from `git status`; filter, hidden toggle, preview with light syntax colours and git diffs; follows the shell's folder; insert path / cd / open in `$EDITOR` at the matching line), system pane (CPU history + per core, memory, swap, disks, network, disk I/O, load, temperatures grouped cpu/gpu/battery/disk, own usage, top processes sorted by CPU or memory; sampled only while visible, freed after 30 s hidden), activity (downloads and installs recognised from the command line, progress read from the pane's last lines, ◐ loading circle in pane title, tab and status bar, finish/fail toast), presets `dev` / `monitor` / `files` (`sv layout`, tab menu), `F2`/`F3` and `sv files`/`sv sys`, low-power mode (manual, or auto on battery: 5 s sampling, slower animations, no folder polling), tool panes saved in the session. Measured with 3 tabs + dev layout: 1.31 MB binary, 5.2 MB RSS, 0.2 % idle CPU. 70 unit + 28 end-to-end tests.
+
+*Changes from plan:* agent badges in the file tree move to P4 (no agents yet). Thermals v1 reads the sensors `sysinfo` exposes (Apple Silicon via IOKit HID, Linux hwmon); macOS thermal *state* and fans are left for P6. No `notify`/`ignore` crates: folders are re-checked by mtime every 3 s while visible and after each command, and Find uses `git ls-files` (respects .gitignore) or a bounded walk — smaller binary, no watcher threads.
 
 Deliverables
 - **Files:** lazy tree with git + agent badges, filter, hidden toggle; List view; Git changes view; Find (names + contents); preview with light syntax colors; follows shell cwd; insert path / cd / open in $EDITOR.

@@ -12,6 +12,7 @@
 //! | `OSC 133 ; D [; exit]`          | command finished                |
 //! | `OSC 7770 ; cmd ; <base64>`     | text of the command being run   |
 //! | `OSC 7770 ; mode ; on/off/exit` | switch Shellvisor view / quit    |
+//! | `OSC 7770 ; do ; word [; arg]`  | open a pane, preset, power mode |
 
 use base64::Engine as _;
 
@@ -71,6 +72,14 @@ pub enum ShellEvent {
     CommandFinished(Option<i32>),
     CommandText(String),
     Mode(Mode),
+    /// `sv files`, `sv sys`, `sv layout dev`, `sv power auto`…
+    Request(Vec<String>),
+}
+
+/// The escape sequence `sv` prints for a request like `["layout", "dev"]`.
+/// Words must not contain `;` or control characters.
+pub fn request_sequence(words: &[&str]) -> String {
+    format!("\x1b]7770;do;{}\x07", words.join(";"))
 }
 
 /// Parse the parameters of an OSC sequence (already split on `;`).
@@ -104,6 +113,14 @@ pub fn parse_osc(params: &[&[u8]]) -> Option<ShellEvent> {
         }
         [id, b"cmd"] if *id == OSC_SHELLVISOR => Some(ShellEvent::CommandText(String::new())),
         [id, b"mode", m] if *id == OSC_SHELLVISOR => Mode::parse(m).map(ShellEvent::Mode),
+        [id, b"do", words @ ..] if *id == OSC_SHELLVISOR && !words.is_empty() => {
+            Some(ShellEvent::Request(
+                words
+                    .iter()
+                    .map(|w| String::from_utf8_lossy(w).into_owned())
+                    .collect(),
+            ))
+        }
         _ => None,
     }
 }
@@ -180,6 +197,17 @@ mod tests {
             let body = seq.trim_start_matches("\x1b]").trim_end_matches('\x07');
             assert_eq!(parse_osc(&split(body)), Some(ShellEvent::Mode(m)));
         }
+    }
+
+    #[test]
+    fn requests() {
+        let seq = request_sequence(&["layout", "dev"]);
+        let body = seq.trim_start_matches("\x1b]").trim_end_matches('\x07');
+        assert_eq!(
+            parse_osc(&split(body)),
+            Some(ShellEvent::Request(vec!["layout".into(), "dev".into()]))
+        );
+        assert_eq!(parse_osc(&split("7770;do")), None);
     }
 
     #[test]

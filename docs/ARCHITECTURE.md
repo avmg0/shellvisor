@@ -1,6 +1,6 @@
 # Shellvisor — Architecture
 
-Status: v0.4 · 2026-11-04 · P0 + P1 implemented (see Decisions log at the end)
+Status: v0.5 · 2026-11-04 · P0 + P1 + P2 implemented (see Decisions log at the end)
 Wireframes: `docs/wireframes/` (to be exported) · Phases: [ROADMAP.md](ROADMAP.md)
 
 ---
@@ -127,9 +127,9 @@ shellvisor/
 | Drawing | `ratatui` + `crossterm` | immediate-mode, diffed output |
 | PTYs | `portable-pty` | spawn shells and agent CLIs |
 | Terminal emulation | `vt100` | fallback if gaps: `alacritty_terminal` (bigger) |
-| System stats | `sysinfo` | + small macOS FFI for thermals |
-| File watching | `notify` | FSEvents on macOS |
-| Find | `ignore` + `grep-searcher` | respects .gitignore |
+| System stats | `sysinfo` | default features off; `system`, `disk`, `network`, `component` only |
+| File watching | — | mtime check every 3 s while visible + after each command (no watcher threads) |
+| Find | `git ls-files` / bounded walk + plain substring scan | respects .gitignore in repos |
 | Config | `serde` + `serde_yaml_ng` | maintained fork of serde_yaml |
 | Channels | `std::sync::mpsc` (P0), `polling` later | no async runtime |
 | Keychain | `security-framework` | API keys for agents |
@@ -209,8 +209,8 @@ key ─▶ global keys (ctrl+q, alt+`, F1, F5…)   — always win, even inside 
 - **Connections:** detects installed agent CLIs and login state, configured MCP servers, ssh hosts; API keys in macOS Keychain, never displayed or logged.
 
 ### 5.8 System & thermals (`sys/`)
-- `sysinfo` for CPU/mem/disk/net/processes; process list sampled only while visible.
-- macOS thermals: thermal state via `NSProcessInfo.thermalState` (public API); per-sensor temps and fans via IOKit/SMC (best effort — show "not available" rather than guess).
+- `sysinfo` for CPU/mem/disk/net/processes; sampled only while visible (2 s, 5 s in low-power), process threads skipped, everything dropped after 30 s hidden.
+- Thermals v1: `sysinfo` components (Apple Silicon sensors via IOKit HID, Linux hwmon) grouped into cpu / gpu / battery / disk / other, hottest of each; "no sensors readable here" rather than a guess. Later: macOS thermal state (`NSProcessInfo.thermalState`) and fans.
 - Shellvisor reports its own RSS/CPU ("self") so the budget is always visible.
 
 ---
@@ -263,7 +263,7 @@ Enforced by: a `bench/` harness that launches Shellvisor in a pseudo-terminal, i
 ---
 
 ## 10. Open questions
-1. File views for first release: all 8, or Tree + List + Git + Find first?
+1. ~~File views for first release~~ → Tree, List, Git, Find in P2; the other four in P6.
 2. Leader key: `ctrl+]` (current pick) or `ctrl+space`?
 3. ~~YAML crate choice~~ → `serde_yaml_ng` (decided in P0).
 4. Thermals on Apple Silicon: which sensors are readable without elevated permissions?
@@ -291,6 +291,12 @@ Enforced by: a `bench/` harness that launches Shellvisor in a pseudo-terminal, i
 | 2026-11-04 | **Session file** `~/.local/state/shellvisor/session.yaml` (tabs, split tree with ratios, folders, names, focus, zoom). Written atomically ≤ 1 s after a change, and on quit/SIGHUP; deleted when the last shell exits. Not overwritten while the "restore?" question is open. | Survives closing the terminal window; never restores half a file; never re-runs commands. |
 | 2026-11-04 | **Keys are configured as text** (`alt+t`, `ctrl+]`, `f7`, `alt+shift+left`) and the defaults use the same parser. `none` unbinds; keys without ctrl/alt are refused; clashes and unknown actions are reported. Help (F1) is generated from the live keymap. | One source of truth; lets users free shortcuts their shell needs (e.g. zsh's alt+t / alt+l). |
 | 2026-11-04 | **F7 rearranges shell splits** (columns → rows → main + side → grid) instead of switching to presets with placeholder panes. | Placeholder panes are clutter until files/stats/agents panes exist. |
+| 2026-11-04 | **Tool panes** (files, system) live in the same split tree as shells (`App.tools` beside `App.panes`, same `PaneId` space). Keys go to the focused pane after global shortcuts; a tool acts on its tab's *paired shell* (the most recently focused one). A tab closes when its last shell exits. Basic view always shows a shell. | One layout model; tools never trap you without a prompt. |
+| 2026-11-04 | **Slow work is a `Job`** (git status, file index, content search, diff) run on a short-lived thread; results come back through the main channel. The files pane itself does no I/O beyond reading a folder or a 64 KB preview. Stale results are dropped by folder/sequence number; searches can be cancelled. | UI never blocks; the pane logic stays testable without threads. |
+| 2026-11-04 | **Git via the CLI** with `GIT_OPTIONAL_LOCKS=0` (`status --porcelain=v1 -z -b`, `ls-files`, `diff`). | No libgit2 in the binary; never fights the user's git for the index lock. |
+| 2026-11-04 | **Activity from the command line, progress from the screen.** A table of programs + sub-commands (git clone, npm i, pip install, uv sync, brew, docker pull, cargo build, curl, wget…) marks a command as a download; the last `NN%` on the pane's bottom lines is its progress (re-read ≤ 4×/s). | Works with every version of every tool, no wrappers or hooks. |
+| 2026-11-04 | **`sv` requests**: `OSC 7770;do;<word>[;<arg>]` (`files`, `system`, `layout dev`, `power auto`). | Same channel as `sv on/off`, works over ssh-less local shells with no socket. |
+| 2026-11-04 | **Low-power mode**: auto while on battery (checked once a minute — `/sys/class/power_supply` or `pmset -g ps`), or `sv power on/off`. Stats every 5 s, spinner at 4 fps, no folder polling. | Respects laptops without giving up the panes. |
 
 ### P0 measurements (Linux x86_64, release build, bash)
 

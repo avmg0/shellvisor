@@ -8,6 +8,7 @@
 //! restore: ask            # last session's tabs on start: ask, always or never
 //! mouse: true             # mouse wheel scrolls history; hold Option (iTerm2) or
 //!                         # turn off View → Allow Mouse Reporting (Terminal.app) to select text
+//! low_power: auto         # slower sampling and animations: auto (on battery), on, off
 //! keys:                   # change or turn off shortcuts (see `F1` for all actions)
 //!   new_tab: alt+n        # one key…
 //!   next_layout: [f7]     # …or a list
@@ -27,6 +28,7 @@ pub struct Config {
     pub mouse: bool,
     pub start_view: StartView,
     pub restore: Restore,
+    pub low_power: LowPower,
     pub keys: HashMap<String, KeyList>,
 }
 
@@ -37,6 +39,16 @@ pub enum Restore {
     Ask,
     Always,
     Never,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LowPower {
+    /// On while running on battery.
+    #[default]
+    Auto,
+    On,
+    Off,
 }
 
 /// `alt+n` or `[alt+n, f10]`
@@ -73,6 +85,7 @@ impl Default for Config {
             mouse: true,
             start_view: StartView::Full,
             restore: Restore::Ask,
+            low_power: LowPower::Auto,
             keys: HashMap::new(),
         }
     }
@@ -162,6 +175,11 @@ mod tests {
         assert_eq!(o["new_tab"], vec!["alt+n"]);
         assert_eq!(o["next_layout"], vec!["f7", "alt+y"]);
         assert_eq!(Config::default().restore, Restore::Ask);
+        assert_eq!(
+            Config::parse("low_power: on").unwrap().low_power,
+            LowPower::On
+        );
+        assert_eq!(Config::default().low_power, LowPower::Auto);
     }
 
     #[test]

@@ -1,22 +1,28 @@
-//! The workspace: tabs of split panes, each a real shell, plus the event loop.
+//! The workspace: tabs of split panes — real shells and tool panes (files,
+//! system) — plus the event loop.
 //!
 //! Threads (tiny, blocking — no async runtime):
 //!   input            stdin bytes                ─┐
-//!   pty-<id>         one per pane, shell output   ├─▶ channel ─▶ app thread
-//!   wait-<id>        one per pane, exit status    │
+//!   pty-<id>         one per shell, output        │
+//!   wait-<id>        one per shell, exit status   ├─▶ channel ─▶ app thread
+//!   job              short-lived: git, find, diff │
+//!   power            battery check once a minute  │
 //!   signal           resize / terminate          ─┘
 //!
 //! The app thread owns all state and redraws only when something changed.
 
-use crate::config::Restore;
+use crate::activity::{self, Activity};
+use crate::config::{LowPower, Restore};
+use crate::files::{self, Act, Done, FilesPane, Job, Outcome};
 use crate::history::{Entry, History};
-use crate::keys::{self, Cmd, Keymap};
+use crate::keys::{self, Cmd, Keymap, Preset};
 use crate::mouse::MouseEv;
-use crate::session::{SavedNode, SavedTab, Session};
+use crate::session::{Leaf, SavedNode, SavedTab, Session};
 use crate::shell::Launch;
+use crate::sysmon::SysPane;
 use crate::term::{InputModes, Pane};
 use crate::ui;
-use crate::workspace::{Axis, PaneId, Tab, neighbor};
+use crate::workspace::{Axis, Node, PaneId, Tab, neighbor};
 use crossterm::{cursor, execute, terminal};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -32,6 +38,9 @@ use sv_proto::{Mode, ShellEvent};
 
 const FRAME: Duration = Duration::from_millis(16);
 const SPIN: Duration = Duration::from_millis(100);
+const SPIN_LOW_POWER: Duration = Duration::from_millis(250);
+/// How often a running download's progress is re-read from its screen.
+const PROGRESS_EVERY: Duration = Duration::from_millis(250);
 pub const NOTICE: Duration = Duration::from_secs(4);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +60,7 @@ pub struct Options {
     pub start_view: View,
     pub keymap: Keymap,
     pub restore: Restore,
+    pub low_power: LowPower,
     pub session_path: PathBuf,
     /// Problems found in config.yaml, shown once at start.
     pub warnings: Vec<String>,
@@ -58,17 +68,45 @@ pub struct Options {
 
 /// The tab menu (alt+m).
 pub const MENU: &[(&str, Cmd)] = &[
-    ("Rename tab", Cmd::RenameTab),
+    ("Files pane", Cmd::ToggleFiles),
+    ("System pane", Cmd::ToggleSystem),
     ("Split side by side", Cmd::SplitRight),
     ("Split stacked", Cmd::SplitDown),
+    ("Layout: dev", Cmd::Preset(Preset::Dev)),
+    ("Layout: monitor", Cmd::Preset(Preset::Monitor)),
+    ("Layout: files", Cmd::Preset(Preset::Files)),
     ("Rearrange splits", Cmd::NextLayout),
     ("Zoom split", Cmd::Zoom),
     ("Close split", Cmd::ClosePane),
+    ("Rename tab", Cmd::RenameTab),
     ("New tab", Cmd::NewTab),
     ("Close tab", Cmd::CloseTab),
+    ("Low-power mode", Cmd::LowPower),
     ("Basic view", Cmd::ToggleView),
     ("All keys", Cmd::Help),
 ];
+
+/// A pane that isn't a shell.
+pub enum Tool {
+    Files(FilesPane),
+    System(SysPane),
+}
+
+impl Tool {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Tool::Files(_) => "files",
+            Tool::System(_) => "system",
+        }
+    }
+
+    pub fn title(&self) -> String {
+        match self {
+            Tool::Files(f) => f.title(),
+            Tool::System(s) => s.title(),
+        }
+    }
+}
 
 const SAVE_EVERY: Duration = Duration::from_secs(1);
 
@@ -76,6 +114,8 @@ enum Ev {
     Input(Vec<u8>),
     Output(PaneId, Vec<u8>),
     PaneExit(PaneId, i32),
+    Job(PaneId, Box<Done>),
+    Battery(Option<bool>),
     Resize,
     Quit,
 }
@@ -92,6 +132,13 @@ pub struct PaneState {
     /// New output while the pane's tab wasn't on screen.
     pub unseen: bool,
     pub bell: bool,
+    /// A download/install spotted from the command line.
+    pub activity: Option<Activity>,
+    progress_at: Instant,
+    /// New output since progress was last read.
+    progress_due: bool,
+    /// When this shell last had focus (bigger = more recent).
+    focused_at: u64,
     size: (u16, u16),
 }
 
@@ -118,6 +165,11 @@ pub enum Modal {
 
 pub struct App {
     pub panes: HashMap<PaneId, PaneState>,
+    pub tools: HashMap<PaneId, Tool>,
+    pub low_power: bool,
+    power_manual: bool,
+    focus_tick: u64,
+    last_focus: PaneId,
     pub tabs: Vec<Tab>,
     pub active: usize,
     pub view: View,
@@ -177,8 +229,15 @@ pub fn run(opts: Options) -> io::Result<i32> {
         })?;
     }
 
+    let low_power = opts.low_power == LowPower::On;
+    let auto_power = opts.low_power == LowPower::Auto;
     let mut app = App {
         panes: HashMap::new(),
+        tools: HashMap::new(),
+        low_power,
+        power_manual: !auto_power,
+        focus_tick: 0,
+        last_focus: 0,
         tabs: Vec::new(),
         active: 0,
         view: opts.start_view,
@@ -233,6 +292,22 @@ pub fn run(opts: Options) -> io::Result<i32> {
                         }
                     }
                 }
+            }
+        })?;
+    }
+    if auto_power {
+        let tx = tx.clone();
+        spawn_thread("power".into(), move || {
+            let mut last = None;
+            loop {
+                let now = crate::osinfo::on_battery();
+                if now != last {
+                    last = now;
+                    if tx.send(Ev::Battery(now)).is_err() {
+                        break;
+                    }
+                }
+                thread::sleep(Duration::from_secs(60));
             }
         })?;
     }
@@ -303,9 +378,7 @@ impl App {
         let old: Vec<PaneId> = self.tabs.iter().flat_map(|t| t.root.panes()).collect();
         let mut tabs = Vec::new();
         for t in &saved.tabs {
-            let root = t
-                .layout
-                .rebuild(&mut |cwd: &str| self.new_pane(Some(PathBuf::from(cwd))))?;
+            let root = t.layout.rebuild(&mut |l: &Leaf| self.new_leaf(l))?;
             let panes = root.panes();
             tabs.push(Tab {
                 focus: panes[t.focus.min(panes.len() - 1)],
@@ -319,6 +392,7 @@ impl App {
             if let Some(mut p) = self.panes.remove(&id) {
                 p.pane.kill();
             }
+            self.tools.remove(&id);
         }
         let n = tabs.len();
         self.tabs = tabs;
@@ -330,11 +404,22 @@ impl App {
     }
 
     fn capture_session(&self) -> Session {
-        let cwd = |id: PaneId| {
-            self.panes
-                .get(&id)
-                .map(|p| p.cwd.clone())
-                .unwrap_or_default()
+        let cwd = |id: PaneId| match self.tools.get(&id) {
+            Some(t) => Leaf {
+                cwd: match t {
+                    Tool::Files(f) => f.root.display().to_string(),
+                    Tool::System(_) => String::new(),
+                },
+                tool: Some(t.kind().to_string()),
+            },
+            None => Leaf {
+                cwd: self
+                    .panes
+                    .get(&id)
+                    .map(|p| p.cwd.clone())
+                    .unwrap_or_default(),
+                tool: None,
+            },
         };
         Session {
             version: crate::session::VERSION,
@@ -432,19 +517,94 @@ impl App {
                 last_exit: None,
                 unseen: false,
                 bell: false,
+                activity: None,
+                progress_at: Instant::now(),
+                progress_due: false,
+                focused_at: 0,
                 size: (rows, cols),
             },
         );
         Ok(id)
     }
 
+    /// A saved leaf: a shell in its folder, or a tool pane.
+    fn new_leaf(&mut self, l: &Leaf) -> io::Result<PaneId> {
+        match l.tool.as_deref() {
+            Some(kind @ ("files" | "system")) => {
+                let cwd = if l.cwd.is_empty() {
+                    std::env::current_dir().unwrap_or_default()
+                } else {
+                    PathBuf::from(&l.cwd)
+                };
+                Ok(self.new_tool(kind, cwd))
+            }
+            _ => self.new_pane(Some(PathBuf::from(&l.cwd))),
+        }
+    }
+
+    fn new_tool(&mut self, kind: &str, cwd: PathBuf) -> PaneId {
+        let id = self.next_id;
+        self.next_id += 1;
+        let tool = if kind == "system" {
+            Tool::System(SysPane::new())
+        } else {
+            let (f, jobs) = FilesPane::new(cwd);
+            self.run_jobs(id, jobs);
+            Tool::Files(f)
+        };
+        self.tools.insert(id, tool);
+        id
+    }
+
+    fn run_jobs(&self, id: PaneId, jobs: Vec<Job>) {
+        for job in jobs {
+            let tx = self.tx.clone();
+            let _ = spawn_thread("job".into(), move || {
+                let _ = tx.send(Ev::Job(id, Box::new(files::run_job(job))));
+            });
+        }
+    }
+
     pub fn focused(&self) -> PaneId {
         self.tabs[self.active].focus
     }
 
+    /// The pane keys go to: the focused one, or in basic view the shell shown.
+    pub fn input_target(&self) -> PaneId {
+        match self.view {
+            View::Basic => self.basic_pane(),
+            View::Full => self.focused(),
+        }
+    }
+
+    /// Basic view shows a shell: the focused one, else the tab's last-used shell.
+    fn basic_pane(&self) -> PaneId {
+        let f = self.focused();
+        if self.panes.contains_key(&f) {
+            f
+        } else {
+            self.paired_shell(self.active).unwrap_or(f)
+        }
+    }
+
+    /// The shell a tab's tool panes work with: the most recently focused one.
+    pub fn paired_shell(&self, tab: usize) -> Option<PaneId> {
+        self.tabs
+            .get(tab)?
+            .root
+            .panes()
+            .into_iter()
+            .filter_map(|id| self.panes.get(&id).map(|p| (id, p.focused_at)))
+            .max_by_key(|(id, at)| (*at, std::cmp::Reverse(*id)))
+            .map(|(id, _)| id)
+    }
+
     fn focused_cwd(&self) -> Option<PathBuf> {
-        self.panes
-            .get(&self.focused())
+        let id = match self.panes.contains_key(&self.focused()) {
+            true => Some(self.focused()),
+            false => self.paired_shell(self.active),
+        };
+        id.and_then(|id| self.panes.get(&id))
             .map(|p| PathBuf::from(&p.cwd))
     }
 
@@ -466,7 +626,7 @@ impl App {
     pub fn visible(&self) -> Vec<(PaneId, Rect, Rect)> {
         let (_, content, _) = self.regions();
         match self.view {
-            View::Basic => vec![(self.focused(), content, content)],
+            View::Basic => vec![(self.basic_pane(), content, content)],
             View::Full => self.tabs[self.active]
                 .layout(content)
                 .into_iter()
@@ -543,6 +703,13 @@ impl App {
                     Ev::Output(id, bytes) => self.on_output(id, &bytes, &mut term)?,
                     Ev::Input(bytes) => self.on_input(&bytes)?,
                     Ev::PaneExit(id, code) => self.on_pane_exit(id, code),
+                    Ev::Job(id, done) => {
+                        if let Some(Tool::Files(f)) = self.tools.get_mut(&id) {
+                            let out = f.done(*done);
+                            self.apply(id, out);
+                        }
+                    }
+                    Ev::Battery(b) => self.on_battery(b),
                     Ev::Resize => {
                         let (cols, rows) = terminal::size().unwrap_or((80, 24));
                         self.screen = Rect::new(0, 0, cols, rows);
@@ -556,6 +723,7 @@ impl App {
                 }
             }
             self.sync_modes(&mut term)?;
+            self.sync_tools();
 
             if let Some((_, at)) = &self.notice {
                 if at.elapsed() >= NOTICE {
@@ -563,7 +731,7 @@ impl App {
                     self.dirty = true;
                 }
             }
-            if self.spinning() && last_draw.elapsed() >= SPIN {
+            if self.spinning() && last_draw.elapsed() >= self.spin_every() {
                 self.dirty = true;
             }
             if self.session_dirty && self.last_save.elapsed() >= SAVE_EVERY {
@@ -582,6 +750,172 @@ impl App {
         self.view == View::Full && self.panes.values().any(|p| p.running)
     }
 
+    fn spin_every(&self) -> Duration {
+        if self.low_power { SPIN_LOW_POWER } else { SPIN }
+    }
+
+    /// Re-read a download's progress from its screen (at most every 250 ms).
+    fn update_progress(&mut self, id: PaneId) {
+        let Some(p) = self.panes.get_mut(&id) else {
+            return;
+        };
+        if !p.progress_due || p.activity.is_none() || p.progress_at.elapsed() < PROGRESS_EVERY {
+            return;
+        }
+        p.progress_due = false;
+        p.progress_at = Instant::now();
+        let cols = p.size.1;
+        let rows: Vec<String> = p.pane.screen().rows(0, cols).collect();
+        let progress = activity::progress(rows.iter().map(String::as_str));
+        if let Some(a) = p.activity.as_mut() {
+            if progress.is_some() && progress != a.progress {
+                a.progress = progress;
+                self.dirty = true;
+            }
+        }
+    }
+
+    /// Tool panes on screen right now.
+    fn visible_tools(&self) -> Vec<PaneId> {
+        self.visible()
+            .into_iter()
+            .map(|(id, _, _)| id)
+            .filter(|id| self.tools.contains_key(id))
+            .collect()
+    }
+
+    /// Per-batch upkeep: remember which shell had focus, let file panes
+    /// follow their shell, and sample the system pane when due.
+    fn sync_tools(&mut self) {
+        let due: Vec<PaneId> = self
+            .panes
+            .iter()
+            .filter(|(_, p)| p.progress_due)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in due {
+            self.update_progress(id);
+        }
+        let target = self.input_target();
+        if target != self.last_focus {
+            self.last_focus = target;
+            if let Some(p) = self.panes.get_mut(&target) {
+                self.focus_tick += 1;
+                p.focused_at = self.focus_tick;
+            }
+        }
+        let shell_cwd = self
+            .paired_shell(self.active)
+            .and_then(|id| self.panes.get(&id))
+            .map(|p| PathBuf::from(&p.cwd));
+        let low = self.low_power;
+        let shown = self.visible_tools();
+        for (id, t) in self.tools.iter_mut() {
+            if let Tool::System(sp) = t {
+                if !shown.contains(id) && sp.idle_for() > Duration::from_secs(30) {
+                    sp.sleep(); // free the process list while hidden
+                }
+            }
+        }
+        for id in shown {
+            let mut out = Outcome::default();
+            match self.tools.get_mut(&id) {
+                Some(Tool::Files(f)) => {
+                    if let Some(cwd) = &shell_cwd {
+                        if f.follow && *cwd != f.seen_cwd && cwd.is_dir() {
+                            f.seen_cwd = cwd.clone();
+                            out.jobs = f.set_root(cwd.clone());
+                            out.redraw = true;
+                        }
+                    }
+                    if !low && f.poll_due_in().is_zero() {
+                        let o = f.poll();
+                        out.jobs.extend(o.jobs);
+                        out.redraw |= o.redraw;
+                    }
+                }
+                Some(Tool::System(sp)) if sp.due_in(low).is_zero() => {
+                    sp.sample();
+                    out.redraw = true;
+                }
+                Some(Tool::System(_)) => {}
+                None => {}
+            }
+            self.apply(id, out);
+        }
+    }
+
+    /// Act on what a tool pane asked for.
+    fn apply(&mut self, id: PaneId, out: Outcome) {
+        if out.redraw {
+            self.dirty = true;
+        }
+        self.run_jobs(id, out.jobs);
+        for act in out.acts {
+            self.tool_act(id, act);
+        }
+    }
+
+    fn tool_act(&mut self, id: PaneId, act: Act) {
+        if let Act::Notice(m) = act {
+            self.notice(m);
+            return;
+        }
+        let Some(tab) = self.tab_of(id) else { return };
+        let Some(shell) = self.paired_shell(tab) else {
+            self.notice("no shell in this tab — split one with alt+\\");
+            return;
+        };
+        let (busy, cwd) = match self.panes.get(&shell) {
+            Some(p) => (p.running, PathBuf::from(&p.cwd)),
+            None => return,
+        };
+        let text = match act {
+            Act::Insert(path) => format!("{} ", shell_quote(&relative(&path, &cwd))),
+            Act::Cd(dir) => {
+                if busy {
+                    self.notice("the shell is busy — wait for the command to finish");
+                    return;
+                }
+                if let Some(Tool::Files(f)) = self.tools.get_mut(&id) {
+                    f.follow = true;
+                }
+                format!("\x05\x15cd {}\r", shell_quote(&relative(&dir, &cwd)))
+            }
+            Act::Edit(file, line) => {
+                if busy {
+                    self.notice("the shell is busy — wait for the command to finish");
+                    return;
+                }
+                format!(
+                    "\x05\x15{}\r",
+                    edit_command(&editor(), &relative(&file, &cwd), line)
+                )
+            }
+            Act::Notice(_) => return,
+        };
+        if let Some(p) = self.panes.get_mut(&shell) {
+            let _ = p.pane.write(text.as_bytes());
+        }
+        self.tabs[tab].focus = shell;
+        self.dirty = true;
+    }
+
+    fn on_battery(&mut self, b: Option<bool>) {
+        if self.power_manual {
+            return;
+        }
+        let low = b == Some(true);
+        if low != self.low_power {
+            self.low_power = low;
+            self.notice(if low {
+                "on battery — low-power mode on (slower refresh)"
+            } else {
+                "on power — low-power mode off"
+            });
+        }
+    }
+
     fn next_wakeup(&self, last_draw: Instant) -> Duration {
         if self.dirty {
             return FRAME.saturating_sub(last_draw.elapsed());
@@ -589,9 +923,18 @@ impl App {
         let mut t = Duration::from_secs(60); // clock in the status bar
         if self.spinning() {
             t = t.min(
-                SPIN.saturating_sub(last_draw.elapsed())
+                self.spin_every()
+                    .saturating_sub(last_draw.elapsed())
                     .max(Duration::from_millis(5)),
             );
+        }
+        for id in self.visible_tools() {
+            let due = match &self.tools[&id] {
+                Tool::System(sp) => sp.due_in(self.low_power),
+                Tool::Files(_) if self.low_power => continue,
+                Tool::Files(f) => f.poll_due_in(),
+            };
+            t = t.min(due.max(Duration::from_millis(5)));
         }
         if let Some((_, at)) = &self.notice {
             t = t.min((*at + NOTICE).saturating_duration_since(Instant::now()));
@@ -607,7 +950,7 @@ impl App {
     fn sync_modes<W: Write>(&mut self, term: &mut Terminal<CrosstermBackend<W>>) -> io::Result<()> {
         let focused = self
             .panes
-            .get(&self.focused())
+            .get(&self.input_target())
             .map(|p| p.pane.input_modes())
             .unwrap_or_default();
         let capture = self.opts.mouse || self.view == View::Full;
@@ -633,12 +976,13 @@ impl App {
         bytes: &[u8],
         term: &mut Terminal<CrosstermBackend<W>>,
     ) -> io::Result<()> {
-        let focused = self.focused();
+        let focused = self.input_target();
         let on_screen = self.visible().iter().any(|(v, _, _)| *v == id);
         let Some(p) = self.panes.get_mut(&id) else {
             return Ok(());
         };
         let fx = p.pane.feed(bytes);
+
         if !on_screen && !p.unseen {
             p.unseen = true;
             self.dirty = self.view == View::Full;
@@ -658,6 +1002,13 @@ impl App {
         for e in fx.events {
             self.on_shell_event(id, e);
         }
+        // After the events: the command may have started in this same chunk.
+        if let Some(p) = self.panes.get_mut(&id) {
+            if p.activity.is_some() {
+                p.progress_due = true;
+            }
+        }
+        self.update_progress(id);
         if on_screen {
             self.dirty = true;
         }
@@ -674,10 +1025,16 @@ impl App {
                 self.dirty = true;
                 self.session_dirty = true;
             }
-            ShellEvent::CommandText(t) => p.command = t,
+            ShellEvent::CommandText(t) => {
+                p.command = t;
+                if p.running {
+                    p.activity = activity::classify(&p.command);
+                }
+            }
             ShellEvent::CommandStarted => {
                 p.started = Some(Instant::now());
                 p.running = true;
+                p.activity = activity::classify(&p.command);
                 self.dirty = true;
             }
             ShellEvent::CommandFinished(code) => {
@@ -695,12 +1052,34 @@ impl App {
                         shell: &p.shell,
                     });
                 }
+                let took = p.started.map(|s| s.elapsed().as_secs()).unwrap_or(0);
+                let done = p.activity.take();
                 p.running = false;
                 p.started = None;
                 p.last_exit = code;
                 p.command.clear();
                 self.dirty = true;
+                if let Some(a) = done {
+                    self.notice(match code {
+                        Some(0) | None => {
+                            format!("✔ {} finished · {}", a.label, ui::fmt_secs(took))
+                        }
+                        Some(c) => {
+                            format!("✖ {} failed (exit {c}) · {}", a.label, ui::fmt_secs(took))
+                        }
+                    });
+                }
+                // Commands change files: refresh this tab's file panes.
+                if let Some(t) = self.tab_of(id) {
+                    for pid in self.tabs[t].root.panes() {
+                        if let Some(Tool::Files(f)) = self.tools.get_mut(&pid) {
+                            let jobs = f.refresh();
+                            self.run_jobs(pid, jobs);
+                        }
+                    }
+                }
             }
+            ShellEvent::Request(words) => self.on_request(&words),
             ShellEvent::PromptShown => {}
             ShellEvent::Mode(Mode::On) => self.set_view(View::Full),
             ShellEvent::Mode(Mode::Off) => self.set_view(View::Basic),
@@ -719,8 +1098,19 @@ impl App {
     /// pane; quit with `code` if it was the last tab.
     fn detach(&mut self, id: PaneId, code: i32) {
         if let Some(t) = self.tab_of(id) {
+            let remaining = self.tabs[t]
+                .root
+                .clone()
+                .remove(id)
+                .filter(|r| r.panes().iter().any(|p| self.panes.contains_key(p)));
+            if remaining.is_none() {
+                // no shell left: tool panes go with the tab
+                for p in self.tabs[t].root.panes() {
+                    self.tools.remove(&p);
+                }
+            }
             let tab = &mut self.tabs[t];
-            match tab.root.clone().remove(id) {
+            match remaining {
                 Some(root) => {
                     tab.root = root;
                     if tab.focus == id {
@@ -854,6 +1244,12 @@ impl App {
                 }
                 continue;
             }
+            let target = self.input_target();
+            if self.tools.contains_key(&target) {
+                self.flush_forward(&mut forward)?;
+                self.tool_key(target, key);
+                continue;
+            }
             if keys::is_option_char(key) && !self.option_hint_shown {
                 self.option_hint_shown = true;
                 self.notice(format!(
@@ -866,11 +1262,23 @@ impl App {
         self.flush_forward(&mut forward)
     }
 
+    fn tool_key(&mut self, id: PaneId, key: &[u8]) {
+        let out = match self.tools.get_mut(&id) {
+            Some(Tool::Files(f)) => f.key(key),
+            Some(Tool::System(sp)) => Outcome {
+                redraw: sp.key(key),
+                ..Default::default()
+            },
+            None => return,
+        };
+        self.apply(id, out);
+    }
+
     fn flush_forward(&mut self, buf: &mut Vec<u8>) -> io::Result<()> {
         if buf.is_empty() {
             return Ok(());
         }
-        let id = self.focused();
+        let id = self.input_target();
         if let Some(p) = self.panes.get_mut(&id) {
             if p.pane.scroll() > 0 {
                 p.pane.scroll_by(isize::MIN / 2);
@@ -904,6 +1312,25 @@ impl App {
         if ev.is_left_press() && id != self.focused() {
             self.tabs[self.active].focus = id;
             self.dirty = true;
+        }
+        if let Some(tool) = self.tools.get_mut(&id) {
+            let inside = inner.contains((ev.x, ev.y).into());
+            let out = match (tool, ev.wheel()) {
+                (Tool::Files(f), Some(dir)) => f.wheel(dir),
+                (Tool::System(sp), Some(dir)) => {
+                    sp.wheel(dir);
+                    Outcome {
+                        redraw: true,
+                        ..Default::default()
+                    }
+                }
+                (Tool::Files(f), None) if inside && ev.is_left_press() => {
+                    f.click(ev.x - inner.x, ev.y - inner.y, inner.width)
+                }
+                _ => Outcome::default(),
+            };
+            self.apply(id, out);
+            return Ok(());
         }
         let Some(p) = self.panes.get_mut(&id) else {
             return Ok(());
@@ -942,9 +1369,181 @@ impl App {
 
     fn set_view(&mut self, v: View) {
         if self.view != v {
+            if v == View::Basic {
+                // basic view shows a shell; leave focus on it
+                let b = self.basic_pane();
+                self.tabs[self.active].focus = b;
+            }
             self.view = v;
             self.relayout();
         }
+    }
+
+    /// `sv files`, `sv sys`, `sv layout dev`, `sv power auto`…
+    fn on_request(&mut self, words: &[String]) {
+        let w: Vec<&str> = words.iter().map(String::as_str).collect();
+        let r = match w.as_slice() {
+            ["files"] => self.show_tool("files", false),
+            ["files", view] => {
+                let _ = self.show_tool("files", false);
+                let id = self.focused();
+                match (self.tools.get_mut(&id), files::View::parse(view)) {
+                    (Some(Tool::Files(f)), Some(v)) => {
+                        let jobs = f.set_view(v);
+                        self.run_jobs(id, jobs);
+                    }
+                    _ => self.notice(format!(
+                        "sv files: unknown view `{view}` (tree, list, git, find)"
+                    )),
+                }
+                Ok(())
+            }
+            ["system"] => self.show_tool("system", false),
+            ["layout", name] => match Preset::parse(name) {
+                Some(p) => self.apply_preset(p),
+                None => {
+                    self.notice(format!(
+                        "sv layout: unknown layout `{name}` (dev, monitor, files)"
+                    ));
+                    Ok(())
+                }
+            },
+            ["power", m] => {
+                match *m {
+                    "on" | "off" => {
+                        self.power_manual = true;
+                        self.set_low_power(*m == "on");
+                    }
+                    _ => {
+                        self.power_manual = false;
+                        let b = crate::osinfo::on_battery();
+                        self.low_power = b == Some(true);
+                        self.notice(format!(
+                            "low-power: auto (now {})",
+                            if self.low_power { "on" } else { "off" }
+                        ));
+                    }
+                }
+                Ok(())
+            }
+            _ => {
+                self.notice(format!("sv: unknown request `{}`", w.join(" ")));
+                Ok(())
+            }
+        };
+        if let Err(e) = r {
+            self.notice(format!("sv: {e}"));
+        }
+    }
+
+    fn set_low_power(&mut self, on: bool) {
+        self.low_power = on;
+        self.notice(format!("low-power mode {}", if on { "on" } else { "off" }));
+    }
+
+    /// Open (or focus; with `toggle`, close if focused) a tool pane in this tab.
+    fn show_tool(&mut self, kind: &str, toggle: bool) -> io::Result<()> {
+        let tab = self.active;
+        let existing = self.tabs[tab]
+            .root
+            .panes()
+            .into_iter()
+            .find(|id| self.tools.get(id).is_some_and(|t| t.kind() == kind));
+        if self.view == View::Basic {
+            self.view = View::Full;
+        }
+        match existing {
+            Some(id) if toggle && id == self.focused() => {
+                self.close_pane(id);
+                if let Some(s) = self.paired_shell(self.active) {
+                    self.tabs[self.active].focus = s;
+                }
+            }
+            Some(id) => {
+                let t = &mut self.tabs[tab];
+                t.focus = id;
+                t.zoomed = false;
+            }
+            None => {
+                let cwd = self
+                    .focused_cwd()
+                    .or_else(|| std::env::current_dir().ok())
+                    .unwrap_or_default();
+                let target = self.focused();
+                let id = self.new_tool(kind, cwd);
+                let t = &mut self.tabs[tab];
+                // the tool takes the right-hand third
+                t.root.split_at(target, Axis::Horizontal, id, 0.62);
+                t.focus = id;
+                t.zoomed = false;
+            }
+        }
+        self.relayout();
+        Ok(())
+    }
+
+    /// Lay the tab out as a preset. A tab with one pane is reshaped in
+    /// place; a busier one is left alone and the preset opens in a new tab.
+    fn apply_preset(&mut self, p: Preset) -> io::Result<()> {
+        let cwd = self.focused_cwd();
+        let tab = self.active;
+        let panes = self.tabs[tab].root.panes();
+        let (tab, shell) = if panes.len() == 1 && self.panes.contains_key(&panes[0]) {
+            (tab, panes[0])
+        } else {
+            let id = self.new_pane(cwd.clone())?;
+            self.tabs.insert(tab + 1, Tab::new(id));
+            self.active = tab + 1;
+            (tab + 1, id)
+        };
+        let here = cwd
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default();
+        let leaf = |id| Box::new(Node::Leaf(id));
+        let root = match p {
+            Preset::Dev => {
+                let f = self.new_tool("files", here.clone());
+                let s = self.new_tool("system", here);
+                Node::Split {
+                    axis: Axis::Horizontal,
+                    ratio: 0.6,
+                    a: leaf(shell),
+                    b: Box::new(Node::Split {
+                        axis: Axis::Vertical,
+                        ratio: 0.55,
+                        a: leaf(f),
+                        b: leaf(s),
+                    }),
+                }
+            }
+            Preset::Monitor => {
+                let s = self.new_tool("system", here);
+                Node::Split {
+                    axis: Axis::Vertical,
+                    ratio: 0.62,
+                    a: leaf(s),
+                    b: leaf(shell),
+                }
+            }
+            Preset::Files => {
+                let f = self.new_tool("files", here);
+                Node::Split {
+                    axis: Axis::Horizontal,
+                    ratio: 0.38,
+                    a: leaf(f),
+                    b: leaf(shell),
+                }
+            }
+        };
+        let t = &mut self.tabs[tab];
+        t.root = root;
+        t.focus = shell;
+        t.zoomed = false;
+        t.arrangement = None;
+        self.view = View::Full;
+        self.notice(format!("layout: {}", p.name()));
+        self.relayout();
+        Ok(())
     }
 
     fn switch_tab(&mut self, i: usize) {
@@ -985,6 +1584,7 @@ impl App {
         if let Some(mut p) = self.panes.remove(&id) {
             p.pane.kill();
         }
+        self.tools.remove(&id);
         self.detach(id, 0);
     }
 
@@ -1106,8 +1706,15 @@ impl App {
                     self.relayout();
                 }
             }
+            Cmd::ToggleFiles => self.show_tool("files", true)?,
+            Cmd::ToggleSystem => self.show_tool("system", true)?,
+            Cmd::Preset(p) => self.apply_preset(p)?,
+            Cmd::LowPower => {
+                self.power_manual = true;
+                self.set_low_power(!self.low_power);
+            }
             Cmd::ScrollUp | Cmd::ScrollDown => {
-                let id = self.focused();
+                let id = self.input_target();
                 if let Some(p) = self.panes.get_mut(&id) {
                     let page = (p.size.0 as isize / 2).max(1);
                     p.pane
@@ -1116,6 +1723,57 @@ impl App {
             }
         }
         Ok(())
+    }
+}
+
+/// `p` relative to `cwd` when it's inside it ("." for cwd itself).
+fn relative(p: &std::path::Path, cwd: &std::path::Path) -> String {
+    match p.strip_prefix(cwd) {
+        Ok(r) if r.as_os_str().is_empty() => ".".into(),
+        Ok(r) => r.display().to_string(),
+        Err(_) => p.display().to_string(),
+    }
+}
+
+/// Quote for a POSIX shell only when needed.
+pub fn shell_quote(s: &str) -> String {
+    let safe = !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_./-+@%,:=".contains(c));
+    if safe {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
+}
+
+fn editor() -> String {
+    std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .ok()
+        .filter(|e| !e.trim().is_empty())
+        .unwrap_or_else(|| "vi".into())
+}
+
+/// The command line that opens `path` (at `line`) in `editor`.
+pub fn edit_command(editor: &str, path: &str, line: Option<usize>) -> String {
+    let q = shell_quote(path);
+    let Some(n) = line else {
+        return format!("{editor} {q}");
+    };
+    let prog = editor.split_whitespace().next().unwrap_or("");
+    let prog = prog.rsplit('/').next().unwrap_or(prog);
+    match prog {
+        "vi" | "vim" | "nvim" | "nano" | "emacs" | "emacsclient" | "micro" | "kak" | "mg" => {
+            format!("{editor} +{n} {q}")
+        }
+        "code" | "code-insiders" | "cursor" | "codium" => {
+            format!("{editor} -g {}", shell_quote(&format!("{path}:{n}")))
+        }
+        "subl" | "zed" | "hx" | "helix" => {
+            format!("{editor} {}", shell_quote(&format!("{path}:{n}")))
+        }
+        _ => format!("{editor} {q}"),
     }
 }
 
@@ -1151,6 +1809,24 @@ mod tests {
     fn titles_are_stripped_but_bell_kept() {
         assert_eq!(strip_titles(b"\x1b]2;vim\x07\x07"), b"\x07");
         assert_eq!(strip_titles(b"\x1b]52;c;aGk=\x07"), b"\x1b]52;c;aGk=\x07");
+    }
+
+    #[test]
+    fn quoting_and_editors() {
+        assert_eq!(shell_quote("src/main.rs"), "src/main.rs");
+        assert_eq!(shell_quote("My File.txt"), "'My File.txt'");
+        assert_eq!(shell_quote("it's"), "'it'\\''s'");
+        assert_eq!(edit_command("vim", "a.rs", Some(3)), "vim +3 a.rs");
+        assert_eq!(
+            edit_command("code -w", "a b.rs", Some(3)),
+            "code -w -g 'a b.rs:3'"
+        );
+        assert_eq!(edit_command("/usr/bin/nano", "x", None), "/usr/bin/nano x");
+        assert_eq!(edit_command("weird", "x", Some(9)), "weird x");
+        let cwd = std::path::Path::new("/p");
+        assert_eq!(relative(std::path::Path::new("/p/src/a"), cwd), "src/a");
+        assert_eq!(relative(cwd, cwd), ".");
+        assert_eq!(relative(std::path::Path::new("/q"), cwd), "/q");
     }
 
     #[test]

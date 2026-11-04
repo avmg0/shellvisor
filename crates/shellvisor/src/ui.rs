@@ -3,7 +3,8 @@
 //! Colours use the 256-colour palette (not 24-bit) so they look the same in
 //! Terminal.app, which has no true colour.
 
-use crate::app::{App, MENU, Modal, PaneState, View};
+use crate::activity::Activity;
+use crate::app::{App, MENU, Modal, PaneState, Tool, View};
 use crate::keys;
 use crate::term::TermView;
 use ratatui::Frame;
@@ -23,38 +24,79 @@ const CYAN: Color = Color::Indexed(73);
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+/// The loading circle for downloads and installs.
+const CIRCLE: [&str; 4] = ["◐", "◓", "◑", "◒"];
+
+fn tick(app: &App) -> usize {
+    let every = if app.low_power { 250 } else { 100 };
+    (app.epoch.elapsed().as_millis() / every) as usize
+}
+
 fn spinner(app: &App) -> &'static str {
-    SPINNER[(app.epoch.elapsed().as_millis() / 100) as usize % SPINNER.len()]
+    SPINNER[tick(app) % SPINNER.len()]
+}
+
+fn circle(app: &App) -> &'static str {
+    CIRCLE[(tick(app) / 2) % CIRCLE.len()]
+}
+
+/// "◐ npm install 42%"
+fn activity_text(app: &App, a: &Activity) -> String {
+    match a.progress {
+        Some(p) => format!("{} {} {p}%", circle(app), a.label),
+        None => format!("{} {}", circle(app), a.label),
+    }
+}
+
+fn pane_block(title: String, is_focus: bool) -> Block<'static> {
+    let border = Style::default().fg(if is_focus { AMBER } else { FAINT });
+    Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(border)
+        .title(Span::styled(
+            title,
+            if is_focus {
+                border.add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(DIM)
+            },
+        ))
 }
 
 pub fn draw(f: &mut Frame, app: &App) {
     let (tabbar, _, status) = app.regions();
     let full = app.view == View::Full;
-    let focused = app.focused();
+    let focused = app.input_target();
+    let zoomed = app.tabs[app.active].zoomed;
 
     for (id, outer, inner) in app.visible() {
+        let is_focus = id == focused;
+        if let Some(t) = app.tools.get(&id) {
+            if full {
+                let mut title = format!(" {} ", t.title());
+                if zoomed {
+                    title.push_str("· zoomed ");
+                }
+                f.render_widget(pane_block(title, is_focus), outer);
+            }
+            match t {
+                Tool::Files(fp) => fp.render(inner, f.buffer_mut(), is_focus),
+                Tool::System(sp) => sp.render(inner, f.buffer_mut(), app.low_power),
+            }
+            continue;
+        }
         let Some(p) = app.panes.get(&id) else {
             continue;
         };
         if full {
-            let is_focus = id == focused;
-            let border = Style::default().fg(if is_focus { AMBER } else { FAINT });
             let mut title = format!(" {} · {} ", p.shell, short_path(&p.cwd));
-            if app.tabs[app.active].zoomed {
+            if let Some(a) = &p.activity {
+                title.push_str(&format!("· {} ", activity_text(app, a)));
+            }
+            if zoomed {
                 title.push_str("· zoomed ");
             }
-            let block = Block::bordered()
-                .border_type(BorderType::Rounded)
-                .border_style(border)
-                .title(Span::styled(
-                    title,
-                    if is_focus {
-                        border.add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(DIM)
-                    },
-                ));
-            f.render_widget(block, outer);
+            f.render_widget(pane_block(title, is_focus), outer);
         }
         f.render_widget(TermView(p.pane.screen()), inner);
         if p.pane.scroll() > 0 {
@@ -199,7 +241,11 @@ fn tab_label(app: &App, i: usize) -> (String, Option<(String, Color)>) {
         .iter()
         .filter_map(|id| app.panes.get(id))
         .collect();
-    let main = app.panes.get(&tab.focus).or(panes.first().copied());
+    let main = app
+        .panes
+        .get(&tab.focus)
+        .or_else(|| app.paired_shell(i).and_then(|id| app.panes.get(&id)))
+        .or(panes.first().copied());
     let shell = main.map(|p| p.shell.as_str()).unwrap_or("?");
     let what = match (&tab.name, main) {
         (Some(n), _) => n.clone(),
@@ -210,12 +256,15 @@ fn tab_label(app: &App, i: usize) -> (String, Option<(String, Color)>) {
         (None, Some(p)) => basename(&short_path(&p.cwd)).to_string(),
         (None, None) => String::new(),
     };
-    let split = if panes.len() > 1 {
-        format!(" ⊞{}", panes.len())
+    let n = tab.root.panes().len();
+    let split = if n > 1 {
+        format!(" ⊞{n}")
     } else {
         String::new()
     };
-    let icon = if panes.iter().any(|p| p.running) {
+    let icon = if panes.iter().any(|p| p.activity.is_some()) {
+        Some((circle(app).to_string(), AMBER))
+    } else if panes.iter().any(|p| p.running) {
         Some((spinner(app).to_string(), AMBER))
     } else if let Some(code) = panes.iter().filter_map(|p| p.last_exit).find(|c| *c != 0) {
         Some((format!("✖{code}"), RED))
@@ -277,7 +326,12 @@ fn draw_tabs(f: &mut Frame, app: &App, r: Rect) {
 }
 
 fn draw_status(f: &mut Frame, app: &App, r: Rect) {
-    let p = app.panes.get(&app.focused());
+    let target = app.input_target();
+    let tool = app.tools.get(&target);
+    let p = app.panes.get(&target).or_else(|| {
+        app.paired_shell(app.active)
+            .and_then(|id| app.panes.get(&id))
+    });
     let mut left = vec![
         Span::styled(
             format!(" ▍{} ", crate::NAME_LOWER),
@@ -291,7 +345,29 @@ fn draw_status(f: &mut Frame, app: &App, r: Rect) {
             Style::default().fg(CYAN).bg(BAR),
         ),
     ];
-    if let Some(p) = p {
+    if let Some(t) = tool {
+        left.push(Span::styled(
+            format!(" {} ", t.kind()),
+            Style::default().fg(INK).bg(CYAN),
+        ));
+    }
+    // Downloads anywhere (other tabs too) show here.
+    let acts: Vec<&Activity> = app
+        .panes
+        .values()
+        .filter_map(|p| p.activity.as_ref())
+        .collect();
+    if let Some(first) = acts.first() {
+        let more = if acts.len() > 1 {
+            format!(" +{}", acts.len() - 1)
+        } else {
+            String::new()
+        };
+        left.push(Span::styled(
+            format!(" {}{more} ", activity_text(app, first)),
+            Style::default().fg(AMBER).bg(BAR),
+        ));
+    } else if let Some(p) = p {
         if p.running {
             let secs = p.started.map(|s| s.elapsed().as_secs()).unwrap_or(0);
             let cmd: String = p.command.chars().take(40).collect();
@@ -312,9 +388,14 @@ fn draw_status(f: &mut Frame, app: &App, r: Rect) {
         }
     }
     let right = format!(
-        " mem {} · ctrl+] menu · F1 help · {} ",
-        crate::sysinfo::self_memory(),
-        crate::sysinfo::clock()
+        " {}mem {} · ctrl+] menu · F1 help · {} ",
+        if app.low_power {
+            "◌ low-power · "
+        } else {
+            ""
+        },
+        crate::osinfo::self_memory(),
+        crate::osinfo::clock()
     );
     f.render_widget(
         Paragraph::new(Line::from(left)).style(Style::default().bg(BAR)),
@@ -331,7 +412,7 @@ fn draw_status(f: &mut Frame, app: &App, r: Rect) {
     }
 }
 
-fn fmt_secs(s: u64) -> String {
+pub fn fmt_secs(s: u64) -> String {
     if s < 60 {
         format!("{s}s")
     } else if s < 3600 {
@@ -347,6 +428,10 @@ const SECTIONS: &[(&str, &str)] = &[
     ("new_tab", "Tabs"),
     ("split_right", "Splits"),
     ("scroll_up", "Scrolling"),
+    (
+        "toggle_files",
+        "Panes — in files: ⏎ open · i insert path · c cd · e edit · p preview · / filter · tab view",
+    ),
 ];
 
 /// Help rows built from the live keymap, so custom keys show up here.
@@ -363,6 +448,8 @@ pub fn help_rows(app: &App) -> Vec<(String, String, bool)> {
         let key = if shown.is_empty() {
             if *name == "close_pane" {
                 "ctrl+] x".to_string()
+            } else if name.starts_with("preset_") || *name == "low_power" {
+                "alt+m menu".to_string()
             } else {
                 "(off)".to_string()
             }
@@ -416,7 +503,11 @@ fn draw_menu(f: &mut Frame, app: &App, sel: usize) {
     f.render_widget(Clear, area);
     let mut lines = vec![Line::raw("")];
     for (i, (label, _)) in MENU.iter().enumerate() {
-        let num = if i == 9 { 0 } else { i + 1 };
+        let num = match i {
+            0..9 => (i + 1).to_string(),
+            9 => "0".into(),
+            _ => " ".into(),
+        };
         let text = format!(" {num}  {label:<26}");
         lines.push(if i == sel {
             Line::styled(

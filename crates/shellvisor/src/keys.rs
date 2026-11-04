@@ -98,6 +98,35 @@ pub enum Cmd {
     ScrollDown,
     NextLayout,
     TabMenu,
+    ToggleFiles,
+    ToggleSystem,
+    LowPower,
+    Preset(Preset),
+}
+
+/// Ready-made layouts for a tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Preset {
+    /// Shell on the left; files above system on the right.
+    Dev,
+    /// System stats big, shell below.
+    Monitor,
+    /// Files on the left, shell on the right.
+    Files,
+}
+
+impl Preset {
+    pub const ALL: [Preset; 3] = [Preset::Dev, Preset::Monitor, Preset::Files];
+    pub fn name(self) -> &'static str {
+        match self {
+            Preset::Dev => "dev",
+            Preset::Monitor => "monitor",
+            Preset::Files => "files",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Preset> {
+        Preset::ALL.into_iter().find(|p| p.name() == s)
+    }
 }
 
 /// Every bindable action: config name, command, default keys, help text.
@@ -201,6 +230,32 @@ pub const ACTIONS: &[(&str, Cmd, &[&str], &str)] = &[
         Cmd::ScrollDown,
         &["shift+pagedown"],
         "scroll forward one page",
+    ),
+    (
+        "toggle_files",
+        Cmd::ToggleFiles,
+        &["f2"],
+        "files pane: open · focus · close (also: sv files)",
+    ),
+    (
+        "toggle_system",
+        Cmd::ToggleSystem,
+        &["f3"],
+        "system pane: open · focus · close (also: sv sys)",
+    ),
+    (
+        "preset_dev",
+        Cmd::Preset(Preset::Dev),
+        &[],
+        "layouts: dev · monitor · files (menu, or sv layout <name>)",
+    ),
+    ("preset_monitor", Cmd::Preset(Preset::Monitor), &[], ""),
+    ("preset_files", Cmd::Preset(Preset::Files), &[], ""),
+    (
+        "low_power",
+        Cmd::LowPower,
+        &[],
+        "low-power mode on/off (also: sv power on|off|auto)",
     ),
 ];
 
@@ -428,6 +483,8 @@ pub fn after_leader(key: &[u8]) -> Option<Cmd> {
         b"b" => ToggleView,
         b"?" | b"h" => Help,
         b"q" => Quit,
+        b"f" => ToggleFiles,
+        b"s" => ToggleSystem,
         b"\x1b[A" => Focus(Dir::Up),
         b"\x1b[B" => Focus(Dir::Down),
         b"\x1b[C" => Focus(Dir::Right),
@@ -437,7 +494,7 @@ pub fn after_leader(key: &[u8]) -> Option<Cmd> {
     })
 }
 
-pub const LEADER_HINT: &str = " ctrl+] → t tab · w close tab · x close split · \\ split │ · - split ─ · o next split · z zoom · l layout · m menu · b basic view · r rename · 1-9 tab · ? help · ctrl+] send ctrl+] ";
+pub const LEADER_HINT: &str = " ctrl+] → t tab · w close tab · x close split · \\ split │ · - split ─ · o next split · z zoom · l layout · m menu · f files · s system · b basic view · r rename · 1-9 tab · ? help · ctrl+] send ctrl+] ";
 
 /// On macOS, Option+key types these characters unless the terminal is set to
 /// send Option as Alt/Meta. Seeing one alone means alt shortcuts can't work.

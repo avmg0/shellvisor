@@ -9,16 +9,21 @@ pub const NAME: &str = "Shellvisor";
 /// Lower-case name: binary, config and data folders.
 pub const NAME_LOWER: &str = "shellvisor";
 
+mod activity;
 mod app;
 mod cli;
 mod config;
+mod files;
+mod gitstat;
+mod highlight;
 mod history;
 mod keys;
 mod mouse;
+mod osinfo;
 mod paths;
 mod session;
 mod shell;
-mod sysinfo;
+mod sysmon;
 mod term;
 mod ui;
 mod workspace;
@@ -177,6 +182,7 @@ fn main() {
         },
         keymap,
         restore: cfg.restore,
+        low_power: cfg.low_power,
         session_path: paths::state_dir().join("session.yaml"),
         warnings,
     });

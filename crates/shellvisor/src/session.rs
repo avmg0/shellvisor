@@ -43,7 +43,17 @@ pub enum SavedNode {
     },
     Pane {
         cwd: String,
+        /// "files" or "system" for a tool pane; absent for a shell.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool: Option<String>,
     },
+}
+
+/// What a saved leaf holds.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Leaf {
+    pub cwd: String,
+    pub tool: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,26 +65,38 @@ pub enum SavedAxis {
 
 impl SavedNode {
     /// Capture a live tree, looking up each pane's folder.
-    pub fn capture(node: &Node, cwd: &impl Fn(PaneId) -> String) -> SavedNode {
+    pub fn capture(node: &Node, leaf: &impl Fn(PaneId) -> Leaf) -> SavedNode {
         match node {
-            Node::Leaf(id) => SavedNode::Pane { cwd: cwd(*id) },
+            Node::Leaf(id) => {
+                let l = leaf(*id);
+                SavedNode::Pane {
+                    cwd: l.cwd,
+                    tool: l.tool,
+                }
+            }
             Node::Split { axis, ratio, a, b } => SavedNode::Split {
                 split: match axis {
                     Axis::Horizontal => SavedAxis::SideBySide,
                     Axis::Vertical => SavedAxis::Stacked,
                 },
                 ratio: *ratio,
-                a: Box::new(SavedNode::capture(a, cwd)),
-                b: Box::new(SavedNode::capture(b, cwd)),
+                a: Box::new(SavedNode::capture(a, leaf)),
+                b: Box::new(SavedNode::capture(b, leaf)),
             },
         }
     }
 
     /// Rebuild a live tree, creating a pane for each saved folder
     /// (in reading order) with `spawn`.
-    pub fn rebuild<E>(&self, spawn: &mut impl FnMut(&str) -> Result<PaneId, E>) -> Result<Node, E> {
+    pub fn rebuild<E>(
+        &self,
+        spawn: &mut impl FnMut(&Leaf) -> Result<PaneId, E>,
+    ) -> Result<Node, E> {
         Ok(match self {
-            SavedNode::Pane { cwd } => Node::Leaf(spawn(cwd)?),
+            SavedNode::Pane { cwd, tool } => Node::Leaf(spawn(&Leaf {
+                cwd: cwd.clone(),
+                tool: tool.clone(),
+            })?),
             SavedNode::Split { split, ratio, a, b } => Node::Split {
                 axis: match split {
                     SavedAxis::SideBySide => Axis::Horizontal,
@@ -89,7 +111,8 @@ impl SavedNode {
 
     pub fn folders(&self) -> Vec<&str> {
         match self {
-            SavedNode::Pane { cwd } => vec![cwd.as_str()],
+            SavedNode::Pane { cwd, .. } if cwd.is_empty() => vec![],
+            SavedNode::Pane { cwd, .. } => vec![cwd.as_str()],
             SavedNode::Split { a, b, .. } => {
                 let mut v = a.folders();
                 v.extend(b.folders());
@@ -132,7 +155,7 @@ impl Session {
             .map(|t| {
                 t.name
                     .clone()
-                    .unwrap_or_else(|| short(t.layout.folders()[0]))
+                    .unwrap_or_else(|| short(t.layout.folders().first().copied().unwrap_or("")))
             })
             .collect();
         let n = self.tabs.len();
@@ -156,6 +179,7 @@ impl Session {
             && self.tabs[0].layout
                 == SavedNode::Pane {
                     cwd: cwd.to_string(),
+                    tool: None,
                 }
     }
 }
@@ -174,20 +198,30 @@ mod tests {
     #[test]
     fn capture_and_rebuild_round_trip() {
         let tree = sample_tree();
-        let folder = |id: PaneId| format!("/work/{id}");
+        let folder = |id: PaneId| Leaf {
+            cwd: format!("/work/{id}"),
+            tool: (id == 3).then(|| "files".to_string()),
+        };
         let saved = SavedNode::capture(&tree, &folder);
         assert_eq!(saved.folders(), vec!["/work/1", "/work/2", "/work/3"]);
 
         let mut next = 10;
         let mut spawned = Vec::new();
         let rebuilt = saved
-            .rebuild(&mut |cwd: &str| -> Result<PaneId, ()> {
-                spawned.push(cwd.to_string());
+            .rebuild(&mut |l: &Leaf| -> Result<PaneId, ()> {
+                spawned.push(format!(
+                    "{}{}",
+                    l.cwd,
+                    l.tool
+                        .as_deref()
+                        .map(|t| format!(" {t}"))
+                        .unwrap_or_default()
+                ));
                 next += 1;
                 Ok(next)
             })
             .unwrap();
-        assert_eq!(spawned, vec!["/work/1", "/work/2", "/work/3"]);
+        assert_eq!(spawned, vec!["/work/1", "/work/2", "/work/3 files"]);
         assert_eq!(rebuilt.panes(), vec![11, 12, 13]);
         // same shape as the original
         let mut a = Vec::new();
@@ -212,13 +246,19 @@ mod tests {
                     name: Some("api".into()),
                     zoomed: false,
                     focus: 2,
-                    layout: SavedNode::capture(&sample_tree(), &|id| format!("/p/{id}")),
+                    layout: SavedNode::capture(&sample_tree(), &|id| Leaf {
+                        cwd: format!("/p/{id}"),
+                        tool: (id == 2).then(|| "system".to_string()),
+                    }),
                 },
                 SavedTab {
                     name: None,
                     zoomed: true,
                     focus: 0,
-                    layout: SavedNode::Pane { cwd: "/tmp".into() },
+                    layout: SavedNode::Pane {
+                        cwd: "/tmp".into(),
+                        tool: None,
+                    },
                 },
             ],
         };
@@ -227,7 +267,9 @@ mod tests {
         s.save(&path).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(
-            text.contains("side_by_side") && text.contains("stacked"),
+            text.contains("side_by_side")
+                && text.contains("stacked")
+                && text.contains("tool: system"),
             "{text}"
         );
         assert_eq!(Session::load(&path), Some(s.clone()));
@@ -261,6 +303,7 @@ mod tests {
                 focus: 0,
                 layout: SavedNode::Pane {
                     cwd: "/home/a".into(),
+                    tool: None,
                 },
             }],
         };

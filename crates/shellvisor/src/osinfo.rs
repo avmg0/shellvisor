@@ -47,6 +47,45 @@ pub fn clock() -> String {
     }
 }
 
+/// Running on battery power? None if we can't tell (desktops, unknown OS).
+pub fn on_battery() -> Option<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        let dir = std::fs::read_dir("/sys/class/power_supply").ok()?;
+        let mut mains = None;
+        for e in dir.flatten() {
+            let p = e.path();
+            let kind = std::fs::read_to_string(p.join("type")).unwrap_or_default();
+            if kind.trim() == "Mains" {
+                let online = std::fs::read_to_string(p.join("online")).unwrap_or_default();
+                let on = online.trim() == "1";
+                mains = Some(mains.unwrap_or(false) || on);
+            }
+        }
+        mains.map(|on_ac| !on_ac)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("pmset")
+            .args(["-g", "ps"])
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        if text.contains("'Battery Power'") {
+            Some(true)
+        } else if text.contains("'AC Power'") {
+            Some(false)
+        } else {
+            None
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

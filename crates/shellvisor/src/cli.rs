@@ -5,7 +5,7 @@
 //! escape sequence to the terminal; outside it can start Shellvisor.
 
 use std::io::Write;
-use sv_proto::{ENV_INSIDE, ENV_PID, ENV_SHELL, ENV_VERSION, Mode};
+use sv_proto::{ENV_INSIDE, ENV_PID, ENV_SHELL, ENV_VERSION, Mode, request_sequence};
 
 const HELP: &str = "\
 sv — control Shellvisor from your shell
@@ -14,6 +14,10 @@ usage:
   sv on        start Shellvisor here (or show the full view if already inside)
   sv off       switch to basic view (just your shell; everything keeps running)
   sv exit      leave Shellvisor
+  sv files [tree|list|git|find]   open the files pane (in this tab)
+  sv sys       open the system pane (CPU, memory, disk, network, temperatures)
+  sv layout dev|monitor|files     lay this tab out as a preset
+  sv power on|off|auto            low-power mode (auto = on battery)
   sv status    is Shellvisor running in this terminal?
   sv version   print the version
   sv help      this help
@@ -24,8 +28,11 @@ pub fn inside() -> bool {
 }
 
 fn send(mode: Mode) -> i32 {
+    send_seq(mode.sequence())
+}
+
+fn send_seq(seq: String) -> i32 {
     // Write to the controlling terminal so it works even with stdout redirected.
-    let seq = mode.sequence();
     let written = std::fs::OpenOptions::new()
         .write(true)
         .open("/dev/tty")
@@ -72,6 +79,24 @@ pub fn run(args: &[String]) -> i32 {
             } else {
                 not_running("exit")
             }
+        }
+        "files" | "sys" | "system" | "layout" | "power" => {
+            if !inside() {
+                return not_running(cmd);
+            }
+            let arg = args.get(1).map(String::as_str);
+            let words: Vec<&str> = match (cmd, arg) {
+                ("files", None) => vec!["files"],
+                ("files", Some(v @ ("tree" | "list" | "git" | "find"))) => vec!["files", v],
+                ("sys" | "system", None) => vec!["system"],
+                ("layout", Some(l @ ("dev" | "monitor" | "files"))) => vec!["layout", l],
+                ("power", Some(m @ ("on" | "off" | "auto"))) => vec!["power", m],
+                _ => {
+                    eprintln!("sv {cmd}: unexpected argument — see `sv help`");
+                    return 2;
+                }
+            };
+            send_seq(request_sequence(&words))
         }
         "status" => {
             if inside() {

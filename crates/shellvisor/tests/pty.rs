@@ -662,10 +662,120 @@ fn tab_menu() {
     s.wait_for("PROMPT>");
     s.send("\x1bm"); // alt+m
     s.wait_for("Split side by side");
-    s.send("\x1b[B\r"); // down to "Split side by side", enter
+    s.send("\x1b[B\x1b[B\r"); // down twice to "Split side by side", enter
     s.wait_until("split", |t| top(t).contains("⊞2"));
     s.send("\x1bm");
     s.wait_for("Rename tab");
     s.send("\x1b"); // esc closes
     s.wait_until("menu closed", |t| !t.contains("Rename tab"));
+}
+
+// ------------------------------------------------------------------ P2 panes
+
+#[test]
+fn files_pane_opens_inserts_paths_and_closes() {
+    let mut s = Session::start_full("filespane");
+    s.wait_for("PROMPT>");
+    let work = s.dir.join("work");
+    std::fs::write(work.join("alpha.txt"), "hello-alpha\n").unwrap();
+    std::fs::create_dir_all(work.join("beta")).unwrap();
+    s.send("\x1bOQ"); // F2
+    s.wait_until("files pane", |t| {
+        t.contains("▸ beta/") && t.contains("alpha.txt") && t.contains(" tree ")
+    });
+    s.send("j"); // beta/ → alpha.txt
+    s.send("i"); // insert path at the prompt (and focus the shell)
+    s.wait_for("PROMPT> alpha.txt");
+    s.send("\x01cat \r"); // ctrl+a, prefix `cat `
+    s.wait_for("hello-alpha");
+    // F2 from the shell focuses the pane; F2 on the pane closes it.
+    s.send("\x1bOQ");
+    s.pump(Duration::from_millis(200));
+    s.send("\x1bOQ");
+    s.wait_until("files pane closed", |t| !t.contains("▸ beta/"));
+}
+
+#[test]
+fn files_pane_follows_cd_and_can_cd_the_shell() {
+    let mut s = Session::start_full("filesfollow");
+    s.wait_for("PROMPT>");
+    let work = s.dir.join("work");
+    std::fs::create_dir_all(work.join("sub/deeper")).unwrap();
+    std::fs::write(work.join("sub/inner.txt"), "x").unwrap();
+    s.send("\x1bOQ");
+    s.wait_for("▸ sub/");
+    // The pane follows the shell's folder.
+    s.send("\x1b[D"); // alt+left would be focus; plain ← goes to the pane: harmless
+    s.send("\x1b\x1b[D"); // alt+left: back to the shell
+    s.pump(Duration::from_millis(200));
+    s.run("cd sub");
+    s.wait_until("pane followed", |t| {
+        t.contains("inner.txt") && t.contains("▸ deeper/")
+    });
+    // `c` on a folder cds the shell there.
+    s.send("\x1b\x1b[C"); // alt+right: to the pane
+    s.pump(Duration::from_millis(200));
+    s.send("c"); // deeper/ is the first row
+    s.pump(Duration::from_millis(500));
+    s.send("pwd\r");
+    s.wait_for("sub/deeper");
+}
+
+#[test]
+fn find_view_searches_names() {
+    let mut s = Session::start_full("findview");
+    s.wait_for("PROMPT>");
+    let work = s.dir.join("work");
+    std::fs::create_dir_all(work.join("src/core")).unwrap();
+    std::fs::write(work.join("src/core/pricing.py"), "x = 1\n").unwrap();
+    s.run("sv files find");
+    s.wait_for(" name ");
+    s.send("pric");
+    s.wait_for("src/core/pricing.py");
+}
+
+#[test]
+fn dev_layout_shows_system_stats_and_is_restored() {
+    let mut s = Session::start_full("devlayout");
+    s.wait_for("PROMPT>");
+    s.run("sv layout dev");
+    s.wait_until("dev layout", |t| {
+        t.contains("CPU") && t.contains("MEM") && t.contains(" tree ") && t.contains("TEMP")
+    });
+    s.pump(Duration::from_millis(1500));
+    let saved = std::fs::read_to_string(s.dir.join("state/session.yaml")).unwrap();
+    assert!(
+        saved.contains("tool: files") && saved.contains("tool: system"),
+        "{saved}"
+    );
+    s.send("\x11");
+    assert_eq!(s.wait_exit(), 0);
+    s.keep = true;
+    let dir = s.dir.clone();
+    drop(s);
+
+    let mut s = Session::launch("bash", dir);
+    s.wait_for("Restore last session");
+    s.send("y");
+    s.wait_until("panes back", |t| t.contains("CPU") && t.contains(" tree "));
+    // F3 on the shell focuses the system pane; F5 zooms it; `m` sorts by memory.
+    s.send("\x1bOR");
+    s.pump(Duration::from_millis(200));
+    s.send("\x1b[15~");
+    s.wait_for("PID");
+    s.send("m");
+    s.wait_for("MEM▾");
+}
+
+#[test]
+fn downloads_show_a_loading_circle_and_a_toast() {
+    let mut s = Session::start_full("activity");
+    s.wait_for("PROMPT>");
+    // A stand-in `curl` that prints progress like the real one.
+    s.run("curl() { printf 'got 42%%\\n'; sleep 2; }");
+    s.send("curl https://example.invalid/file\r");
+    s.wait_until("progress in the pane title", |t| {
+        t.lines().nth(1).unwrap_or("").contains("curl 42%")
+    });
+    s.wait_for("✔ curl finished");
 }

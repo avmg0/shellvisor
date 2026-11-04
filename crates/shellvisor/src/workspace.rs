@@ -70,18 +70,25 @@ impl Node {
     /// Replace leaf `target` with a split of (target, new). Returns false if
     /// `target` isn't in this tree.
     pub fn split(&mut self, target: PaneId, axis: Axis, new: PaneId) -> bool {
+        self.split_at(target, axis, new, 0.5)
+    }
+
+    /// Like `split`, with `target` taking `ratio` of the space.
+    pub fn split_at(&mut self, target: PaneId, axis: Axis, new: PaneId, ratio: f32) -> bool {
         match self {
             Node::Leaf(id) if *id == target => {
                 *self = Node::Split {
                     axis,
-                    ratio: 0.5,
+                    ratio,
                     a: Box::new(Node::Leaf(target)),
                     b: Box::new(Node::Leaf(new)),
                 };
                 true
             }
             Node::Leaf(_) => false,
-            Node::Split { a, b, .. } => a.split(target, axis, new) || b.split(target, axis, new),
+            Node::Split { a, b, .. } => {
+                a.split_at(target, axis, new, ratio) || b.split_at(target, axis, new, ratio)
+            }
         }
     }
 

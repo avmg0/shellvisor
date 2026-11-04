@@ -6,6 +6,8 @@
 //! the prompt, idles, and reports binary size, startup time, memory and idle
 //! CPU of the Shellvisor process itself (the shell is not counted).
 //! `BENCH_TABS=3` opens extra tabs (alt+t) before measuring.
+//! `BENCH_LAYOUT=dev` lays the last tab out as a preset (files + system panes);
+//! the RSS budget is then the P2 one (15 MB).
 //! With `--check`, exits 1 if any budget is exceeded.
 
 use portable_pty::{CommandBuilder, PtySize};
@@ -17,6 +19,8 @@ use std::time::{Duration, Instant};
 // Budgets (docs/ARCHITECTURE.md §8): P1 allows ≤ 10 MB with 3 tabs.
 const MAX_BINARY_MB: f64 = 5.0;
 const MAX_RSS_MB: f64 = 10.0;
+/// With tool panes on screen (P2 exit criterion).
+const MAX_RSS_PANES_MB: f64 = 15.0;
 const MAX_IDLE_CPU_PCT: f64 = 0.5;
 const MAX_FIRST_FRAME_MS: u128 = 100;
 
@@ -135,6 +139,14 @@ fn main() {
         writer.flush().unwrap();
         std::thread::sleep(Duration::from_millis(500));
     }
+    let layout = std::env::var("BENCH_LAYOUT").ok().filter(|l| !l.is_empty());
+    if let Some(l) = &layout {
+        use std::io::Write;
+        writer
+            .write_all(format!("sv layout {l}\r").as_bytes())
+            .unwrap();
+        writer.flush().unwrap();
+    }
     std::thread::sleep(Duration::from_secs(2)); // settle
     while rx.try_recv().is_ok() {}
     let cpu0 = cpu_secs(pid).unwrap_or(0.0);
@@ -160,6 +172,14 @@ fn main() {
         "Shellvisor budget ({tabs} tab(s), full view, {}s idle)\n",
         idle.as_secs()
     );
+    let max_rss = if layout.is_some() {
+        MAX_RSS_PANES_MB
+    } else {
+        MAX_RSS_MB
+    };
+    if let Some(l) = &layout {
+        println!("layout: {l}\n");
+    }
     let mut ok = true;
     ok &= row(
         "binary size",
@@ -181,8 +201,8 @@ fn main() {
     ok &= row(
         "memory (RSS) idle",
         format!("{rss_mb:.1} MB"),
-        format!("≤ {MAX_RSS_MB} MB"),
-        rss_mb <= MAX_RSS_MB,
+        format!("≤ {max_rss} MB"),
+        rss_mb <= max_rss,
     );
     ok &= row(
         "CPU idle",
