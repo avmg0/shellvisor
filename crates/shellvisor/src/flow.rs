@@ -293,15 +293,15 @@ impl FlowPane {
             .max()
             .unwrap_or(1)
             .max(1);
-        if w < 76 {
+        if w < 86 {
             y = self.render_flow_compact(s, area, buf, y);
             self.render_flow_tail(s, area, buf, y);
             return;
         }
-        let cmd_w = w.saturating_sub(52).clamp(8, 30);
+        let cmd_w = w.saturating_sub(76).clamp(8, 30);
         let head = format!(
-            " #  {:<cmd_w$} {:>9} {:>9} {:>14} {:>5} {:>9}",
-            "stage", "in", "out", "lines in→out", "kept", "rate/s"
+            " #  {:<cmd_w$} {:<10} {:>9} {:>9} {:>14} {:>5} {:>9}",
+            "stage", "state", "in", "out", "lines in→out", "kept", "rate/s"
         );
         buf.set_stringn(
             area.x,
@@ -331,8 +331,16 @@ impl FlowPane {
             } else {
                 String::new()
             };
+            let state = match st.exit {
+                _ if slow == Some(i) => "◀ slowest".to_string(),
+                Some(0) => "✔ exit 0".to_string(),
+                Some(c) => format!("✖ exit {c}"),
+                None if s.done => "✔ done".to_string(),
+                None if i > 0 && st.lines_out == 0 && st.lines_in > 0 => "◆ holding".to_string(),
+                None => "▶ running".to_string(),
+            };
             let row = format!(
-                " {:<2} {cmd:<cmd_w$} {inb:>9} {:>9} {lines_io:>14} {kept:>5} {:>9}",
+                " {:<2} {cmd:<cmd_w$} {state:<10} {inb:>9} {:>9} {lines_io:>14} {kept:>5} {:>9}",
                 i + 1,
                 size(st.bytes_out),
                 size((st.bytes_out as f64 / secs) as u64)
@@ -349,30 +357,13 @@ impl FlowPane {
             if bar_room >= 4 {
                 let n = ((st.bytes_out as f64 / max_out as f64) * bar_room.min(12) as f64).round()
                     as usize;
-                let (bx, _) = buf.set_stringn(
+                buf.set_stringn(
                     nx + 1,
                     y,
                     "▮".repeat(n.max(1)),
                     bar_room,
-                    Style::default().fg(CYAN),
+                    Style::default().fg(if slow == Some(i) { AMBER } else { CYAN }),
                 );
-                if slow == Some(i) {
-                    buf.set_stringn(
-                        bx + 1,
-                        y,
-                        "◀ slowest",
-                        area.right().saturating_sub(bx + 1) as usize,
-                        Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
-                    );
-                } else if failed {
-                    buf.set_stringn(
-                        bx + 1,
-                        y,
-                        format!("✖ {}", st.exit.unwrap_or(1)),
-                        area.right().saturating_sub(bx + 1) as usize,
-                        Style::default().fg(RED),
-                    );
-                }
             }
             y += 1;
         }

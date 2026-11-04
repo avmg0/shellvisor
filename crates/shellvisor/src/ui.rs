@@ -11,7 +11,7 @@ use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 
 const AMBER: Color = Color::Indexed(179);
 const DIM: Color = Color::Indexed(245);
@@ -447,6 +447,7 @@ fn draw_status(f: &mut Frame, app: &App, r: Rect) {
         crate::osinfo::self_memory(),
         crate::osinfo::clock()
     );
+    let left_w: usize = left.iter().map(|s| s.content.chars().count()).sum();
     f.render_widget(
         Paragraph::new(Line::from(left)).style(Style::default().bg(BAR)),
         r,
@@ -458,6 +459,35 @@ fn draw_status(f: &mut Frame, app: &App, r: Rect) {
             r.y,
             &right,
             Style::default().fg(DIM).bg(BAR),
+        );
+    }
+    // Pane keys in the middle when there's room (from the live keymap).
+    let mut hints: Vec<Span> = Vec::new();
+    for (action, label) in [
+        ("toggle_files", "files"),
+        ("toggle_system", "system"),
+        ("toggle_flow", "flow"),
+        ("explore_table", "table"),
+        ("command_bar", "sv bar"),
+    ] {
+        let k = app.keymap().shown(action);
+        if let Some(first) = k.split(" · ").next().filter(|s| !s.is_empty()) {
+            hints.push(Span::styled(
+                first.to_uppercase().replace("ALT+", "alt+"),
+                Style::default().fg(AMBER).bg(BAR),
+            ));
+            hints.push(Span::styled(
+                format!(" {label}  "),
+                Style::default().fg(DIM).bg(BAR),
+            ));
+        }
+    }
+    let hints_w: usize = hints.iter().map(|s| s.content.chars().count()).sum();
+    if !hints.is_empty() && left_w + hints_w + w as usize + 4 <= r.width as usize {
+        let x = r.x + left_w as u16 + 2;
+        f.render_widget(
+            Paragraph::new(Line::from(hints)),
+            Rect::new(x, r.y, hints_w as u16, 1),
         );
     }
 }
@@ -515,41 +545,114 @@ pub fn help_rows(app: &App) -> Vec<(String, String, bool)> {
     rows
 }
 
+fn help_line(k: &str, v: &str, heading: bool, w: usize) -> Line<'static> {
+    let cut = |t: &str, n: usize| -> String {
+        if t.chars().count() <= n {
+            t.to_string()
+        } else {
+            let mut x: String = t.chars().take(n.saturating_sub(1)).collect();
+            x.push('…');
+            x
+        }
+    };
+    if heading {
+        // "Panes — in files: ⏎ open …": the title bold, the rest as a dim hint
+        let (title, hint) = v.split_once(" — ").unwrap_or((v, ""));
+        let title_w = title.chars().count() + 1;
+        let mut spans = vec![Span::styled(
+            format!(" {title}"),
+            Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
+        )];
+        if !hint.is_empty() {
+            spans.push(Span::styled(
+                format!("  {}", cut(hint, w.saturating_sub(title_w + 3))),
+                Style::default().fg(DIM),
+            ));
+        }
+        Line::from(spans)
+    } else {
+        Line::from(vec![
+            Span::styled(format!("  {k:<18}"), Style::default().fg(AMBER)),
+            Span::raw(cut(v, w.saturating_sub(21))),
+        ])
+    }
+}
+
 fn draw_help(f: &mut Frame, app: &App) {
     let rows = help_rows(app);
-    let area = centered(app.screen, 78, rows.len() as u16 + 5);
+    let col_w: u16 = 76;
+    let fits_one = rows.len() as u16 + 5 <= app.screen.height;
+    let two = !fits_one && app.screen.width >= col_w * 2 + 3;
+    // split two columns at the section heading nearest the middle
+    let split = if two {
+        let mid = rows.len() / 2;
+        (0..rows.len())
+            .filter(|i| rows[*i].2)
+            .min_by_key(|i| i.abs_diff(mid))
+            .unwrap_or(mid)
+    } else {
+        rows.len()
+    };
+    let to_lines = |part: &[(String, String, bool)]| -> Vec<Line<'static>> {
+        part.iter()
+            .map(|(k, v, h)| help_line(k, v, *h, col_w as usize - 2))
+            .collect()
+    };
+    let left = to_lines(&rows[..split]);
+    let right = to_lines(&rows[split..]);
+    let body_h = left.len().max(right.len()) as u16;
+    let w = if two { col_w * 2 + 3 } else { col_w + 2 };
+    let area = centered(app.screen, w, body_h + 4);
     f.render_widget(Clear, area);
-    let mut lines = vec![Line::raw("")];
-    for (k, v, heading) in rows {
-        if heading {
-            lines.push(Line::styled(
-                format!("  {v}"),
-                Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
-            ));
-        } else {
-            lines.push(Line::from(vec![
-                Span::styled(format!("  {k:<20}"), Style::default().fg(AMBER)),
-                Span::raw(v),
-            ]));
-        }
-    }
-    lines.push(Line::styled(
-        "  any key closes · change keys in ~/.config/shellvisor/config.yaml",
-        Style::default().fg(DIM),
-    ));
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(AMBER))
         .title(Span::styled(
             format!(" {} keys ", crate::NAME),
             Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Span::styled(
+            " any key closes · change keys in ~/.config/shellvisor/config.yaml ",
+            Style::default().fg(DIM),
         ));
-    f.render_widget(
-        Paragraph::new(lines)
-            .block(block)
-            .wrap(Wrap { trim: false }),
-        area,
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let inner = Rect::new(
+        inner.x,
+        inner.y + 1,
+        inner.width,
+        inner.height.saturating_sub(1),
     );
+    let clip = |mut lines: Vec<Line<'static>>, h: u16| {
+        if lines.len() > h as usize && h > 0 {
+            lines.truncate(h as usize - 1);
+            lines.push(Line::styled(
+                "  … more — make the window taller",
+                Style::default().fg(DIM),
+            ));
+        }
+        lines
+    };
+    if two {
+        let lw = col_w;
+        f.render_widget(
+            Paragraph::new(clip(left, inner.height)),
+            Rect::new(inner.x, inner.y, lw, inner.height),
+        );
+        f.render_widget(
+            Paragraph::new(clip(right, inner.height)),
+            Rect::new(
+                inner.x + lw + 1,
+                inner.y,
+                inner.width.saturating_sub(lw + 1),
+                inner.height,
+            ),
+        );
+    } else {
+        let mut all = left;
+        all.extend(right);
+        f.render_widget(Paragraph::new(clip(all, inner.height)), inner);
+    }
 }
 
 fn draw_menu(f: &mut Frame, app: &App, sel: usize) {

@@ -271,7 +271,7 @@ pub const ACTIONS: &[(&str, Cmd, &[&str], &str)] = &[
         "preset_dev",
         Cmd::Preset(Preset::Dev),
         &[],
-        "layouts: dev · monitor · files (menu, or sv layout <name>)",
+        "layouts: dev · monitor · files · data (menu, or sv layout <name>)",
     ),
     ("preset_monitor", Cmd::Preset(Preset::Monitor), &[], ""),
     ("preset_files", Cmd::Preset(Preset::Files), &[], ""),

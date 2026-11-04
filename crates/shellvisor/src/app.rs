@@ -1777,17 +1777,24 @@ impl App {
         let leaf = |id| Box::new(Node::Leaf(id));
         let root = match p {
             Preset::Dev => {
+                // The default 4-pane workspace: files │ shell │ system over flow.
                 let f = self.new_tool("files", here.clone());
-                let s = self.new_tool("system", here);
+                let s = self.new_tool("system", here.clone());
+                let fl = self.new_tool("flow", here);
                 Node::Split {
                     axis: Axis::Horizontal,
-                    ratio: 0.6,
-                    a: leaf(shell),
+                    ratio: 0.22,
+                    a: leaf(f),
                     b: Box::new(Node::Split {
-                        axis: Axis::Vertical,
-                        ratio: 0.55,
-                        a: leaf(f),
-                        b: leaf(s),
+                        axis: Axis::Horizontal,
+                        ratio: 0.62,
+                        a: leaf(shell),
+                        b: Box::new(Node::Split {
+                            axis: Axis::Vertical,
+                            ratio: 0.6,
+                            a: leaf(s),
+                            b: leaf(fl),
+                        }),
                     }),
                 }
             }

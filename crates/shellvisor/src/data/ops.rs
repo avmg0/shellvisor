@@ -216,8 +216,8 @@ fn test(v: &Value, op: Op, lit: &Value, raw: &str) -> bool {
         Op::Lt => !matches!(v, Value::Nothing) && v.compare(lit) == Ordering::Less,
         Op::Ge => !matches!(v, Value::Nothing) && v.compare(lit) != Ordering::Less,
         Op::Le => !matches!(v, Value::Nothing) && v.compare(lit) != Ordering::Greater,
-        Op::Has => lower(&v.plain()).contains(&lower(raw)),
-        Op::NotHas => !lower(&v.plain()).contains(&lower(raw)),
+        Op::Has => contains_anchored(&lower(&v.plain()), &lower(raw)),
+        Op::NotHas => !contains_anchored(&lower(&v.plain()), &lower(raw)),
         Op::Starts => lower(&v.plain()).starts_with(&lower(raw)),
         Op::Ends => lower(&v.plain()).ends_with(&lower(raw)),
         Op::Like => glob(raw, &v.plain()),
@@ -236,6 +236,17 @@ fn test(v: &Value, op: Op, lit: &Value, raw: &str) -> bool {
 pub fn row_matcher(words: &[String]) -> Result<impl Fn(&Record) -> bool, String> {
     let groups = parse_where(words)?;
     Ok(move |r: &Record| keep(r, &groups))
+}
+
+/// Substring test where a leading `^` / trailing `$` pin the start / end
+/// (`name =~ py$`).
+fn contains_anchored(hay: &str, pat: &str) -> bool {
+    match (pat.strip_prefix('^'), pat.strip_suffix('$')) {
+        (Some(p), _) if p.ends_with('$') && p.len() > 1 => hay == &p[..p.len() - 1],
+        (Some(p), _) => hay.starts_with(p),
+        (None, Some(p)) => hay.ends_with(p),
+        (None, None) => hay.contains(pat),
+    }
 }
 
 fn keep(row: &Record, groups: &[Vec<Cond>]) -> bool {
@@ -671,6 +682,9 @@ mod tests {
             vec!["Cargo.toml", "big.log", "notes.md"]
         );
         assert_eq!(names(&run("where type in dir,nothing")), vec!["src"]);
+        assert_eq!(names(&run("where name =~ md$")), vec!["notes.md"]);
+        assert_eq!(names(&run("where name =~ ^b")), vec!["big.log"]);
+        assert_eq!(names(&run("where name =~ ^src$")), vec!["src"]);
         assert!(
             filter(
                 "where",

@@ -595,14 +595,26 @@ impl FilesPane {
             self.find.names.clear();
             return;
         }
-        let mut scored: Vec<(bool, usize, usize)> = index
+        // Every word must appear in the path, as a substring or loosely in
+        // order ("alrt" finds "alerts"). Exact substrings, then name hits, rank first.
+        let words: Vec<&str> = q.split_whitespace().collect();
+        let mut scored: Vec<(u8, usize, usize)> = index
             .iter()
             .enumerate()
-            .filter(|(_, p)| q.split_whitespace().all(|w| matches(w, p)))
-            .map(|(i, p)| {
+            .filter_map(|(i, p)| {
+                let exact = words.iter().all(|w| matches(w, p));
+                if !exact && !words.iter().all(|w| subsequence(w, p)) {
+                    return None;
+                }
                 let base = p.rsplit('/').next().unwrap_or(p);
-                let first = q.split_whitespace().next().unwrap_or("");
-                (!matches(first, base), p.len(), i)
+                let in_name = matches(words[0], base) || subsequence(words[0], base);
+                let tier = match (exact, in_name) {
+                    (true, true) => 0,
+                    (true, false) => 1,
+                    (false, true) => 2,
+                    (false, false) => 3,
+                };
+                Some((tier, p.len(), i))
             })
             .collect();
         scored.sort();
@@ -1023,7 +1035,7 @@ impl FilesPane {
             return Outcome::default();
         }
         let top = self.list_top();
-        if y < top || (self.preview && width >= 60 && x >= width * 45 / 100) {
+        if y < top || (self.preview && width >= 50 && x >= width * 45 / 100) {
             return Outcome::default();
         }
         let i = self.scroll.get() + (y - top) as usize;
@@ -1165,7 +1177,7 @@ impl FilesPane {
 
         // body: rows (+ preview)
         let body_h = area.height.saturating_sub(top + 1) as usize; // last row: hints
-        let split = self.preview && area.width >= 60;
+        let split = self.preview && area.width >= 50;
         let list_w = if split {
             area.width * 45 / 100
         } else {
@@ -1398,6 +1410,15 @@ pub fn matches(needle: &str, hay: &str) -> bool {
     } else {
         hay.to_lowercase().contains(needle)
     }
+}
+
+/// Are `needle`'s characters in `hay`, in order (smart case)?
+pub fn subsequence(needle: &str, hay: &str) -> bool {
+    let fold = !needle.chars().any(char::is_uppercase);
+    let mut it = hay
+        .chars()
+        .map(|c| if fold { c.to_ascii_lowercase() } else { c });
+    needle.chars().all(|n| it.any(|h| h == n))
 }
 
 fn truncate(s: &str, w: usize) -> String {
@@ -1923,6 +1944,8 @@ mod tests {
         assert!(matches("read", "README.md"));
         assert!(!matches("Read", "README.md"));
         assert!(matches("READ", "README.md"));
+        assert!(subsequence("alrt", "src/core/alerts.py"));
+        assert!(!subsequence("trla", "src/core/alerts.py"));
         assert_eq!(truncate("abcdef", 4), "abc…");
     }
 }

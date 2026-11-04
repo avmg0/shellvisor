@@ -397,13 +397,6 @@ fn history(args: &[String]) -> Result<Data, String> {
         let get = |k: &str| j.get(k);
         rows.push(vec![
             (
-                "time".into(),
-                get("ts")
-                    .and_then(|v| v.as_i64())
-                    .map(Value::Date)
-                    .unwrap_or(Value::Nothing),
-            ),
-            (
                 "command".into(),
                 s(get("cmd").and_then(|v| v.as_str()).unwrap_or_default()),
             ),
@@ -419,6 +412,13 @@ fn history(args: &[String]) -> Result<Data, String> {
                 get("duration_ms")
                     .and_then(|v| v.as_i64())
                     .map(Value::Duration)
+                    .unwrap_or(Value::Nothing),
+            ),
+            (
+                "time".into(),
+                get("ts")
+                    .and_then(|v| v.as_i64())
+                    .map(Value::Date)
                     .unwrap_or(Value::Nothing),
             ),
             (
