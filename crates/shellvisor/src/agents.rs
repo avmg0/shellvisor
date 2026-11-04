@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cli {
@@ -368,6 +368,9 @@ pub struct Agent {
     pub always: Vec<Action>,
     /// Shellvisor launched the CLI (vs. attached to one already running).
     pub launched: bool,
+    /// Tokens used so far, from the CLI's own session log (Claude Code, Codex).
+    pub tokens: Option<u64>,
+    pub started_at: SystemTime,
 }
 
 pub const COLORS: [u8; 6] = [73, 176, 111, 179, 108, 167];
@@ -391,6 +394,8 @@ impl Agent {
             files: Vec::new(),
             always: Vec::new(),
             launched: true,
+            tokens: None,
+            started_at: SystemTime::now(),
         }
     }
 
@@ -410,6 +415,112 @@ impl Agent {
         let del: u64 = self.files.iter().map(|f| f.removed).sum();
         let n = self.files.len();
         format!("{n} file{} +{add} −{del}", if n == 1 { "" } else { "s" })
+    }
+}
+
+// ------------------------------------------------------------------ usage
+
+/// Tokens used so far, read from the CLI's own session log when it keeps one
+/// we can read: Claude Code (`~/.claude/projects/<folder>/<session>.jsonl`,
+/// `usage` on each reply) and Codex (`~/.codex/sessions/…/rollout-*.jsonl`,
+/// `total_tokens`). Others: None — shown as nothing rather than a guess.
+pub fn tokens(cli: Cli, dir: &Path, since: SystemTime) -> Option<u64> {
+    let home = PathBuf::from(std::env::var_os("HOME")?);
+    // logs written just before we noticed the agent still count
+    let since = since.checked_sub(Duration::from_secs(5)).unwrap_or(since);
+    match cli {
+        Cli::Claude => {
+            let key: String = dir
+                .to_string_lossy()
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '-' {
+                        c
+                    } else {
+                        '-'
+                    }
+                })
+                .collect();
+            let file = newest_jsonl(&home.join(".claude/projects").join(key), since, 0)?;
+            Some(sum_usage(&std::fs::read_to_string(file).ok()?))
+        }
+        Cli::Codex => {
+            let file = newest_jsonl(&home.join(".codex/sessions"), since, 4)?;
+            let text = std::fs::read_to_string(file).ok()?;
+            if !text.contains(&*dir.to_string_lossy()) {
+                return None; // another folder's session
+            }
+            max_number(&text, "\"total_tokens\":")
+        }
+        _ => None,
+    }
+}
+
+fn newest_jsonl(dir: &Path, since: SystemTime, depth: u32) -> Option<PathBuf> {
+    let mut best: Option<(SystemTime, PathBuf)> = None;
+    let mut stack = vec![(dir.to_path_buf(), 0)];
+    while let Some((d, lvl)) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            let Ok(m) = e.metadata() else { continue };
+            if m.is_dir() && lvl < depth {
+                stack.push((p, lvl + 1));
+            } else if p.extension().is_some_and(|x| x == "jsonl") {
+                if let Ok(t) = m.modified() {
+                    if t >= since && best.as_ref().is_none_or(|(bt, _)| t > *bt) {
+                        best = Some((t, p));
+                    }
+                }
+            }
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
+/// Claude Code transcripts: every reply carries `message.usage`.
+pub fn sum_usage(text: &str) -> u64 {
+    let mut total = 0;
+    for line in text.lines() {
+        let Ok(j) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(u) = j.pointer("/message/usage") else {
+            continue;
+        };
+        for k in [
+            "input_tokens",
+            "output_tokens",
+            "cache_creation_input_tokens",
+            "cache_read_input_tokens",
+        ] {
+            total += u.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+        }
+    }
+    total
+}
+
+fn max_number(text: &str, key: &str) -> Option<u64> {
+    text.match_indices(key)
+        .filter_map(|(i, _)| {
+            let rest = text[i + key.len()..].trim_start();
+            rest.chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse()
+                .ok()
+        })
+        .max()
+}
+
+/// "61K tok"
+pub fn fmt_tokens(t: u64) -> String {
+    match t {
+        0..1000 => format!("{t} tok"),
+        1000..1_000_000 => format!("{}K tok", t / 1000),
+        _ => format!("{:.1}M tok", t as f64 / 1e6),
     }
 }
 
@@ -579,6 +690,37 @@ pub fn repo_head(dir: &Path) -> Option<(PathBuf, String)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn usage_from_session_logs() {
+        let t = r#"{"type":"user","message":{"content":"hi"}}
+{"type":"assistant","message":{"usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":100}}}
+{"type":"assistant","message":{"usage":{"input_tokens":3,"output_tokens":2}}}"#;
+        assert_eq!(super::sum_usage(t), 120);
+        assert_eq!(
+            super::max_number(
+                r#"{"total_tokens": 50}{"total_tokens":1234}"#,
+                "\"total_tokens\":"
+            ),
+            Some(1234)
+        );
+        assert_eq!(super::fmt_tokens(61_234), "61K tok");
+        // a real Claude Code log, found by its folder
+        let home = std::env::temp_dir().join(format!("sv-usage-{}", std::process::id()));
+        let dir = std::path::Path::new("/work/my.app");
+        let logdir = home.join(".claude/projects/-work-my-app");
+        std::fs::create_dir_all(&logdir).unwrap();
+        std::fs::write(logdir.join("s1.jsonl"), t).unwrap();
+        let old = std::env::var_os("HOME");
+        unsafe { std::env::set_var("HOME", &home) };
+        let got = super::tokens(super::Cli::Claude, dir, std::time::SystemTime::now());
+        match old {
+            Some(h) => unsafe { std::env::set_var("HOME", h) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        let _ = std::fs::remove_dir_all(&home);
+        assert_eq!(got, Some(120));
+    }
+
     use super::*;
 
     fn rows(s: &str) -> Vec<String> {

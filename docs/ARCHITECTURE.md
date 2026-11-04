@@ -1,6 +1,6 @@
 # Shellvisor — Architecture
 
-Status: v0.6 · 2026-11-04 · P0 – P3 implemented (see Decisions log at the end)
+Status: v0.7 · 2026-11-04 · P0 – P4 implemented (see Decisions log at the end)
 Wireframes: `docs/wireframes/` (to be exported) · Phases: [ROADMAP.md](ROADMAP.md)
 
 ---
@@ -300,6 +300,9 @@ Enforced by: a `bench/` harness that launches Shellvisor in a pseudo-terminal, i
 | 2026-11-04 | **Tables inside Shellvisor are saved** (state/tables, newest 20, JSON lines) and announced with `OSC 7770;table;<base64 path>`; `F4` opens the viewer on them. Viewer sorts/filters a list of row numbers and formats only visible rows. | Scrollback keeps the plain text; the viewer scales to 100k rows. |
 | 2026-11-04 | **Command bar runs `shellvisor sv '<pipeline>'` as a child** in the shell's folder and reads its JSON lines. | Same engine as the shell, correct working folder, nothing blocking the UI. |
 | 2026-11-04 | **`sv flow` meters with copier threads** between `sh -c` stages: bytes/lines counted per stage, time blocked writing *into* a stage = it is slow (time waiting to read from the first stage counts for it). Stats JSON rewritten 4×/s (`OSC 7770;flow;<path>`); the Flow pane reads it once a second while visible. The live job comes from the PTY's foreground process group + `ps`; idle shells cost nothing. | Works for any commands, no tracing, no root. |
+| 2026-11-04 | **Agents are ordinary panes watched from the outside.** The CLI runs in a shell pane in the agents tab (you see and type into the real tool). Status comes from the screen (approval phrases per CLI; quiet ≥ 3 s = waiting), files from `git diff --numstat` against the agent's start commit in its worktree, tokens from the CLI's own session log (Claude Code `~/.claude/projects/<folder>/*.jsonl`, Codex `~/.codex/sessions/**`). Polled every few seconds on a worker thread. | Works with every agent CLI and version, including unknown ones; no fragile output parsing. |
+| 2026-11-04 | **One git worktree per agent** at `<repo>/.shellvisor/worktrees/<name>` on branch `agent/<name>`, excluded via `.git/info/exclude`. | Agents never collide in one checkout; merging stays a normal git operation. |
+| 2026-11-04 | **Approvals are answered by typing the CLI's own key** (`1`/`2`/esc for Claude Code and Gemini CLI, `y`/`a`/`n` for Codex and Aider, `y`/`n` + Enter for other commands); the prompt text is classified into action classes for `agents.approvals: {class: auto}`. | No hooks into the CLIs; the CLI's own safety prompt stays the source of truth. |
 | 2026-11-04 | **Low-power mode**: auto while on battery (checked once a minute — `/sys/class/power_supply` or `pmset -g ps`), or `sv power on/off`. Stats every 5 s, spinner at 4 fps, no folder polling. | Respects laptops without giving up the panes. |
 
 ### P0 measurements (Linux x86_64, release build, bash)

@@ -242,6 +242,8 @@ pub struct FilesPane {
     git_for: Option<PathBuf>,
     find: Find,
     prev: Option<Preview>,
+    /// Files coding agents changed: path → (agent name, colour).
+    pub agent_marks: HashMap<PathBuf, (String, u8)>,
     last_poll: Instant,
 }
 
@@ -267,6 +269,7 @@ impl FilesPane {
             git_for: None,
             find: Find::default(),
             prev: None,
+            agent_marks: HashMap::new(),
             last_poll: Instant::now(),
         };
         let jobs = p.set_root(root);
@@ -1294,12 +1297,20 @@ impl FilesPane {
                         }
                         right.push_str(&format!(" {:>4}", ago(it.mtime)));
                     }
-                    let right = match mark {
-                        Some(m) => {
+                    let agent = self.agent_marks.get(&it.path);
+                    let right = match (agent, mark) {
+                        // a coding agent changed it (on its branch): "◆ api M"
+                        (Some((who, c)), m) => Some((
+                            format!("◆ {who}{right} {}", m.map(|m| m.symbol()).unwrap_or(" ")),
+                            base.fg(Color::Indexed(*c)),
+                        )),
+                        (None, Some(m)) => {
                             Some((format!("{right} {}", m.symbol()), base.fg(mark_color(m))))
                         }
-                        None if !right.is_empty() => Some((format!("{right}  "), base.fg(FAINT))),
-                        None => None,
+                        (None, None) if !right.is_empty() => {
+                            Some((format!("{right}  "), base.fg(FAINT)))
+                        }
+                        (None, None) => None,
                     };
                     (format!("{indent}{icon}{name}"), st, right)
                 }

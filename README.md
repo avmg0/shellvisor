@@ -4,8 +4,8 @@
 
 Shellvisor is a full-screen terminal app (like `tmux`, `htop` or `vim`) that runs your own zsh or bash in tabs and splits, and — as it grows — adds panes for files, live system stats, a data-flow view of your pipelines, and coding agents working side by side. Every command, alias and full-screen program you use today keeps working unchanged.
 
-> **Status: early development (P0–P3 of 7 done).**
-> Working today: tabs and splits of real zsh/bash shells, a tab bar that shows what each tab is doing (running ⠋, downloading ◐, failed ✖, new output •), a status bar, split layouts, your tabs restored after a restart, custom keys, and a one-key switch to *basic view*, which looks exactly like a plain terminal. Plus a **files pane** (tree, list, git changes, find, preview) that follows your shell, a **system pane** (CPU, memory, disk, network, I/O, temperatures, processes), download/install progress for git, npm, pip, uv, brew, docker, cargo, curl and friends, **`sv` data commands** (nushell-style tables in bash/zsh) with an interactive table viewer, and a **Flow pane** that shows the running job and meters pipelines stage by stage. Coding agents arrive in P4–P5. See [docs/ROADMAP.md](docs/ROADMAP.md).
+> **Status: early development (P0–P4 of 7 done).**
+> Working today: tabs and splits of real zsh/bash shells, a tab bar that shows what each tab is doing (running ⠋, downloading ◐, failed ✖, new output •), a status bar, split layouts, your tabs restored after a restart, custom keys, and a one-key switch to *basic view*, which looks exactly like a plain terminal. Plus a **files pane** (tree, list, git changes, find, preview) that follows your shell, a **system pane** (CPU, memory, disk, network, I/O, temperatures, processes), download/install progress for git, npm, pip, uv, brew, docker, cargo, curl and friends, **`sv` data commands** (nushell-style tables in bash/zsh) with an interactive table viewer, a **Flow pane** that shows the running job and meters pipelines stage by stage, and **coding agents side by side** (Claude Code, Codex, Gemini CLI, Aider or any command), each in its own git worktree, with one place to answer their approval prompts. Teams of agents and sub-agents arrive in P5. See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Why
 
@@ -51,7 +51,9 @@ shellvisor --shell bash    # or pick: zsh, bash, or a full path
 | `F8` · `sv flowpane` | flow pane: the job running in the shell, or `sv flow` meters |
 | `F4` | explore the last `sv` table: sort, filter, copy |
 | `alt+;` | command bar: `ls \| where size > 1mb \| sort-by size -r` → table |
-| `sv layout dev` | shell + files + system (also `monitor`, `files`, `data`; or `alt+m`) |
+| `F9` · `shift+F9` | agents tab · new agent |
+| `alt+a` | agents waiting for approval: `y` allow · `n` deny · `a` always |
+| `sv layout dev` | files + shell + system + flow (also `monitor`, `files`, `data`, `agents`; or `alt+m`) |
 | `alt+m` | tab menu |
 | ``alt+` `` · `sv off` / `sv on` | basic view ⇄ full view |
 | `ctrl+]` then a letter | leader key — every shortcut, in every terminal (`ctrl+] ?` lists them) |
@@ -108,6 +110,19 @@ sv flow 'cat access.log | grep " 500 " | cut -d" " -f7 | sort | uniq -c | sort -
 
 runs the pipeline with a meter between every stage — lines and bytes in and out, % kept, rate, the stage holding everything up (◀ slowest), each stage's errors and the last lines of output — and prints a summary at the end. The **Flow pane** (`F8`, or `sv layout data`) shows it live; when nothing is metered it shows the job your shell is running right now: its processes, CPU, memory, read/write rates and pipes (rates and pipes on Linux).
 
+## Agents
+
+```sh
+sv agent new claude --name api 'add a POST /alerts endpoint'   # or codex, gemini, aider
+sv agent new --cmd 'ollama run llama3' --name local            # any other agent CLI
+sv agents                                                      # all agents as a table
+sv connect                                                     # installed CLIs, logins, MCP servers, ssh hosts
+```
+
+Each agent gets a column in the agents tab (`F9`; `shift+F9` opens the New agent form). In a git repository it works in its own worktree and branch (`.shellvisor/worktrees/<name>`, branch `agent/<name>`), so agents never edit the same checkout — or yours. The column title shows its status (working ⠋, waiting for you, ⚑ needs approval, done), the files it changed with +/− lines, and tokens used (Claude Code and Codex, read from their own session logs). Type in a column to message that agent. When two agents change the same file you get a warning, and the files pane marks files agents have touched (◆ name).
+
+When agents ask for permission, `alt+a` lists every waiting prompt; `y` / `n` / `a` answers it — Shellvisor types the right key for that CLI. Already running an agent in a normal tab? `sv agent attach` turns that split into an agent column.
+
 ## Configuration
 
 `~/.config/shellvisor/config.yaml` — every key is optional:
@@ -120,6 +135,10 @@ mouse: true             # wheel scrolls history
 start_view: full        # full (tabs, status bar) or basic (just the shell)
 restore: ask            # reopen last session's tabs: ask, always or never
 low_power: auto         # slower refresh + animations: auto (on battery), on, off
+agents:
+  worktree: true        # each new agent works in its own git worktree + branch
+  approvals:            # answer agents' permission prompts for you: auto | ask
+    test: auto          # read edit test lint install network push delete command
 keys:                   # change or turn off any shortcut (F1 lists them all)
   new_tab: alt+n
   rename_tab: none      # frees alt+r for your shell

@@ -104,6 +104,9 @@ pub fn draw(f: &mut Frame, app: &App) {
             if !files.is_empty() {
                 title.push_str(&format!("· {files} "));
             }
+            if let Some(t) = a.tokens {
+                title.push_str(&format!("· {} ", agents::fmt_tokens(t)));
+            }
             let mins = a.started.elapsed().as_secs() / 60;
             if mins > 0 {
                 title.push_str(&format!("· {mins}m "));
@@ -378,10 +381,7 @@ fn tab_label(app: &App, i: usize) -> (String, Option<(String, Color)>) {
         } else {
             Some(("◆".to_string(), Color::Indexed(176)))
         };
-        return (
-            format!("{} ◆ {n} agent{}", i + 1, if n == 1 { "" } else { "s" }),
-            icon,
-        );
+        return (format!("{} agents · {n}", i + 1), icon);
     }
     let icon = if panes.iter().any(|p| p.activity.is_some()) {
         Some((circle(app).to_string(), AMBER))

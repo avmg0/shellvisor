@@ -134,7 +134,7 @@ enum Ev {
     /// A command-bar pipeline finished: (title, rows or error).
     TableReady(String, Box<Result<Data, String>>),
     /// Files each agent has changed (from git).
-    AgentFiles(Vec<(PaneId, Vec<FileChange>)>),
+    AgentFiles(Vec<(PaneId, Vec<FileChange>, Option<u64>)>),
     Resize,
     Quit,
 }
@@ -256,6 +256,8 @@ pub struct App {
     overlaps_seen: Vec<String>,
     /// The tab F9 came from.
     before_agents: Option<usize>,
+    /// Last agents.json written (for `sv agents`).
+    agents_json: String,
     pub low_power: bool,
     power_manual: bool,
     focus_tick: u64,
@@ -333,6 +335,7 @@ pub fn run(opts: Options) -> io::Result<i32> {
         agent_files_busy: false,
         overlaps_seen: Vec::new(),
         before_agents: None,
+        agents_json: String::new(),
         low_power,
         power_manual: !auto_power,
         focus_tick: 0,
@@ -1092,6 +1095,9 @@ impl App {
         if self.session_dirty {
             t = t.min((self.last_save + SAVE_EVERY).saturating_duration_since(Instant::now()));
         }
+        if self.panes.values().any(|p| p.pending_input.is_some()) {
+            t = t.min(Duration::from_millis(50));
+        }
         t
     }
 
@@ -1281,8 +1287,10 @@ impl App {
                 }
             }
             ShellEvent::PromptShown => {
-                if let Some((text, _)) = p.pending_input.take() {
-                    let _ = p.pane.write(text.as_bytes());
+                // the line editor starts right after the prompt hook: type
+                // a moment later so the terminal doesn't echo it twice
+                if let Some((_, at)) = p.pending_input.as_mut() {
+                    *at = Instant::now() - Duration::from_millis(1850);
                 }
             }
             ShellEvent::Mode(Mode::On) => self.set_view(View::Full),
@@ -2097,12 +2105,79 @@ impl App {
         }
     }
 
+    /// state/agents.json for `sv agents` — rewritten when something changed.
+    fn write_agents_json(&mut self) {
+        let now = crate::data::value::now();
+        let rows: Vec<serde_json::Value> = self
+            .agent_ids()
+            .iter()
+            .filter_map(|id| {
+                let p = self.panes.get(id)?;
+                let a = p.agent.as_ref()?;
+                let add: u64 = a.files.iter().map(|f| f.added).sum();
+                let del: u64 = a.files.iter().map(|f| f.removed).sum();
+                Some(serde_json::json!({
+                    "name": a.name,
+                    "cli": a.cli.name(),
+                    "status": a.status.label().trim_start_matches(|c: char| !c.is_alphanumeric()).to_string(),
+                    "branch": a.branch.clone().unwrap_or_default(),
+                    "files": a.files.len(),
+                    "added": add,
+                    "removed": del,
+                    "tokens": a.tokens,
+                    "waiting": a.approval().map(|x| x.what.clone()).unwrap_or_default(),
+                    "started": crate::data::value::iso_date(now - a.started.elapsed().as_secs() as i64),
+                    "folder": p.cwd,
+                }))
+            })
+            .collect();
+        let text = serde_json::to_string_pretty(&rows).unwrap_or_else(|_| "[]".into());
+        if text != self.agents_json {
+            if let Some(dir) = self.opts.session_path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+                let tmp = dir.join("agents.json.tmp");
+                if std::fs::write(&tmp, &text).is_ok() {
+                    let _ = std::fs::rename(&tmp, dir.join("agents.json"));
+                }
+            }
+            self.agents_json = text;
+        }
+    }
+
+    /// Mark files agents changed in the files panes ("◆ api").
+    fn update_agent_badges(&mut self) {
+        let mut marks: HashMap<PathBuf, (String, u8)> = HashMap::new();
+        for p in self.panes.values() {
+            let Some(a) = p.agent.as_ref() else { continue };
+            let Some(repo) = a.repo.as_ref() else {
+                continue;
+            };
+            for f in &a.files {
+                marks
+                    .entry(repo.join(&f.path))
+                    .or_insert((a.name.clone(), a.color));
+            }
+        }
+        for t in self.tools.values_mut() {
+            if let Tool::Files(fp) = t {
+                if fp.agent_marks != marks {
+                    fp.agent_marks = marks.clone();
+                    self.dirty = true;
+                }
+            }
+        }
+    }
+
     /// Idle detection, trailing approval checks, and git change polling.
     fn tick_agents(&mut self) {
         let ids = self.agent_ids();
         if ids.is_empty() {
+            if !self.agents_json.is_empty() && self.agents_json != "[]" {
+                self.write_agents_json();
+            }
             return;
         }
+        self.write_agents_json();
         for id in &ids {
             if let Some(p) = self.panes.get_mut(id) {
                 // a shell without our hooks never says "prompt": type it anyway
@@ -2132,13 +2207,17 @@ impl App {
         if self.agent_files_busy || self.agent_files_at.elapsed() < every {
             return;
         }
-        let work: Vec<(PaneId, PathBuf, String)> = ids
+        let work: Vec<(PaneId, PathBuf, Option<String>, Cli, std::time::SystemTime)> = ids
             .iter()
             .filter_map(|id| {
                 let p = self.panes.get(id)?;
                 let a = p.agent.as_ref()?;
-                let dir = a.worktree.clone().or_else(|| a.repo.clone())?;
-                Some((*id, dir, a.base.clone()?))
+                let dir = a
+                    .worktree
+                    .clone()
+                    .or_else(|| a.repo.clone())
+                    .unwrap_or_else(|| PathBuf::from(&p.cwd));
+                Some((*id, dir, a.base.clone(), a.cli, a.started_at))
             })
             .collect();
         self.agent_files_at = Instant::now();
@@ -2150,22 +2229,30 @@ impl App {
         let _ = spawn_thread("agent-git".into(), move || {
             let out = work
                 .into_iter()
-                .map(|(id, dir, base)| (id, agents::changes(&dir, &base)))
+                .map(|(id, dir, base, cli, since)| {
+                    let files = base.map(|b| agents::changes(&dir, &b)).unwrap_or_default();
+                    (id, files, agents::tokens(cli, &dir, since))
+                })
                 .collect();
             let _ = tx.send(Ev::AgentFiles(out));
         });
     }
 
-    fn on_agent_files(&mut self, list: Vec<(PaneId, Vec<FileChange>)>) {
+    fn on_agent_files(&mut self, list: Vec<(PaneId, Vec<FileChange>, Option<u64>)>) {
         self.agent_files_busy = false;
-        for (id, files) in list {
+        for (id, files, tokens) in list {
             if let Some(a) = self.panes.get_mut(&id).and_then(|p| p.agent.as_mut()) {
+                if tokens.is_some() && a.tokens != tokens {
+                    a.tokens = tokens;
+                    self.dirty = true;
+                }
                 if a.files != files {
                     a.files = files;
                     self.dirty = true;
                 }
             }
         }
+        self.update_agent_badges();
         let over = agents::overlaps(self.panes.values().filter_map(|p| p.agent.as_ref()));
         for (path, names) in over {
             if !self.overlaps_seen.contains(&path) {
@@ -2344,6 +2431,10 @@ impl App {
                 Ok(())
             }
             ["flow"] => self.show_tool("flow", false),
+            ["layout", "agents"] => {
+                self.toggle_agents();
+                Ok(())
+            }
             ["layout", name] => match Preset::parse(name) {
                 Some(p) => self.apply_preset(p),
                 None => {

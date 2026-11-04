@@ -19,6 +19,14 @@ pub const SOURCES: &[(&str, &str)] = &[
     ),
     ("git-log", "recent commits: git-log [n]"),
     ("git-status", "changed files in this repository"),
+    (
+        "agents",
+        "coding agents in this Shellvisor: status, branch, changes",
+    ),
+    (
+        "connect",
+        "agent CLIs and logins, MCP servers, ssh hosts (no secrets shown)",
+    ),
 ];
 
 pub fn is_source(name: &str) -> bool {
@@ -49,6 +57,8 @@ pub fn source(cmd: &str, args: &[String]) -> Result<Data, String> {
         "open" => open(args),
         "git-log" => git_log(args),
         "git-status" => git_status(),
+        "agents" => agents_table(),
+        "connect" | "connections" => Ok(crate::connect::table()),
         other => Err(format!("unknown source `{other}`")),
     }
 }
@@ -490,6 +500,17 @@ fn git_log(args: &[String]) -> Result<Data, String> {
             })
             .collect(),
     ))
+}
+
+/// The agents Shellvisor is running (written by the app to state/agents.json).
+fn agents_table() -> Result<Data, String> {
+    let path = crate::paths::state_dir().join("agents.json");
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|_| "[]".into());
+    let d = format::parse_json(&text)?;
+    Ok(match d {
+        Data::Value(Value::List(l)) if l.is_empty() => Data::Table(Vec::new()),
+        d => d,
+    })
 }
 
 fn git_status() -> Result<Data, String> {

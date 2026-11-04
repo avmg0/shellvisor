@@ -14,6 +14,7 @@ mod agents;
 mod app;
 mod cli;
 mod config;
+mod connect;
 mod data;
 mod files;
 mod flow;

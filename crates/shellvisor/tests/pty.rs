@@ -900,7 +900,7 @@ fn agent_runs_in_a_worktree_asks_for_approval_and_takes_messages() {
     let fake = s.dir.join("fake-agent.sh");
     std::fs::write(
         &fake,
-        "#!/bin/bash\necho \"fake agent: $*\"\necho 'x = 1' > app.py\nsleep 0.3\nprintf 'Install the test dependency? (y/n) '\nread ans\necho \"you said: $ans\"\nread -p '> ' msg\necho \"got message: $msg\"\n",
+        "#!/bin/bash\necho \"fake agent: $*\"\necho 'x = 1' > app.py\necho more >> README.md\nsleep 0.3\nprintf 'Install the test dependency? (y/n) '\nread ans\necho \"you said: $ans\"\nread -p '> ' msg\necho \"got message: $msg\"\n",
     )
     .unwrap();
     std::process::Command::new("chmod")
@@ -913,7 +913,7 @@ fn agent_runs_in_a_worktree_asks_for_approval_and_takes_messages() {
         fake.display()
     ));
     s.wait_until("agent column", |t| {
-        top(t).contains("◆ 1 agent") && t.contains("● api")
+        top(t).contains("2 agents · 1") && t.contains("● api")
     });
     s.wait_for("fake agent: go");
     s.wait_for("agent/api"); // its own branch
@@ -922,7 +922,7 @@ fn agent_runs_in_a_worktree_asks_for_approval_and_takes_messages() {
     s.wait_for("waiting for approval");
     s.send("y");
     s.wait_for("you said: y");
-    s.wait_for("1 file +1"); // git sees its change (in its worktree)
+    s.wait_for("2 files +2"); // git sees its changes (in its worktree)
     assert!(work.join(".shellvisor/worktrees/api/app.py").exists());
     assert!(
         !work.join("app.py").exists(),
@@ -931,4 +931,17 @@ fn agent_runs_in_a_worktree_asks_for_approval_and_takes_messages() {
     s.send("hello\r"); // typing goes to the agent
     s.wait_for("got message: hello");
     s.wait_for("agent api finished");
+    // back in the first tab: the agent's work shows up in files and in sv agents
+    s.send("\x1b1");
+    s.pump(Duration::from_millis(300));
+    s.send("\x1bOQ"); // F2 files (main checkout)
+    s.wait_until("badge", |t| t.contains("README.md") && t.contains("◆ api"));
+    s.send("\x1b\x1b[D"); // alt+left: to the shell
+    s.pump(Duration::from_millis(200));
+    s.send("sv agents | sv select name status branch files\r");
+    s.wait_until("agents table", |t| {
+        t.contains("agent/api") && t.contains("done")
+    });
+    s.send("sv connect | sv get kind | sv uniq\r");
+    s.wait_for("agent cli");
 }

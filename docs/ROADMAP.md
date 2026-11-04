@@ -1,6 +1,6 @@
 # Shellvisor — Roadmap & Phases
 
-Status: v0.6 · 2026-11-04 · **P0 · P1 · P2 · P3 done** · see [ARCHITECTURE.md](ARCHITECTURE.md)
+Status: v0.7 · 2026-11-04 · **P0 – P4 done** · see [ARCHITECTURE.md](ARCHITECTURE.md)
 
 Each phase ends with something you can **run and use daily**, and must stay inside the performance budget before the next phase starts. Sizes are relative (S ≈ a few days, M ≈ 1–2 weeks, L ≈ 2–4 weeks of focused work) — not promises.
 
@@ -10,7 +10,7 @@ Each phase ends with something you can **run and use daily**, and must stay insi
 | **P1** ✅ | Workspace | L | tabs, splits, layouts, keymap — a tmux-like daily driver | 3, 4, 4b, 12, 14 |
 | **P2** ✅ | Core panes | L | the default 4-pane workspace (files, stats, activity) | 1, 6, 9, 10 |
 | **P3** ✅ | Data | M | data-flow view and `sv` structured commands | 2, 13 |
-| **P4** | Agents I | L | run several coding agents side by side, manually | 5, 8, 16 |
+| **P4** ✅ | Agents I | L | run several coding agents side by side, manually | 5, 8, 16 |
 | **P5** | Agents II | L | sub-agents, team.yaml, auto-plan | 7, 15, 16 |
 | **P6** | Polish & ship | M | the rest of the file views, layout editor, packaging | 4, 9, 10, 11 |
 
@@ -97,8 +97,12 @@ Exit criteria: board 13 examples all work in zsh and bash; tables of 100k rows s
 
 ---
 
-## P4 · Agents I — side by side
+## P4 · Agents I — side by side — ✅ done 2026-11-04
 **Goal:** run several coding agents manually and watch them live.
+
+**Result:** agents tab (`F9`) with one column per agent; New agent form (`shift+F9`) and `sv agent new [claude|codex|gemini|aider] [--name] ['task']` / `--cmd '<any command>'`; `sv agent attach` for an agent already running in a split. Each agent in its own git worktree + branch (`.shellvisor/worktrees/<name>`, `agent/<name>`, hidden from your git status). Column titles: status from the screen (starting, working, waiting for you, ⚑ needs approval, done/exited), files changed with +/− from git, tokens from Claude Code / Codex session logs, minutes running. Approvals list (`alt+a`) answers any agent's prompt with the key its CLI expects (allow / deny / always); `agents.approvals` in config.yaml auto-answers chosen action classes (read, edit, test, lint, install, network, push, delete, command). File-overlap warnings between agents; ◆ badges in the files pane; `sv agents` and `sv connect` (CLIs installed and logged in, MCP servers from Claude/Codex/Gemini configs, ssh hosts — presence only, never secrets). Measured: 1.91 MB binary; idle 5.9 MB RSS, 0.13 % CPU with 3 tabs + dev layout; three agents printing 10 lines/s each add 1.4 MB to Shellvisor (budget 3 MB) at 1.2 % CPU. 109 unit + 33 end-to-end tests (a scripted fake agent covers worktree, approval, messages, badges, tables).
+
+*Changes from plan:* the agents view is `F9` (F8 became Flow in P3). Agents run in ordinary panes rather than hidden PTYs, so you see and type into the real CLI; status comes from the screen and git rather than per-CLI event parsers, which keeps every CLI working, including ones we don't know. Cost in money is not shown — prices change and the logs only have tokens. Keychain lookups were not needed: Claude Code's sign-in shows in `~/.claude.json`; other logins are files or environment variables (presence only).
 
 Deliverables
 - Agent runtime: spawn CLI in hidden PTY, adapters (Claude Code, Codex, Gemini CLI, Aider, generic), normalized events.

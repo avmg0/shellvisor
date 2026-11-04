@@ -16,13 +16,14 @@ usage:
   sv exit      leave Shellvisor
   sv files [tree|list|git|find]   open the files pane (in this tab)
   sv sys       open the system pane (CPU, memory, disk, network, temperatures)
-  sv layout dev|monitor|files|data   lay this tab out as a preset
+  sv layout dev|monitor|files|data|agents   lay this tab out as a preset
   sv flow 'a | b | c'             run a pipeline with a meter on every stage
   sv flowpane  open the Flow pane (what the shell is running, live)
   sv power on|off|auto            low-power mode (auto = on battery)
   sv agent new [claude|codex|gemini|aider] [--name N] [--here] ['first task']
   sv agent new --cmd '<command>' [--name N]   any other agent CLI
   sv agent attach   make the agent running in this shell an agent column
+  sv agents    the agents as a table · sv connect   CLIs, logins, MCP servers, ssh hosts
   sv data      list the data commands (ls, ps, open, where, sort-by, to csv…)
   sv status    is Shellvisor running in this terminal?
   sv version   print the version
@@ -87,7 +88,7 @@ pub fn run(args: &[String]) -> i32 {
             }
         }
         "flow" => crate::flowrun::run(&args[1..]),
-        "agent" | "agents" => agent(&args[1..]),
+        "agent" => agent(&args[1..]),
         "files" | "sys" | "system" | "flowpane" | "layout" | "power" => {
             if !inside() {
                 return not_running(cmd);
@@ -98,7 +99,9 @@ pub fn run(args: &[String]) -> i32 {
                 ("files", Some(v @ ("tree" | "list" | "git" | "find"))) => vec!["files", v],
                 ("sys" | "system", None) => vec!["system"],
                 ("flowpane", None) => vec!["flow"],
-                ("layout", Some(l @ ("dev" | "monitor" | "files" | "data"))) => vec!["layout", l],
+                ("layout", Some(l @ ("dev" | "monitor" | "files" | "data" | "agents"))) => {
+                    vec!["layout", l]
+                }
                 ("power", Some(m @ ("on" | "off" | "auto"))) => vec!["power", m],
                 _ => {
                     eprintln!("sv {cmd}: unexpected argument — see `sv help`");
