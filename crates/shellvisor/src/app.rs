@@ -128,6 +128,18 @@ impl Tool {
 
 const SAVE_EVERY: Duration = Duration::from_secs(1);
 
+/// A running team.yaml.
+struct TeamRun {
+    team: crate::team::Team,
+    goal: String,
+    folder: PathBuf,
+    /// Members started so far.
+    started: Vec<String>,
+    /// Over budget: these agents were paused for it.
+    capped: Option<Vec<String>>,
+    warned: bool,
+}
+
 /// One agent's files changed, tokens, and the CLI's own helper agents.
 type AgentReport = (PaneId, Vec<FileChange>, Option<u64>, Vec<String>);
 
@@ -268,6 +280,8 @@ pub struct App {
     agents_json: String,
     /// `sv agent wait` callers: (agent name, where to reply).
     waiters: Vec<(String, Sender<serde_json::Value>)>,
+    /// The team started with `sv agent run` (one at a time).
+    team: Option<TeamRun>,
     /// What happened between agents (sv agent log): (unix time, text).
     pub bus_log: std::collections::VecDeque<(i64, String)>,
     pub low_power: bool,
@@ -349,6 +363,7 @@ pub fn run(opts: Options) -> io::Result<i32> {
         before_agents: None,
         agents_json: String::new(),
         waiters: Vec::new(),
+        team: None,
         bus_log: std::collections::VecDeque::new(),
         low_power,
         power_manual: !auto_power,
@@ -1249,6 +1264,10 @@ impl App {
                 }
                 self.dirty = true;
             }
+            ShellEvent::CommandFinished(_) if p.agent.as_ref().is_some_and(|a| a.paused) => {
+                // the shell saw the paused agent's job stop; it hasn't ended
+                p.running = false;
+            }
             ShellEvent::CommandFinished(code) => {
                 if !p.command.is_empty() {
                     let duration_ms = p
@@ -1268,8 +1287,7 @@ impl App {
                 let agent_done = p
                     .agent
                     .as_mut()
-                    // a paused agent's job stopped; it hasn't ended
-                    .filter(|a| !a.paused && !matches!(a.status, agents::Status::Exited(_)))
+                    .filter(|a| !matches!(a.status, agents::Status::Exited(_)))
                     .map(|a| {
                         a.status = agents::Status::Exited(code);
                         (a.name.clone(), a.files_summary(), a.branch.clone())
@@ -1843,30 +1861,53 @@ impl App {
         let name = field("name");
         let answer = match op.as_str() {
             "spawn" => self.bus_spawn(&req, caller),
-            "send" => match self.agent_pane(&field("to")) {
-                None => err(format!("no agent called {}", field("to"))),
-                Some(id) => {
-                    let text = field("text");
-                    if let Some(p) = self.panes.get_mut(&id) {
-                        // text, then Enter on its own so the CLI submits it
-                        let _ = p.pane.write(text.as_bytes());
-                        let _ = p.pane.write(b"\r");
-                        if let Some(a) = p.agent.as_mut() {
-                            a.task = text.clone();
-                            a.worked = false;
-                            a.last_output = Instant::now();
-                        }
-                    }
-                    let from = caller.clone().unwrap_or_else(|| "you".into());
-                    self.bus_event(format!(
-                        "{from} → {}: {}",
-                        field("to"),
-                        text.chars().take(80).collect::<String>()
-                    ));
-                    self.dirty = true;
-                    ok(serde_json::json!({}))
+            "send" => {
+                let from = caller.clone().unwrap_or_else(|| "you".into());
+                match self.send_to_agent(&field("to"), &field("text"), &from) {
+                    Ok(()) => ok(serde_json::json!({})),
+                    Err(e) => err(e),
                 }
-            },
+            }
+            "run" => self.bus_run(&req),
+            "emit" => {
+                let ev = field("event");
+                let split = match ev.split_once('.') {
+                    Some((a, e)) => Some((a.to_string(), e.to_string())),
+                    None => caller.clone().map(|c| (c, ev.clone())),
+                };
+                match split {
+                    None => err("from outside an agent, write <agent>.<event>"),
+                    Some((_, event)) if !agents::valid_name(&event) => {
+                        err(format!("event `{event}` — letters, digits, - and _"))
+                    }
+                    Some((agent, _)) if self.agent_pane(&agent).is_none() => {
+                        err(format!("no agent called {agent}"))
+                    }
+                    Some((agent, event)) => {
+                        let n = self.fire(&agent, &event, &field("text"));
+                        ok(serde_json::json!({ "rules": n }))
+                    }
+                }
+            }
+            "usage" => {
+                let who = Some(name.clone())
+                    .filter(|n| !n.is_empty())
+                    .or(caller.clone())
+                    .unwrap_or_default();
+                match (self.agent_pane(&who), req["tokens"].as_u64()) {
+                    (None, _) => err(format!("no agent called {who}")),
+                    (_, None) => err("how many tokens? sv agent usage <tokens>"),
+                    (Some(id), Some(t)) => {
+                        if let Some(a) = self.panes.get_mut(&id).and_then(|p| p.agent.as_mut()) {
+                            a.tokens = Some(t);
+                        }
+                        self.dirty = true;
+                        self.check_budget();
+                        ok(serde_json::json!({}))
+                    }
+                }
+            }
+            "budget" => self.bus_budget(req["tokens"].as_u64()),
             "wait" => match self.agent_pane(&name) {
                 None => err(format!("no agent called {name}")),
                 Some(id) => {
@@ -1889,7 +1930,7 @@ impl App {
                     .into_iter()
                     .map(|id| self.agent_summary(id))
                     .collect();
-                ok(serde_json::json!({ "agents": rows }))
+                ok(serde_json::json!({ "agents": rows, "team": self.team_summary() }))
             }
             "logs" => match self.agent_pane(&name) {
                 None => err(format!("no agent called {name}")),
@@ -1905,6 +1946,9 @@ impl App {
                     ok(serde_json::json!({ "lines": lines }))
                 }
             },
+            "pause" | "resume" | "stop" if req["all"].as_bool() == Some(true) => {
+                self.bus_signal_all(&op)
+            }
             "pause" | "resume" | "stop" => {
                 self.bus_signal(&op, &name, req["tree"].as_bool().unwrap_or(false))
             }
@@ -1921,6 +1965,451 @@ impl App {
         let _ = reply.send(answer);
     }
 
+    /// Type a message into an agent (then Enter on its own, so the CLI submits it).
+    fn send_to_agent(&mut self, to: &str, text: &str, from: &str) -> Result<(), String> {
+        let id = self
+            .agent_pane(to)
+            .ok_or_else(|| format!("no agent called {to}"))?;
+        if text.trim().is_empty() {
+            return Err("nothing to send".into());
+        }
+        let p = self.panes.get_mut(&id).ok_or("gone")?;
+        if p.agent.as_ref().is_some_and(|a| a.paused) {
+            return Err(format!("{to} is paused — sv agent resume {to}"));
+        }
+        let _ = p.pane.write(text.as_bytes());
+        let _ = p.pane.write(b"\r");
+        if let Some(a) = p.agent.as_mut() {
+            a.task = text.to_string();
+            a.worked = false;
+            a.last_output = Instant::now();
+        }
+        self.bus_event(format!(
+            "{from} → {to}: {}",
+            text.chars().take(80).collect::<String>()
+        ));
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Limits for a spawn: config, or the running team's, and the parent's own
+    /// max_children when it is a team member.
+    fn spawn_limits(&self, parent: Option<&str>, name: &str) -> Result<agents::Limits, String> {
+        let mut l = self.opts.agent_limits;
+        let Some(tr) = &self.team else { return Ok(l) };
+        l.max_agents = tr.team.max_agents.unwrap_or(l.max_agents);
+        l.max_depth = tr.team.max_depth.unwrap_or(l.max_depth);
+        if let Some(pm) = parent.and_then(|p| tr.team.member(p)) {
+            pm.may_spawn(name)?;
+            l.max_children = pm.children_allowed().unwrap_or(0);
+        }
+        Ok(l)
+    }
+
+    fn refuse_spawn(&mut self, who: Option<&str>, name: &str, why: String) -> serde_json::Value {
+        self.bus_event(format!(
+            "{} tried to spawn {name} — {why}",
+            who.unwrap_or("you")
+        ));
+        self.notice(format!("agent spawn {why}"));
+        crate::bus::err(why)
+    }
+
+    /// Start a team member (from team.yaml) with what it was told to do.
+    fn start_member(
+        &mut self,
+        id: &str,
+        parent: Option<(String, u8)>,
+        task: &str,
+    ) -> Result<String, String> {
+        let Some(tr) = &self.team else {
+            return Err("no team is running".into());
+        };
+        let m = tr
+            .team
+            .member(id)
+            .cloned()
+            .ok_or(format!("{id} isn't in team {}", tr.team.name))?;
+        let task = [task.trim(), m.task.as_str(), tr.goal.as_str()]
+            .into_iter()
+            .find(|t| !t.is_empty())
+            .unwrap_or("")
+            .to_string();
+        let prompt = tr.team.brief(&m, &task);
+        let team_name = tr.team.name.clone();
+        let folder = tr.folder.clone();
+        let cli = if m.cmd.is_empty() {
+            Cli::parse(&m.cli).unwrap_or(Cli::Claude)
+        } else {
+            Cli::Generic
+        };
+        let wt =
+            m.worktree.unwrap_or(self.opts.agent_worktree) && agents::repo_head(&folder).is_some();
+        let name = self.start_agent(parent, cli, &m.id, &prompt, &m.cmd, wt, Some(folder))?;
+        if let Some(a) = self
+            .agent_pane(&name)
+            .and_then(|pid| self.panes.get_mut(&pid))
+            .and_then(|p| p.agent.as_mut())
+        {
+            a.team = Some(team_name);
+            for x in m.approve.iter().filter_map(|x| agents::Action::parse(x)) {
+                if !a.always.contains(&x) {
+                    a.always.push(x);
+                }
+            }
+        }
+        if let Some(tr) = self.team.as_mut() {
+            tr.started.push(name.clone());
+        }
+        Ok(name)
+    }
+
+    /// `sv agent run team.yaml "goal"`
+    fn bus_run(&mut self, req: &serde_json::Value) -> serde_json::Value {
+        use crate::bus::{err, ok};
+        if let Some(tr) = &self.team {
+            let name = tr.team.name.clone();
+            if self.team_agents(&name).iter().any(|(_, running)| *running) {
+                return err(format!(
+                    "team {name} is still running — sv agent stop --all, or wait for it"
+                ));
+            }
+        }
+        let team: crate::team::Team = match serde_json::from_value(req["team"].clone()) {
+            Ok(t) => t,
+            Err(e) => return err(format!("bad team: {e}")),
+        };
+        let folder = req["folder"]
+            .as_str()
+            .map(PathBuf::from)
+            .filter(|p| p.is_dir())
+            .or_else(|| self.focused_cwd())
+            .unwrap_or_default();
+        let goal = req["goal"].as_str().unwrap_or("").trim().to_string();
+        let first: Vec<String> = team
+            .agents
+            .iter()
+            .filter(|m| m.start == crate::team::Start::Now)
+            .map(|m| m.id.clone())
+            .collect();
+        let tname = team.name.clone();
+        let budget = team.budget_tokens;
+        self.team = Some(TeamRun {
+            team,
+            goal: goal.clone(),
+            folder,
+            started: Vec::new(),
+            capped: None,
+            warned: false,
+        });
+        let mut started = Vec::new();
+        for id in first {
+            match self.start_member(&id, None, "") {
+                Ok(n) => started.push(n),
+                Err(e) => {
+                    for n in &started {
+                        self.signal_agent(n, "stop");
+                    }
+                    self.team = None;
+                    return err(format!("{id}: {e}"));
+                }
+            }
+        }
+        self.bus_event(format!(
+            "team {tname} started: {}{}",
+            started.join(", "),
+            budget
+                .map(|b| format!(" · budget {}", agents::fmt_tokens(b)))
+                .unwrap_or_default()
+        ));
+        ok(serde_json::json!({ "team": tname, "started": started }))
+    }
+
+    /// (name, still running) for every agent of a team.
+    fn team_agents(&self, team: &str) -> Vec<(String, bool)> {
+        self.panes
+            .values()
+            .filter_map(|p| p.agent.as_ref())
+            .filter(|a| a.team.as_deref() == Some(team))
+            .map(|a| {
+                (
+                    a.name.clone(),
+                    !matches!(a.status, agents::Status::Exited(_)),
+                )
+            })
+            .collect()
+    }
+
+    fn team_tokens(&self, team: &str) -> u64 {
+        self.panes
+            .values()
+            .filter_map(|p| p.agent.as_ref())
+            .filter(|a| a.team.as_deref() == Some(team))
+            .filter_map(|a| a.tokens)
+            .sum()
+    }
+
+    fn team_summary(&self) -> serde_json::Value {
+        let Some(tr) = &self.team else {
+            return serde_json::Value::Null;
+        };
+        serde_json::json!({
+            "name": tr.team.name,
+            "goal": tr.goal,
+            "tokens": self.team_tokens(&tr.team.name),
+            "budget_tokens": tr.team.budget_tokens,
+            "capped": tr.capped.is_some(),
+        })
+    }
+
+    /// Past the team's budget: pause every agent of the team, once.
+    fn check_budget(&mut self) {
+        let Some(tr) = &self.team else { return };
+        let Some(budget) = tr.team.budget_tokens else {
+            return;
+        };
+        if tr.capped.is_some() {
+            return;
+        }
+        let name = tr.team.name.clone();
+        let used = self.team_tokens(&name);
+        if used >= budget {
+            let mut paused = Vec::new();
+            for (n, running) in self.team_agents(&name) {
+                let already = self.agent_by_name(&n).is_some_and(|a| a.paused);
+                if running && !already && self.signal_agent(&n, "pause") {
+                    paused.push(n);
+                }
+            }
+            let msg = format!(
+                "team {name} reached its budget ({} of {}) — paused {}. sv agent budget <tokens> raises it and resumes them",
+                agents::fmt_tokens(used),
+                agents::fmt_tokens(budget),
+                if paused.is_empty() {
+                    "nothing".into()
+                } else {
+                    paused.join(", ")
+                }
+            );
+            self.bus_event(msg.clone());
+            self.notice(format!("⏸ {msg}"));
+            if let Some(tr) = self.team.as_mut() {
+                tr.capped = Some(paused);
+            }
+            self.dirty = true;
+        } else if used * 10 >= budget * 8 && !tr.warned {
+            self.notice(format!(
+                "team {name} has used {} of its {} budget",
+                agents::fmt_tokens(used),
+                agents::fmt_tokens(budget)
+            ));
+            if let Some(tr) = self.team.as_mut() {
+                tr.warned = true;
+            }
+        }
+    }
+
+    /// `sv agent budget [tokens]`: show, or raise and resume what the cap paused.
+    fn bus_budget(&mut self, tokens: Option<u64>) -> serde_json::Value {
+        use crate::bus::{err, ok};
+        let Some(tr) = self.team.as_mut() else {
+            return err("no team is running (sv agent run team.yaml \"goal\")");
+        };
+        let name = tr.team.name.clone();
+        let mut resumed = Vec::new();
+        if let Some(t) = tokens {
+            tr.team.budget_tokens = Some(t);
+            tr.warned = false;
+            let paused = tr.capped.take().unwrap_or_default();
+            for n in paused {
+                if self.signal_agent(&n, "resume") {
+                    resumed.push(n);
+                }
+            }
+            self.bus_event(format!(
+                "team {name} budget set to {}{}",
+                agents::fmt_tokens(t),
+                if resumed.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — resumed {}", resumed.join(", "))
+                }
+            ));
+            self.check_budget();
+        }
+        let mut v = self.team_summary();
+        v["resumed"] = serde_json::json!(resumed);
+        ok(v)
+    }
+
+    /// pause / resume / stop every agent.
+    fn bus_signal_all(&mut self, op: &str) -> serde_json::Value {
+        let names: Vec<String> = self
+            .panes
+            .values()
+            .filter_map(|p| p.agent.as_ref())
+            .filter(|a| !matches!(a.status, agents::Status::Exited(_)))
+            .map(|a| a.name.clone())
+            .collect();
+        let done: Vec<String> = names
+            .into_iter()
+            .filter(|n| self.signal_agent(n, op))
+            .collect();
+        if op == "resume" {
+            if let Some(tr) = self.team.as_mut() {
+                tr.capped = None;
+            }
+        }
+        self.bus_event(format!("{op} all: {}", done.join(", ")));
+        self.dirty = true;
+        crate::bus::ok(serde_json::json!({ "agents": done }))
+    }
+
+    /// Something happened to an agent: log it, run the team's `on:` rules and
+    /// `start: after:` members. Returns how many rules ran.
+    fn fire(&mut self, agent: &str, event: &str, log: &str) -> usize {
+        let log = if log.trim().is_empty() {
+            self.screen_tail(agent, 12)
+        } else {
+            log.trim().to_string()
+        };
+        self.bus_event(format!("{agent}.{event}"));
+        let Some(tr) = &self.team else { return 0 };
+        let in_team = self
+            .agent_by_name(agent)
+            .is_some_and(|a| a.team.as_deref() == Some(tr.team.name.as_str()));
+        if !in_team {
+            return 0;
+        }
+        let goal = tr.goal.clone();
+        let rules: Vec<(String, String)> = tr
+            .team
+            .rules
+            .iter()
+            .filter(|r| (r.agent == agent || r.agent == "*") && r.event == event)
+            .map(|r| {
+                (
+                    r.send.clone(),
+                    crate::team::fill(&r.text, agent, event, &log, &goal),
+                )
+            })
+            .collect();
+        let after: Vec<String> = if event == "done" {
+            tr.team
+                .agents
+                .iter()
+                .filter(|m| m.start == crate::team::Start::After(agent.to_string()))
+                .filter(|m| !tr.started.contains(&m.id))
+                .map(|m| m.id.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        for id in after {
+            if let Err(e) = self.start_member(&id, None, "") {
+                self.bus_event(format!("couldn't start {id} after {agent}: {e}"));
+            }
+        }
+        let n = rules.len();
+        let from = format!("{agent}.{event}");
+        for (to, text) in rules {
+            let running = self.agent_pane(&to).is_some();
+            let res = if running {
+                self.send_to_agent(&to, &text, &from)
+            } else {
+                self.start_member(&to, None, &text).map(|_| ())
+            };
+            if let Err(e) = res {
+                self.bus_event(format!("{from} → {to} failed: {e}"));
+            }
+        }
+        n
+    }
+
+    /// The last non-empty lines of an agent's screen, as one line.
+    fn screen_tail(&self, agent: &str, n: usize) -> String {
+        let Some(p) = self.agent_pane(agent).and_then(|id| self.panes.get(&id)) else {
+            return String::new();
+        };
+        let lines: Vec<String> = p
+            .pane
+            .screen()
+            .rows(0, p.size.1)
+            .map(|r| r.trim().to_string())
+            .filter(|r| !r.is_empty())
+            .collect();
+        let tail = lines[lines.len().saturating_sub(n)..].join(" | ");
+        tail.chars().take(1000).collect()
+    }
+
+    /// Turn status changes into events (started, done, failed, exited,
+    /// needs_approval) and end a team when all its agents have exited.
+    fn agent_events(&mut self) {
+        let mut events: Vec<(String, &'static str)> = Vec::new();
+        for p in self.panes.values_mut() {
+            let Some(a) = p.agent.as_mut() else { continue };
+            let key: &'static str = match &a.status {
+                agents::Status::Exited(Some(0)) | agents::Status::Exited(None) => "exited",
+                agents::Status::Exited(_) => "failed",
+                _ if a.paused => "paused",
+                agents::Status::Starting => "starting",
+                agents::Status::Working => "working",
+                agents::Status::Idle if a.worked => "done",
+                agents::Status::Idle => "idle",
+                agents::Status::NeedsApproval(_) => "approval",
+            };
+            if key == a.reported {
+                continue;
+            }
+            let old = std::mem::replace(&mut a.reported, key);
+            if old.is_empty() {
+                events.push((a.name.clone(), "started"));
+            }
+            match key {
+                "done" => events.push((a.name.clone(), "done")),
+                "approval" => events.push((a.name.clone(), "needs_approval")),
+                "exited" => {
+                    if old != "done" {
+                        events.push((a.name.clone(), "done"));
+                    }
+                    events.push((a.name.clone(), "exited"));
+                }
+                "failed" => {
+                    events.push((a.name.clone(), "failed"));
+                    events.push((a.name.clone(), "exited"));
+                }
+                _ => {}
+            }
+        }
+        for (name, ev) in events {
+            self.fire(&name, ev, "");
+        }
+        if let Some(tr) = &self.team {
+            let name = tr.team.name.clone();
+            let all = self.team_agents(&name);
+            // a member still due to start after one that is running
+            let waiting = tr.team.agents.iter().any(|m| match &m.start {
+                crate::team::Start::After(dep) => {
+                    !tr.started.contains(&m.id) && all.iter().any(|(n, r)| n == dep && *r)
+                }
+                _ => false,
+            });
+            if !all.is_empty() && all.iter().all(|(_, running)| !running) && !waiting {
+                let used = self.team_tokens(&name);
+                self.bus_event(format!(
+                    "team {name} finished{}",
+                    if used > 0 {
+                        format!(" · {}", agents::fmt_tokens(used))
+                    } else {
+                        String::new()
+                    }
+                ));
+                self.notice(format!("✔ team {name} finished"));
+                self.team = None;
+            }
+        }
+    }
+
     fn bus_spawn(&mut self, req: &serde_json::Value, caller: Option<String>) -> serde_json::Value {
         use crate::bus::{err, ok};
         let field = |k: &str| req[k].as_str().unwrap_or("").trim().to_string();
@@ -1933,15 +2422,27 @@ impl App {
             .collect();
         // Sub-agent when an agent asks; `--top` from an agent starts a sibling tree.
         let parent = caller.filter(|_| !req["top"].as_bool().unwrap_or(false));
-        let depth = match agents::check_spawn(self.opts.agent_limits, &active, parent.as_deref()) {
-            Ok(d) => d,
-            Err(why) => {
-                let who = parent.clone().unwrap_or_else(|| "you".into());
-                self.bus_event(format!("{who} tried to spawn {} — {why}", field("name")));
-                self.notice(format!("agent spawn {why}"));
-                return err(why);
-            }
+        let name = field("name");
+        let limits = match self.spawn_limits(parent.as_deref(), &name) {
+            Ok(l) => l,
+            Err(why) => return self.refuse_spawn(parent.as_deref(), &name, why),
         };
+        let depth = match agents::check_spawn(limits, &active, parent.as_deref()) {
+            Ok(d) => d,
+            Err(why) => return self.refuse_spawn(parent.as_deref(), &name, why),
+        };
+        // A team member (team.yaml) starts as the file describes it.
+        if self
+            .team
+            .as_ref()
+            .is_some_and(|t| t.team.member(&name).is_some())
+        {
+            let info = parent.clone().map(|p| (p, depth));
+            return match self.start_member(&name, info, &field("task")) {
+                Ok(n) => ok(serde_json::json!({ "name": n, "parent": parent, "depth": depth })),
+                Err(e) => err(e),
+            };
+        }
         let cmd = field("cmd");
         let cli = if !cmd.is_empty() {
             Cli::Generic
@@ -2290,6 +2791,7 @@ impl App {
             // a sub-agent inherits its parent's "always allow" answers
             if let Some(pa) = self.agent_by_name(p) {
                 agent.always = pa.always.clone();
+                agent.team = pa.team.clone();
             }
         }
         let cwd = if worktree {
@@ -2309,7 +2811,10 @@ impl App {
         let id = self
             .new_pane_env(
                 Some(cwd),
-                vec![(crate::bus::ENV_AGENT.to_string(), name.clone())],
+                vec![
+                    (crate::bus::ENV_AGENT.to_string(), name.clone()),
+                    (crate::bus::ENV_TASK.to_string(), prompt.trim().to_string()),
+                ],
             )
             .map_err(|e| e.to_string())?;
         self.agents_made += 1;
@@ -2600,6 +3105,7 @@ impl App {
             }
             self.check_agent(*id);
         }
+        self.agent_events();
         let every = if self.low_power {
             Duration::from_secs(15)
         } else {
@@ -2659,6 +3165,7 @@ impl App {
             }
         }
         self.update_agent_badges();
+        self.check_budget();
         let over = agents::overlaps(self.panes.values().filter_map(|p| p.agent.as_ref()));
         for (path, names) in over {
             if !self.overlaps_seen.contains(&path) {

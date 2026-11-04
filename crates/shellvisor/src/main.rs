@@ -31,6 +31,7 @@ mod session;
 mod shell;
 mod sysmon;
 mod tableview;
+mod team;
 mod term;
 mod ui;
 mod workspace;

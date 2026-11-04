@@ -1023,3 +1023,72 @@ fn agents_spawn_sub_agents_within_limits_wait_and_stop_as_a_tree() {
     s.wait_for("no agent called nobody");
     s.wait_for("wait exit 1");
 }
+
+#[test]
+fn a_team_yaml_runs_end_to_end_with_rules_and_a_budget_cap() {
+    let mut s = Session::start_full("teamrun");
+    s.wait_for("PROMPT>");
+    let d = s.dir.clone();
+    let script = |name: &str, body: &str| {
+        let p = d.join(name);
+        std::fs::write(&p, format!("#!/bin/bash\n{body}")).unwrap();
+        std::process::Command::new("chmod")
+            .arg("+x")
+            .arg(&p)
+            .status()
+            .unwrap();
+    };
+    script(
+        "lead.sh",
+        "echo \"lead task: $SHELLVISOR_TASK\"\nsv agent spawn --name api 'build the alerts endpoint'\n\
+         sv agent spawn --name db 'x' 2>&1 || echo \"db refused $?\"\nread -p '> ' x\n",
+    );
+    script(
+        "api.sh",
+        "echo \"api task: $SHELLVISOR_TASK\"\necho 'api built it'\nread -p '> ' msg\necho \"api got: $msg\"\nread -p '> ' x\n",
+    );
+    script(
+        "tests.sh",
+        "echo 'tests running'\nsv agent emit failed '2 tests failed in test_alerts.py'\nsv agent usage 6000\nread -p '> ' x\n",
+    );
+    let team = format!(
+        "team:\n  name: price-alerts\n  budget_tokens: 5000\n  max_agents: 5\n  max_depth: 3\n\
+         agents:\n  - id: lead\n    cmd: {d}/lead.sh\n    role: orchestrator\n    can_spawn: [api]\n\
+         \x20 - id: api\n    cmd: {d}/api.sh\n    max_children: 1\n    approve: [install]\n\
+         \x20 - id: tests\n    cmd: {d}/tests.sh\n    start: after:api\n\
+         on:\n  - event: tests.failed\n    send: api\n    text: \"fix failing tests: {{log}}\"\n",
+        d = d.display()
+    );
+    std::fs::write(d.join("team.yaml"), &team).unwrap();
+    std::fs::write(
+        d.join("bad.yaml"),
+        team.replace("budget_tokens: 5000", "budget_usd: 5.0"),
+    )
+    .unwrap();
+    s.send(&format!("cd {}; sv agent run bad.yaml 'go'\r", d.display()));
+    s.wait_for("Shellvisor sees tokens, not prices");
+    s.send("clear; sv agent run team.yaml 'add price alerts' --dry-run\r");
+    s.wait_until("plan", |t| {
+        t.contains("api") && t.contains("started by lead") && t.contains("starts when api is done")
+    });
+    s.send("clear; sv agent run team.yaml 'add price alerts'\r");
+    s.wait_for("lead task: add price alerts");
+    s.wait_for("api task: build the");
+    s.wait_for("db refused 3");
+    s.wait_for("tests running"); // started once api was done
+    s.wait_for("api got: fix failing tests");
+    s.wait_for("⏸ paused"); // over budget: the whole team pauses
+    s.send("\x1b1");
+    s.pump(Duration::from_millis(300));
+    s.send("clear; sv agent tree\r");
+    s.wait_until("tree", |t| {
+        t.contains("team price-alerts · 6K tok of 5K · ⏸ over budget") && t.contains("└─ api")
+    });
+    s.send("clear; sv agent log | tail -5; sv agent budget 20000\r");
+    s.wait_for("reached its budget");
+    s.wait_until("resumed", |t| t.contains("resumed") && t.contains("tests"));
+    s.send("clear; sv agent stop --all\r");
+    s.wait_for("stopped");
+    s.send("clear; sleep 1; sv agent log | tail -3\r");
+    s.wait_for("team price-alerts finished");
+}

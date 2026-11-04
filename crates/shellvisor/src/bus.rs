@@ -17,6 +17,8 @@ use std::time::Duration;
 pub const ENV_SOCK: &str = "SHELLVISOR_SOCK";
 /// Set in an agent's shell: which agent is calling.
 pub const ENV_AGENT: &str = "SHELLVISOR_AGENT";
+/// Set in an agent's shell: the task it was started with.
+pub const ENV_TASK: &str = "SHELLVISOR_TASK";
 
 /// The socket path for this Shellvisor process.
 pub fn socket_path(state: &Path) -> PathBuf {

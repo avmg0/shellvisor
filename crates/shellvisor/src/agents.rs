@@ -386,6 +386,10 @@ pub struct Agent {
     pub task: String,
     /// The CLI's own helper agents seen in its log (e.g. Claude Code's Task tool).
     pub internal: Vec<String>,
+    /// The team (team.yaml) it belongs to; sub-agents inherit it.
+    pub team: Option<String>,
+    /// Status last reported as events (started, done, failed…).
+    pub reported: &'static str,
 }
 
 /// How big an agent tree may grow (config `agents.limits`, or team.yaml).
@@ -528,6 +532,8 @@ impl Agent {
             worked: false,
             task: String::new(),
             internal: Vec::new(),
+            team: None,
+            reported: "",
         }
     }
 

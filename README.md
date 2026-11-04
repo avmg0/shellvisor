@@ -137,6 +137,47 @@ sv agent log                                                         # who spawn
 
 A sub-agent works in its parent's folder (and worktree) and inherits the approvals its parent set to "always". Trees are limited — by default 3 levels deep, 10 agents running, 3 sub-agents per agent (`agents.limits` in config.yaml); a spawn over a limit is refused with the reason, which the asking agent sees. When Claude Code runs its own helper agents (its Task tool), the column title shows them as `+N helpers` and `sv agent tree` lists them under it.
 
+### Teams: team.yaml
+
+A team file says who is on the team, who may start whom, and what happens when something goes wrong. `sv agent run --init` writes a starter `.shellvisor/team.yaml`:
+
+```yaml
+team:
+  name: price-alerts
+  budget_tokens: 2000000   # past this, every agent of the team pauses
+  max_agents: 10
+  max_depth: 3             # lead › agent › sub-agent
+agents:
+  - id: lead
+    cli: claude
+    role: orchestrator     # gets the goal, and is told who it can start
+    can_spawn: [api, tests]
+  - id: api
+    cli: claude
+    worktree: true
+    max_children: 3        # may start sub-agents of its own
+    approve: [install, network]   # answered "always" for it
+    mcp: [github]          # checked: is this MCP server set up?
+  - id: tests
+    cmd: ./my-test-agent.sh   # any command; it gets the task in $SHELLVISOR_TASK
+    start: after:api       # now (default) · after:<id> · spawned
+on:
+  - event: tests.failed    # started, done, failed, exited, needs_approval, or your own
+    send: api
+    text: "fix failing tests: {log}"   # {log} {agent} {event} {goal}
+```
+
+```sh
+sv agent run team.yaml 'add price alerts' --dry-run   # check it and show the plan
+sv agent run team.yaml 'add price alerts'             # start it
+sv agent emit failed '2 tests failed'                 # from an agent: fire tests.failed
+sv agent budget                                       # tokens used of the budget
+sv agent budget 3M                                    # raise it — resumes what the cap paused
+sv agent stop --all
+```
+
+Mistakes are reported before anything starts, with the agent and field (`agents[2] (tests): start after:db — no other agent called db`). Members listed in someone's `can_spawn` start when that agent spawns them; an agent may only start the names in its `can_spawn`, or any sub-agent if it has `max_children`. The budget counts tokens, not money — Shellvisor reads them from Claude Code and Codex session logs, and other agents can report theirs with `sv agent usage <tokens>`.
+
 When agents ask for permission, `alt+a` lists every waiting prompt; `y` / `n` / `a` answers it — Shellvisor types the right key for that CLI. Already running an agent in a normal tab? `sv agent attach` turns that split into an agent column.
 
 ## Configuration

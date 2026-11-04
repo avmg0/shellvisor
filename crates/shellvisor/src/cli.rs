@@ -23,7 +23,8 @@ usage:
   sv agent new [claude|codex|gemini|aider] [--name N] [--here] ['first task']
   sv agent new --cmd '<command>' [--name N]   any other agent CLI
   sv agent attach   make the agent running in this shell an agent column
-  sv agent spawn|send|wait|tree|logs|pause|resume|stop|log   agent teams (sv agent for details)
+  sv agent run team.yaml 'goal'   start a team of agents (team.yaml)
+  sv agent spawn|send|wait|tree|logs|pause|resume|stop|log|emit|budget   (sv agent for details)
   sv agents    the agents as a table · sv connect   CLIs, logins, MCP servers, ssh hosts
   sv data      list the data commands (ls, ps, open, where, sort-by, to csv…)
   sv status    is Shellvisor running in this terminal?
@@ -159,9 +160,10 @@ fn agent(args: &[String]) -> i32 {
     let usage = AGENT_USAGE;
     match args.first().map(String::as_str) {
         Some(
-            op
-            @ ("spawn" | "send" | "wait" | "tree" | "logs" | "pause" | "resume" | "stop" | "log"),
+            op @ ("spawn" | "send" | "wait" | "tree" | "logs" | "pause" | "resume" | "stop" | "log"
+            | "emit" | "usage" | "budget"),
         ) => agent_bus(op, &args[1..]),
+        Some("run") => agent_run(&args[1..]),
         Some("attach") => send_seq(request_sequence(&["agent", "attach"])),
         Some("new") => {
             let mut cli = String::new();
@@ -238,7 +240,12 @@ usage: sv agent new [claude|codex|gemini|aider] [--name N] [--here] [\"first tas
        sv agent tree [--json]           every agent, by parent
        sv agent logs <name> [-f]        what the agent's screen shows
        sv agent pause|resume|stop <name> [--tree]
-       sv agent log                     what agents did to each other";
+       sv agent log                     what agents did to each other
+       sv agent run [team.yaml] \"goal\" [--dry-run]   start a team (--init: a starter file)
+       sv agent emit <event> [\"details\"]  tell the team something happened (e.g. failed)
+       sv agent usage <tokens>          report tokens used (agents that don't log them)
+       sv agent budget [tokens]         the team's budget: show, or raise and resume
+       sv agent pause|resume|stop --all";
 
 /// `sv agent …` commands that need an answer: over the agent bus.
 fn agent_bus(op: &str, args: &[String]) -> i32 {
@@ -309,6 +316,31 @@ fn agent_bus(op: &str, args: &[String]) -> i32 {
             json!({"op": "send", "to": to, "text": text})
         }
         "tree" | "log" => json!({"op": op}),
+        "emit" => {
+            let Some(event) = need_name() else {
+                return fail("which event? sv agent emit <event> [\"details\"]".into());
+            };
+            let text = plain[1..]
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            json!({"op": "emit", "event": event, "text": text})
+        }
+        "usage" | "budget" => {
+            let n = plain.first().map(|s| parse_tokens(s));
+            if let Some(None) = n {
+                return fail(format!(
+                    "`{}` — a number of tokens, like 250000 or 2M",
+                    plain[0]
+                ));
+            }
+            if op == "usage" && n.is_none() {
+                return fail("how many tokens? sv agent usage <tokens>".into());
+            }
+            json!({"op": op, "tokens": n.flatten(), "name": opt(&["--name", "-n"])})
+        }
+        "pause" | "resume" | "stop" if flag("--all") => json!({"op": op, "all": true}),
         _ => {
             let Some(name) = need_name() else {
                 return fail(format!("which agent? sv agent {op} <name>"));
@@ -351,9 +383,27 @@ fn agent_bus(op: &str, args: &[String]) -> i32 {
             }
             code
         }
+        "emit" | "usage" => match crate::bus::call(req, quick) {
+            Ok(_) => 0,
+            Err(e) => fail(e),
+        },
+        "budget" => match crate::bus::call(req, quick) {
+            Ok(v) => {
+                println!("{}", team_line(&v));
+                if let Some(r) = v["resumed"].as_array().filter(|r| !r.is_empty()) {
+                    let names: Vec<&str> = r.iter().filter_map(|n| n.as_str()).collect();
+                    println!("resumed {}", names.join(", "));
+                }
+                0
+            }
+            Err(e) => fail(e),
+        },
         "tree" => match crate::bus::call(req, quick) {
             Ok(v) => {
                 let list = v["agents"].as_array().cloned().unwrap_or_default();
+                if !v["team"].is_null() && !flag("--json") {
+                    println!("{}", team_line(&v["team"]));
+                }
                 if flag("--json") {
                     for a in &list {
                         println!("{a}");
@@ -425,6 +475,201 @@ fn agent_bus(op: &str, args: &[String]) -> i32 {
             }
             Err(e) => fail(e),
         },
+    }
+}
+
+/// `250000`, `250K`, `2M`, `1.5m`
+fn parse_tokens(s: &str) -> Option<u64> {
+    let t = s.trim().to_lowercase().replace(['_', ','], "");
+    let t = t.trim_end_matches("tok").trim_end_matches("tokens").trim();
+    let (num, mult) = match t.chars().last()? {
+        'k' => (&t[..t.len() - 1], 1e3),
+        'm' => (&t[..t.len() - 1], 1e6),
+        _ => (t, 1.0),
+    };
+    let v: f64 = num.trim().parse().ok()?;
+    (v > 0.0).then(|| (v * mult).round() as u64)
+}
+
+/// `team price-alerts · 120K tok of 2M · goal: …`
+fn team_line(t: &serde_json::Value) -> String {
+    let used = t["tokens"].as_u64().unwrap_or(0);
+    let mut s = format!(
+        "team {} · {}",
+        t["name"].as_str().unwrap_or(""),
+        crate::agents::fmt_tokens(used)
+    );
+    if let Some(b) = t["budget_tokens"].as_u64() {
+        s += &format!(
+            " of {}",
+            crate::agents::fmt_tokens(b).trim_end_matches(" tok")
+        );
+    }
+    if t["capped"].as_bool() == Some(true) {
+        s += " · ⏸ over budget";
+    }
+    if let Some(g) = t["goal"].as_str().filter(|g| !g.is_empty()) {
+        s += &format!(" · {}", g.chars().take(60).collect::<String>());
+    }
+    s
+}
+
+/// `sv agent run [team.yaml] "goal" [--dry-run]` · `sv agent run --init`
+fn agent_run(args: &[String]) -> i32 {
+    use crate::team::{self, Start};
+    let default = std::path::Path::new(".shellvisor/team.yaml");
+    if args.iter().any(|a| a == "--init") {
+        if default.exists() {
+            eprintln!("sv agent run: {} already exists", default.display());
+            return 1;
+        }
+        let _ = std::fs::create_dir_all(".shellvisor");
+        return match std::fs::write(default, team::STARTER) {
+            Ok(()) => {
+                println!(
+                    "wrote {} — edit it, then: sv agent run \"what the team should do\"",
+                    default.display()
+                );
+                0
+            }
+            Err(e) => {
+                eprintln!("sv agent run: {e}");
+                1
+            }
+        };
+    }
+    let dry = args.iter().any(|a| a == "--dry-run" || a == "-n");
+    let words: Vec<&String> = args
+        .iter()
+        .filter(|a| !a.starts_with("--") && *a != "-n")
+        .collect();
+    let (file, goal) = match words.first() {
+        Some(f) if f.ends_with(".yaml") || f.ends_with(".yml") => {
+            (std::path::PathBuf::from(f.as_str()), &words[1..])
+        }
+        _ if default.exists() => (default.to_path_buf(), &words[..]),
+        _ => (std::path::PathBuf::from("team.yaml"), &words[..]),
+    };
+    let goal = goal
+        .iter()
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let text = match std::fs::read_to_string(&file) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!(
+                "sv agent run: {}: {e}\n(sv agent run --init writes a starter .shellvisor/team.yaml)",
+                file.display()
+            );
+            return 2;
+        }
+    };
+    let t = match team::parse(&text) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("sv agent run: {}: {e}", file.display());
+            return 2;
+        }
+    };
+    // Things worth knowing, not errors.
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
+    let servers: Vec<String> = crate::connect::mcp_servers(&home, &cwd)
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    let installed: Vec<&str> = crate::agents::detect()
+        .into_iter()
+        .map(|(c, _)| c.name())
+        .collect();
+    for m in &t.agents {
+        if !m.cli.is_empty() && !installed.contains(&m.cli.as_str()) {
+            eprintln!(
+                "sv agent run: note: {} uses {}, which isn't installed here",
+                m.id, m.cli
+            );
+        }
+        for x in m.mcp.iter().filter(|x| !servers.contains(x)) {
+            eprintln!(
+                "sv agent run: note: {} wants MCP server {x}, which no agent CLI here has configured",
+                m.id
+            );
+        }
+    }
+    if goal.trim().is_empty() {
+        eprintln!(
+            "sv agent run: what should the team do? sv agent run {} \"goal\"",
+            file.display()
+        );
+        return 2;
+    }
+    if dry {
+        println!("team {} — {}", t.name, goal);
+        for m in &t.agents {
+            let how = if m.cmd.is_empty() {
+                m.cli.clone()
+            } else {
+                m.cmd.clone()
+            };
+            let when = match &m.start {
+                Start::Now => "starts now".to_string(),
+                Start::After(d) => format!("starts when {d} is done"),
+                Start::Spawned => {
+                    let by: Vec<&str> = t
+                        .agents
+                        .iter()
+                        .filter(|o| o.can_spawn.contains(&m.id))
+                        .map(|o| o.id.as_str())
+                        .collect();
+                    if by.is_empty() {
+                        "starts when spawned".into()
+                    } else {
+                        format!("started by {}", by.join(" or "))
+                    }
+                }
+            };
+            let role = if m.orchestrator {
+                " · orchestrator"
+            } else {
+                ""
+            };
+            println!("  {}  {how}{role} · {when}", m.id);
+        }
+        for r in &t.rules {
+            println!("  on {}.{} → send {}: {}", r.agent, r.event, r.send, r.text);
+        }
+        if let Some(b) = t.budget_tokens {
+            println!(
+                "  budget {} — every agent pauses past it",
+                crate::agents::fmt_tokens(b)
+            );
+        }
+        return 0;
+    }
+    let req = serde_json::json!({
+        "op": "run",
+        "team": t,
+        "goal": goal,
+        "folder": cwd.display().to_string(),
+    });
+    match crate::bus::call(req, Some(std::time::Duration::from_secs(20))) {
+        Ok(v) => {
+            let started: Vec<&str> = v["started"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|n| n.as_str()).collect())
+                .unwrap_or_default();
+            println!(
+                "team {} started: {} · F9 to watch · sv agent tree",
+                t.name,
+                started.join(", ")
+            );
+            0
+        }
+        Err(e) => {
+            eprintln!("sv agent run: {e}");
+            1
+        }
     }
 }
 
