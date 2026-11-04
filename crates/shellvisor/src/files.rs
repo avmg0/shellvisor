@@ -21,7 +21,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 const AMBER: Color = Color::Indexed(179);
 const DIM: Color = Color::Indexed(245);
-const FAINT: Color = Color::Indexed(240);
+const FAINT: Color = Color::Indexed(243);
 const GREEN: Color = Color::Indexed(108);
 const RED: Color = Color::Indexed(167);
 const CYAN: Color = Color::Indexed(73);

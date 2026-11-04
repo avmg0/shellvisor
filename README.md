@@ -80,6 +80,8 @@ In **find**, type part of a name; `tab` switches to searching inside files (`⏎
 
 CPU (history and per core), memory, swap, disks, network, disk I/O, load, temperatures (whatever sensors the machine exposes), Shellvisor's own usage, and the busiest processes (`c` / `m` sort by CPU / memory). It reads nothing while it's hidden, and refreshes every 2 s (5 s in low-power mode).
 
+`t` switches to the **thermal view**: every sensor with its critical temperature, a temperature history per group (cpu, gpu, battery, disk), and whether the CPU is being slowed by heat — the clock against its top speed on Linux, macOS's CPU speed limit on a Mac. When the machine gets hot enough to slow down, Shellvisor tells you once (at most every 10 minutes).
+
 **Mac users:** `alt` shortcuts need your terminal to send Option as Alt — Terminal.app: *Settings → Profiles → Keyboard → Use Option as Meta key*; iTerm2: *Profiles → Keys → Left Option key → Esc+*. Shellvisor tells you if it's off. The leader key `ctrl+]` always works.
 
 **Selecting text:** Shellvisor uses the mouse wheel for scrollback. To select text with the mouse, hold **Option** (iTerm2) or turn off *View → Allow Mouse Reporting* (Terminal.app). Or set `mouse: false` in the config.
@@ -203,6 +205,7 @@ mouse: true             # wheel scrolls history
 start_view: full        # full (tabs, status bar) or basic (just the shell)
 restore: ask            # reopen last session's tabs: ask, always or never
 low_power: auto         # slower refresh + animations: auto (on battery), on, off
+theme: auto             # Shellvisor's own colours: auto (from $COLORFGBG), dark, light — also: sv theme
 agents:
   worktree: true        # each new agent works in its own git worktree + branch
   approvals:            # answer agents' permission prompts for you: auto | ask

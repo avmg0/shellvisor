@@ -16,7 +16,7 @@ use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 
 const AMBER: Color = Color::Indexed(179);
 const DIM: Color = Color::Indexed(245);
-const FAINT: Color = Color::Indexed(240);
+const FAINT: Color = Color::Indexed(243);
 const BAR: Color = Color::Indexed(236);
 const INK: Color = Color::Indexed(16);
 const GREEN: Color = Color::Indexed(108);
@@ -65,6 +65,60 @@ fn pane_block(title: String, is_focus: bool) -> Block<'static> {
 }
 
 pub fn draw(f: &mut Frame, app: &App) {
+    draw_all(f, app);
+    if app.light {
+        // shells keep their programs' own colours; only overlays cover them
+        let covered =
+            app.board.is_some() || app.table.is_some() || !matches!(app.modal, Modal::None);
+        let skip: Vec<Rect> = if covered {
+            Vec::new()
+        } else {
+            app.visible()
+                .into_iter()
+                .filter(|(id, _, _)| !app.tools.contains_key(id))
+                .map(|(_, _, inner)| inner)
+                .collect()
+        };
+        light_theme(f.buffer_mut(), &skip);
+    }
+}
+
+/// Shellvisor's palette, for a light terminal background.
+pub fn light_color(c: Color) -> Color {
+    match c {
+        Color::Indexed(n) => Color::Indexed(match n {
+            250..=255 => 235, // light text → dark text
+            245..=249 => 241, // dim
+            240..=244 => 246, // faint
+            235..=239 => 254, // dark fills (bars, selection) → light fills
+            179 => 130,       // amber
+            73 => 31,         // cyan
+            108 => 28,        // green
+            167 => 160,       // red
+            n => n,
+        }),
+        c => c,
+    }
+}
+
+fn light_theme(buf: &mut ratatui::buffer::Buffer, skip: &[Rect]) {
+    let area = buf.area;
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            if skip
+                .iter()
+                .any(|r| x >= r.x && x < r.right() && y >= r.y && y < r.bottom())
+            {
+                continue;
+            }
+            let cell = &mut buf[(x, y)];
+            cell.fg = light_color(cell.fg);
+            cell.bg = light_color(cell.bg);
+        }
+    }
+}
+
+fn draw_all(f: &mut Frame, app: &App) {
     let (tabbar, _, status) = app.regions();
     let full = app.view == View::Full;
     let focused = app.input_target();
@@ -978,6 +1032,15 @@ fn draw_menu(f: &mut Frame, app: &App, sel: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn light_palette_keeps_contrast() {
+        assert_eq!(light_color(Color::Indexed(252)), Color::Indexed(235));
+        assert_eq!(light_color(Color::Indexed(237)), Color::Indexed(254));
+        assert_eq!(light_color(Color::Indexed(179)), Color::Indexed(130));
+        assert_eq!(light_color(Color::Indexed(16)), Color::Indexed(16));
+        assert_eq!(light_color(Color::Reset), Color::Reset);
+    }
 
     #[test]
     fn paths() {

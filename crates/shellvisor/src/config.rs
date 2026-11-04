@@ -37,6 +37,7 @@ pub struct Config {
     pub start_view: StartView,
     pub restore: Restore,
     pub low_power: LowPower,
+    pub theme: Theme,
     pub agents: AgentsConfig,
     pub keys: HashMap<String, KeyList>,
 }
@@ -149,6 +150,35 @@ impl KeyList {
     }
 }
 
+/// Colours for Shellvisor's own frames, bars and panes (never your programs').
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Theme {
+    /// Light if the terminal says its background is light ($COLORFGBG).
+    #[default]
+    Auto,
+    Dark,
+    Light,
+}
+
+impl Theme {
+    pub fn is_light(self) -> bool {
+        match self {
+            Theme::Light => true,
+            Theme::Dark => false,
+            Theme::Auto => std::env::var("COLORFGBG").is_ok_and(|v| light_background(&v)),
+        }
+    }
+}
+
+/// `$COLORFGBG` is "fg;bg" (sometimes "fg;x;bg"); bg 7 or 9–15 is light.
+pub fn light_background(v: &str) -> bool {
+    v.rsplit(';')
+        .next()
+        .and_then(|b| b.trim().parse::<u8>().ok())
+        .is_some_and(|b| b == 7 || (9..=15).contains(&b))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum StartView {
@@ -167,6 +197,7 @@ impl Default for Config {
             start_view: StartView::Full,
             restore: Restore::Ask,
             low_power: LowPower::Auto,
+            theme: Theme::Auto,
             agents: AgentsConfig::default(),
             keys: HashMap::new(),
         }
@@ -244,6 +275,8 @@ mod tests {
             StartView::Basic
         );
         assert_eq!(Config::default().start_view, StartView::Full);
+        assert!(light_background("0;15") && light_background("0;default;7"));
+        assert!(!light_background("15;0") && !light_background("") && !light_background("12;8"));
         assert!(Config::parse("start_view: sideways").is_err());
     }
 

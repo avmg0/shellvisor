@@ -196,6 +196,7 @@ fn main() {
         keymap,
         restore: cfg.restore,
         low_power: cfg.low_power,
+        light: cfg.theme.is_light(),
         agent_worktree: cfg.agents.worktree,
         agent_limits: cfg.agents.limits.get(),
         planner: cfg.agents.planner.clone(),

@@ -20,6 +20,7 @@ usage:
   sv flow 'a | b | c'             run a pipeline with a meter on every stage
   sv flowpane  open the Flow pane (what the shell is running, live)
   sv power on|off|auto            low-power mode (auto = on battery)
+  sv theme light|dark|auto        colours of Shellvisor's own frames and panes
   sv agent new [claude|codex|gemini|aider] [--name N] [--here] ['first task']
   sv agent new --cmd '<command>' [--name N]   any other agent CLI
   sv agent attach   make the agent running in this shell an agent column
@@ -92,14 +93,15 @@ pub fn run(args: &[String]) -> i32 {
         }
         "flow" => crate::flowrun::run(&args[1..]),
         "agent" => agent(&args[1..]),
-        "files" | "sys" | "system" | "flowpane" | "layout" | "power" => {
+        "files" | "sys" | "system" | "flowpane" | "layout" | "power" | "theme" => {
             if !inside() {
                 return not_running(cmd);
             }
             let arg = args.get(1).map(String::as_str);
             let words: Vec<&str> = match (cmd, arg) {
                 ("files", None) => vec!["files"],
-                ("files", Some(v @ ("tree" | "list" | "git" | "find"))) => vec!["files", v],
+                ("files", Some(v)) if crate::files::View::parse(v).is_some() => vec!["files", v],
+                ("theme", Some(t @ ("light" | "dark" | "auto"))) => vec!["theme", t],
                 ("sys" | "system", None) => vec!["system"],
                 ("flowpane", None) => vec!["flow"],
                 ("layout", Some(l @ ("dev" | "monitor" | "files" | "data" | "agents"))) => {

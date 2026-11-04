@@ -16,7 +16,7 @@ use std::cell::Cell;
 
 const AMBER: Color = Color::Indexed(179);
 const DIM: Color = Color::Indexed(245);
-const FAINT: Color = Color::Indexed(240);
+const FAINT: Color = Color::Indexed(243);
 const CYAN: Color = Color::Indexed(73);
 const RED: Color = Color::Indexed(167);
 const SEL_BG: Color = Color::Indexed(237);

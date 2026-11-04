@@ -141,6 +141,8 @@ Exit criteria: the board 16 team.yaml runs end-to-end; over-limit spawns are ref
 ## P6 · Polish & ship
 **P6a done:** the rest of the file views — Columns (parent folder | this folder | preview), Grid (names in cells, arrows in two directions), Size (folders and files by total size as bars, drill in and out, stops counting past 400k files and says so) and Recent (newest changed files anywhere below, from git's file list or a bounded walk). `1`–`8` / tab switch views; the view bar shortens to "view n/8" when narrow. 118 unit + 36 end-to-end tests.
 
+**P6b done:** thermal view in the system pane (`t`): every sensor with its critical point, per-group history, CPU clock vs. top clock (Linux cpufreq) or macOS's `CPU_Speed_Limit` (read every 30 s, only in this view), and a one-time heat warning (≥ 95 °C, at a sensor's critical point, or slowed by heat) at most every 10 min. Themes: `theme: auto|dark|light` and `sv theme` — light remaps Shellvisor's own palette only (never your programs' colours inside shells); auto reads `$COLORFGBG`. Contrast: faint text raised from 240 to 243 (≈ 4.6:1 on a dark background); every status keeps a symbol as well as a colour (⠋ ✔ ✖ ⚑ ⏸ ▲). 120 unit + 36 end-to-end tests.
+
 Deliverables
 - Remaining file views: Columns, Grid, Size map, Recent activity.
 - Layout editor (alt+e) with palette, drag-resize, save/default/per-folder layouts.

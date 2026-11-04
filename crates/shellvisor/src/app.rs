@@ -65,6 +65,8 @@ pub struct Options {
     pub keymap: Keymap,
     pub restore: Restore,
     pub low_power: LowPower,
+    /// Light theme for Shellvisor's own UI.
+    pub light: bool,
     /// New agents get their own git worktree.
     pub agent_worktree: bool,
     pub agent_limits: agents::Limits,
@@ -328,6 +330,7 @@ pub struct App {
     /// What happened between agents (sv agent log): (unix time, text).
     pub bus_log: std::collections::VecDeque<(i64, String)>,
     pub low_power: bool,
+    pub light: bool,
     power_manual: bool,
     focus_tick: u64,
     last_focus: PaneId,
@@ -411,6 +414,7 @@ pub fn run(opts: Options) -> io::Result<i32> {
         plan_kept: None,
         bus_log: std::collections::VecDeque::new(),
         low_power,
+        light: opts.light,
         power_manual: !auto_power,
         focus_tick: 0,
         last_focus: 0,
@@ -1087,6 +1091,9 @@ impl App {
                 }
                 Some(Tool::System(sp)) if sp.due_in(low).is_zero() => {
                     sp.sample();
+                    if let Some(a) = sp.alert.take() {
+                        out.acts.push(files::Act::Notice(a));
+                    }
                     out.redraw = true;
                 }
                 Some(Tool::System(_)) => {}
@@ -3831,6 +3838,19 @@ impl App {
                     Ok(())
                 }
             },
+            ["theme", t] => {
+                self.light = match *t {
+                    "light" => true,
+                    "dark" => false,
+                    _ => crate::config::Theme::Auto.is_light(),
+                };
+                self.notice(format!(
+                    "theme: {}",
+                    if self.light { "light" } else { "dark" }
+                ));
+                self.dirty = true;
+                Ok(())
+            }
             ["power", m] => {
                 match *m {
                     "on" | "off" => {

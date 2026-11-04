@@ -3,6 +3,10 @@
 //!
 //! Sampling happens only while the pane is on screen (every 2 s, or 5 s in
 //! low-power mode). When it's hidden nothing is read at all.
+//!
+//! `t` switches to the thermal view: every sensor, temperature history per
+//! group, the CPU clock against its top speed (Linux) or macOS's heat speed
+//! limit, and a one-time warning when the machine is hot enough to slow down.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -13,7 +17,7 @@ use sysinfo::{Components, Disks, Networks, Pid, ProcessRefreshKind, ProcessesToU
 
 const AMBER: Color = Color::Indexed(179);
 const DIM: Color = Color::Indexed(245);
-const FAINT: Color = Color::Indexed(240);
+const FAINT: Color = Color::Indexed(243);
 const GREEN: Color = Color::Indexed(108);
 const RED: Color = Color::Indexed(167);
 const CYAN: Color = Color::Indexed(73);
@@ -63,6 +67,12 @@ pub struct Snapshot {
     pub io_read: u64,
     pub io_write: u64,
     pub temps: Vec<Temp>,
+    /// Every sensor: (label, °C, critical °C if the sensor says).
+    pub sensors: Vec<(String, f32, Option<f32>)>,
+    /// CPU clock now and its top, in MHz (Linux cpufreq).
+    pub clock: Option<(u64, u64)>,
+    /// macOS: % of full CPU speed allowed (below 100 = slowed for heat).
+    pub speed_limit: Option<u8>,
     pub procs: Vec<Proc>,
     pub self_cpu: f32,
     pub self_mem: u64,
@@ -81,6 +91,14 @@ pub struct SysPane {
     last: Option<Instant>,
     disks_at: Option<Instant>,
     me: Option<Pid>,
+    /// Thermal view instead of the overview.
+    pub thermal: bool,
+    /// Hottest reading per group over time.
+    pub temp_history: Vec<(&'static str, VecDeque<f32>)>,
+    /// A heat warning for the app to show (taken once).
+    pub alert: Option<String>,
+    alerted_at: Option<Instant>,
+    limit_at: Option<Instant>,
 }
 
 impl Default for SysPane {
@@ -103,6 +121,11 @@ impl SysPane {
             last: None,
             disks_at: None,
             me: sysinfo::get_current_pid().ok(),
+            thermal: false,
+            temp_history: Vec::new(),
+            alert: None,
+            alerted_at: None,
+            limit_at: None,
         }
     }
 
@@ -236,6 +259,50 @@ impl SysPane {
                     .iter()
                     .filter_map(|c| c.temperature().map(|t| (c.label().to_string(), t))),
             );
+            s.sensors = comps
+                .iter()
+                .filter_map(|c| {
+                    let t = c.temperature()?;
+                    (1.0..150.0)
+                        .contains(&t)
+                        .then(|| (c.label().to_string(), t, c.critical()))
+                })
+                .collect();
+            s.sensors.sort_by(|a, b| b.1.total_cmp(&a.1));
+        }
+        s.clock = cpu_clock();
+        // macOS speed limit: a subprocess, so only in the thermal view, every 30 s
+        s.speed_limit = self.snap.speed_limit;
+        if self.thermal
+            && cfg!(target_os = "macos")
+            && self
+                .limit_at
+                .is_none_or(|t| t.elapsed() > Duration::from_secs(30))
+        {
+            self.limit_at = Some(Instant::now());
+            s.speed_limit = mac_speed_limit();
+        }
+        for t in &s.temps {
+            match self.temp_history.iter_mut().find(|(g, _)| *g == t.group) {
+                Some((_, h)) => {
+                    if h.len() == HISTORY {
+                        h.pop_front();
+                    }
+                    h.push_back(t.celsius);
+                }
+                None => self
+                    .temp_history
+                    .push((t.group, VecDeque::from([t.celsius]))),
+            }
+        }
+        if let Some(msg) = heat_alert(&s) {
+            if self
+                .alerted_at
+                .is_none_or(|t| t.elapsed() > Duration::from_secs(600))
+            {
+                self.alerted_at = Some(Instant::now());
+                self.alert = Some(msg);
+            }
         }
 
         if self.history.len() == HISTORY {
@@ -262,6 +329,7 @@ impl SysPane {
     pub fn key(&mut self, key: &[u8]) -> bool {
         let n = self.snap.procs.len();
         match key {
+            b"t" => self.thermal = !self.thermal,
             b"c" => self.set_sort(Sort::Cpu),
             b"m" => self.set_sort(Sort::Mem),
             b"\x1b[A" | b"\x1bOA" | b"k" => self.sel = self.sel.saturating_sub(1),
@@ -289,6 +357,15 @@ impl SysPane {
     }
 
     pub fn title(&self) -> String {
+        if self.thermal {
+            let hottest = self
+                .snap
+                .temps
+                .iter()
+                .map(|t| t.celsius)
+                .fold(0.0f32, f32::max);
+            return format!("system · thermal · hottest {hottest:.0}°C");
+        }
         format!(
             "system · cpu {:.0}% · mem {}",
             self.snap.cpu,
@@ -319,6 +396,10 @@ impl SysPane {
         let val = Style::default().add_modifier(Modifier::BOLD);
         if self.last.is_none() {
             line(buf, &mut y, &[("  reading…", label)]);
+            return;
+        }
+        if self.thermal {
+            self.render_thermal(area, buf);
             return;
         }
 
@@ -499,6 +580,231 @@ impl SysPane {
         }
         let _ = line;
     }
+}
+
+impl SysPane {
+    fn render_thermal(&self, area: Rect, buf: &mut Buffer) {
+        let s = &self.snap;
+        let w = area.width as usize;
+        let bottom = area.bottom();
+        let mut y = area.y;
+        let put = |buf: &mut Buffer, x: u16, y: u16, t: &str, st: Style| {
+            if y < bottom && x < area.right() {
+                buf.set_stringn(x, y, t, (area.right() - x) as usize, st);
+            }
+        };
+        let label = Style::default().fg(DIM);
+        if s.sensors.is_empty() {
+            put(
+                buf,
+                area.x,
+                y,
+                "  no temperature sensors are readable here",
+                label,
+            );
+            put(
+                buf,
+                area.x,
+                y + 2,
+                "  t back to the overview",
+                Style::default().fg(FAINT),
+            );
+            return;
+        }
+        // one line per group: now, history, peak
+        let spark_w = w.saturating_sub(26).min(HISTORY);
+        for (g, hist) in &self.temp_history {
+            let now = hist.back().copied().unwrap_or(0.0);
+            let peak = hist.iter().copied().fold(0.0f32, f32::max);
+            // 30 °C → bottom, 100 °C → top
+            let scaled = hist
+                .iter()
+                .map(|t| ((t - 30.0) / 70.0 * 100.0).clamp(0.0, 100.0));
+            let spark = sparkline(scaled, spark_w);
+            put(buf, area.x, y, &format!("{:<8}", g.to_uppercase()), label);
+            put(
+                buf,
+                area.x + 8,
+                y,
+                &format!("{now:>3.0}°C "),
+                Style::default()
+                    .fg(temp_color(now))
+                    .add_modifier(Modifier::BOLD),
+            );
+            put(
+                buf,
+                area.x + 14,
+                y,
+                &spark,
+                Style::default().fg(temp_color(now)),
+            );
+            put(
+                buf,
+                area.x + 14 + spark_w as u16,
+                y,
+                &format!(" peak {peak:.0}°"),
+                Style::default().fg(FAINT),
+            );
+            y += 1;
+        }
+        // speed
+        y += 1;
+        let speed = match (s.clock, s.speed_limit) {
+            (_, Some(l)) if l < 100 => Some((format!("CPU speed limited to {l}% (heat)"), RED)),
+            (_, Some(l)) => Some((format!("CPU speed limit {l}% — not slowed"), GREEN)),
+            (Some((cur, max)), _) if max > 0 => {
+                let pct = cur * 100 / max;
+                let hot = s.temps.iter().any(|t| t.celsius >= 85.0);
+                let note = if pct < 60 && hot {
+                    " — slowed while hot (throttling)"
+                } else {
+                    ""
+                };
+                Some((
+                    format!(
+                        "CPU clock {:.1} of {:.1} GHz ({pct}%){note}",
+                        cur as f64 / 1000.0,
+                        max as f64 / 1000.0
+                    ),
+                    if note.is_empty() { CYAN } else { RED },
+                ))
+            }
+            _ => None,
+        };
+        if let Some((t, c)) = speed {
+            put(buf, area.x, y, "SPEED   ", label);
+            put(buf, area.x + 8, y, &t, Style::default().fg(c));
+            y += 2;
+        }
+        // every sensor
+        put(
+            buf,
+            area.x,
+            y,
+            &format!(
+                "{:<w2$} {:>6} {:>6}",
+                "SENSOR",
+                "NOW",
+                "CRIT",
+                w2 = w.saturating_sub(15).max(8)
+            ),
+            label.add_modifier(Modifier::UNDERLINED),
+        );
+        y += 1;
+        let name_w = w.saturating_sub(15).max(8);
+        for (name, t, crit) in &s.sensors {
+            if y + 1 >= bottom {
+                break;
+            }
+            let n: String = name.chars().take(name_w).collect();
+            let crit = crit
+                .map(|c| format!("{c:.0}°"))
+                .unwrap_or_else(|| "–".into());
+            let mark = if *t >= 90.0 { "▲" } else { " " };
+            put(
+                buf,
+                area.x,
+                y,
+                &format!("{n:<name_w$} {t:>5.0}°{mark}{crit:>5}"),
+                Style::default().fg(temp_color(*t)),
+            );
+            y += 1;
+        }
+        put(
+            buf,
+            area.x,
+            bottom.saturating_sub(1),
+            "t overview · ▲ ≥ 90 °C · warnings appear once every 10 min",
+            Style::default().fg(FAINT),
+        );
+    }
+}
+
+fn temp_color(t: f32) -> Color {
+    if t >= 90.0 {
+        RED
+    } else if t >= 75.0 {
+        AMBER
+    } else {
+        GREEN
+    }
+}
+
+/// A warning worth interrupting for: very hot, or the CPU slowed by heat.
+pub fn heat_alert(s: &Snapshot) -> Option<String> {
+    if let Some(l) = s.speed_limit.filter(|l| *l < 100) {
+        return Some(format!(
+            "⚠ macOS has slowed the CPU to {l}% because of heat (F3, t: thermal)"
+        ));
+    }
+    let hottest = s
+        .temps
+        .iter()
+        .max_by(|a, b| a.celsius.total_cmp(&b.celsius))?;
+    let crit = s
+        .sensors
+        .iter()
+        .any(|(_, t, c)| c.is_some_and(|c| c > 0.0 && *t >= c));
+    if hottest.celsius >= 95.0 || crit {
+        return Some(format!(
+            "⚠ {} at {:.0}°C — hot enough to slow down (F3, t: thermal)",
+            hottest.group, hottest.celsius
+        ));
+    }
+    if let Some((cur, max)) = s.clock {
+        if max > 0 && cur * 100 / max < 60 && hottest.celsius >= 85.0 {
+            return Some(format!(
+                "⚠ CPU running at {}% of its top clock at {:.0}°C — throttling",
+                cur * 100 / max,
+                hottest.celsius
+            ));
+        }
+    }
+    None
+}
+
+/// Linux: average current clock and the top clock across CPUs (MHz).
+fn cpu_clock() -> Option<(u64, u64)> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    let base = std::path::Path::new("/sys/devices/system/cpu");
+    let read = |p: std::path::PathBuf| -> Option<u64> {
+        std::fs::read_to_string(p).ok()?.trim().parse().ok()
+    };
+    let (mut cur, mut max, mut n) = (0u64, 0u64, 0u64);
+    for i in 0..256 {
+        let d = base.join(format!("cpu{i}/cpufreq"));
+        let (Some(c), Some(m)) = (
+            read(d.join("scaling_cur_freq")),
+            read(d.join("cpuinfo_max_freq")),
+        ) else {
+            if i == 0 {
+                return None;
+            }
+            break;
+        };
+        cur += c;
+        max = max.max(m);
+        n += 1;
+    }
+    (n > 0 && max > 0).then(|| (cur / n / 1000, max / 1000))
+}
+
+/// macOS: `pmset -g therm` → CPU_Speed_Limit (100 = full speed).
+fn mac_speed_limit() -> Option<u8> {
+    let out = std::process::Command::new("pmset")
+        .args(["-g", "therm"])
+        .output()
+        .ok()?;
+    parse_speed_limit(&String::from_utf8_lossy(&out.stdout))
+}
+
+pub fn parse_speed_limit(text: &str) -> Option<u8> {
+    text.lines()
+        .find(|l| l.contains("CPU_Speed_Limit"))
+        .and_then(|l| l.split('=').nth(1))
+        .and_then(|v| v.trim().parse().ok())
 }
 
 fn sort_procs(v: &mut [Proc], s: Sort) {
@@ -725,5 +1031,42 @@ mod tests {
         assert!(p.key(b"m"));
         assert_eq!(p.sort, Sort::Mem);
         assert!(!p.key(b"z"));
+        assert!(p.key(b"t"));
+        assert!(p.title().contains("thermal"));
+        let mut buf = Buffer::empty(area);
+        p.render(area, &mut buf, false);
+        let text: String = (0..24)
+            .map(|y| {
+                (0..80)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    + "\n"
+            })
+            .collect();
+        assert!(
+            text.contains("SENSOR") || text.contains("no temperature sensors"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn heat_warnings() {
+        let mut s = Snapshot {
+            temps: vec![Temp {
+                group: "cpu",
+                celsius: 70.0,
+            }],
+            ..Default::default()
+        };
+        assert_eq!(heat_alert(&s), None);
+        s.temps[0].celsius = 96.0;
+        assert!(heat_alert(&s).unwrap().contains("cpu at 96°C"));
+        s.temps[0].celsius = 88.0;
+        s.clock = Some((1200, 3600));
+        assert!(heat_alert(&s).unwrap().contains("33% of its top clock"));
+        s.speed_limit = Some(70);
+        assert!(heat_alert(&s).unwrap().contains("slowed the CPU to 70%"));
+        let pm = "Note: No thermal warning level has been recorded\nCPU_Scheduler_Limit \t= 100\nCPU_Available_CPUs \t= 8\nCPU_Speed_Limit \t= 85\n";
+        assert_eq!(parse_speed_limit(pm), Some(85));
     }
 }
