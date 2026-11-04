@@ -25,6 +25,7 @@ mod gitstat;
 mod highlight;
 mod history;
 mod keys;
+mod layouted;
 mod mouse;
 mod osinfo;
 mod paths;

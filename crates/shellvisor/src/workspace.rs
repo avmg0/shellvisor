@@ -150,6 +150,65 @@ impl Node {
     }
 }
 
+impl Node {
+    /// The split whose divider is under (x, y), as a path of a/b turns
+    /// (false = a, true = b). Pane frames meet at the divider, so either of
+    /// the two touching border cells grabs it.
+    pub fn divider_at(&self, area: Rect, x: u16, y: u16) -> Option<Vec<bool>> {
+        let Node::Split { axis, ratio, a, b } = self else {
+            return None;
+        };
+        if !area.contains((x, y).into()) {
+            return None;
+        }
+        let (ra, rb) = split_rect(area, *axis, *ratio);
+        let on = match axis {
+            Axis::Horizontal => x + 1 == ra.right() || x == rb.x,
+            Axis::Vertical => y + 1 == ra.bottom() || y == rb.y,
+        };
+        // a deeper divider that crosses this cell wins only off our line
+        if on {
+            return Some(Vec::new());
+        }
+        let (side, child, r) = if ra.contains((x, y).into()) {
+            (false, a, ra)
+        } else {
+            (true, b, rb)
+        };
+        let mut path = child.divider_at(r, x, y)?;
+        path.insert(0, side);
+        Some(path)
+    }
+
+    /// Move the divider at `path` to (x, y). Returns true if it moved.
+    pub fn drag_divider(&mut self, area: Rect, path: &[bool], x: u16, y: u16) -> bool {
+        let Node::Split { axis, ratio, a, b } = self else {
+            return false;
+        };
+        if let Some((first, rest)) = path.split_first() {
+            let (ra, rb) = split_rect(area, *axis, *ratio);
+            return if *first {
+                b.drag_divider(rb, rest, x, y)
+            } else {
+                a.drag_divider(ra, rest, x, y)
+            };
+        }
+        let new = match axis {
+            Axis::Horizontal if area.width > 0 => {
+                (x.saturating_sub(area.x) + 1) as f32 / area.width as f32
+            }
+            Axis::Vertical if area.height > 0 => {
+                (y.saturating_sub(area.y) + 1) as f32 / area.height as f32
+            }
+            _ => return false,
+        }
+        .clamp(MIN_RATIO, MAX_RATIO);
+        let changed = (new - *ratio).abs() > 0.001;
+        *ratio = new;
+        changed
+    }
+}
+
 pub fn split_rect(area: Rect, axis: Axis, ratio: f32) -> (Rect, Rect) {
     match axis {
         Axis::Horizontal => {
@@ -481,5 +540,44 @@ mod tests {
         t.zoomed = false;
         t.next_pane();
         assert_eq!(t.focus, 1);
+    }
+
+    #[test]
+    fn drag_a_divider() {
+        let mut n = Node::Split {
+            axis: Axis::Horizontal,
+            ratio: 0.5,
+            a: Box::new(Node::Leaf(1)),
+            b: Box::new(Node::Split {
+                axis: Axis::Vertical,
+                ratio: 0.5,
+                a: Box::new(Node::Leaf(2)),
+                b: Box::new(Node::Leaf(3)),
+            }),
+        };
+        let area = Rect::new(0, 0, 100, 40);
+        let mut rects = Vec::new();
+        n.layout(area, &mut rects);
+        let r1 = rects[0].1;
+        assert_eq!(n.divider_at(area, r1.right() - 1, 10), Some(vec![]));
+        assert_eq!(n.divider_at(area, 10, 10), None);
+        let r2 = rects[1].1;
+        assert_eq!(n.divider_at(area, 70, r2.bottom() - 1), Some(vec![true]));
+        assert!(n.drag_divider(area, &[], 29, 10));
+        let Node::Split { ratio, .. } = &n else {
+            panic!()
+        };
+        assert!((ratio - 0.3).abs() < 0.01, "{ratio}");
+        assert!(n.drag_divider(area, &[true], 70, 9));
+        let Node::Split { b, .. } = &n else { panic!() };
+        let Node::Split { ratio, .. } = b.as_ref() else {
+            panic!()
+        };
+        assert!((*ratio - 0.25).abs() < 0.01, "{ratio}");
+        assert!(n.drag_divider(area, &[], 0, 10));
+        let Node::Split { ratio, .. } = &n else {
+            panic!()
+        };
+        assert!((*ratio - 0.1).abs() < 0.01, "clamped to the minimum");
     }
 }

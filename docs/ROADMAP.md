@@ -143,6 +143,10 @@ Exit criteria: the board 16 team.yaml runs end-to-end; over-limit spawns are ref
 
 **P6b done:** thermal view in the system pane (`t`): every sensor with its critical point, per-group history, CPU clock vs. top clock (Linux cpufreq) or macOS's `CPU_Speed_Limit` (read every 30 s, only in this view), and a one-time heat warning (≥ 95 °C, at a sensor's critical point, or slowed by heat) at most every 10 min. Themes: `theme: auto|dark|light` and `sv theme` — light remaps Shellvisor's own palette only (never your programs' colours inside shells); auto reads `$COLORFGBG`. Contrast: faint text raised from 240 to 243 (≈ 4.6:1 on a dark background); every status keeps a symbol as well as a colour (⠋ ✔ ✖ ⚑ ⏸ ▲). 120 unit + 36 end-to-end tests.
 
+**P6c done:** layout editor (`alt+e`, leader `E`): reshape the tab live — palette (shell, files, system, flow) with `1`–`4`/tab, split right `\` / below `-`, close `x`, resize `< > J K`, move with the arrows; save by name (`s`), as the default for new sessions (`d`) or for this folder and below (`f`); open a saved one (`o`, or `sv layout <name>`; `sv layout` lists them). Layouts are YAML in `~/.config/shellvisor/layouts/` (no folders inside, so they open wherever you are); default and per-folder choices in `~/.local/state/shellvisor/layouts.yaml`, applied on a fresh start. Drag the border between any two splits with the mouse to resize. Long notices are cut to fit instead of not showing. 123 unit + 37 end-to-end tests.
+
+*Changes from plan:* the editor works on the live tab (what you see is the layout) rather than a separate mini-map.
+
 Deliverables
 - Remaining file views: Columns, Grid, Size map, Recent activity.
 - Layout editor (alt+e) with palette, drag-resize, save/default/per-folder layouts.

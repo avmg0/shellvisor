@@ -1185,3 +1185,44 @@ fn auto_plan_dispatches_stages_then_review_and_merges_from_the_tree() {
     s.send("clear; sv agent log | grep -c 'tests.done'\r");
     s.wait_for("1");
 }
+
+#[test]
+fn layout_editor_builds_saves_and_reopens_a_folder_layout() {
+    let mut s = Session::start_with("bash", "layout", "start_view: full\nrestore: never\n");
+    s.wait_for("PROMPT>");
+    s.send("\x1be"); // alt+e
+    s.wait_for("layout editor");
+    s.wait_for("[1 shell]");
+    s.send("2\\"); // files, split right
+    s.wait_for("files ·");
+    s.send("3-"); // system, below the files pane
+    s.wait_for("system ·");
+    s.send(">>");
+    s.send("f");
+    s.wait_for("save for this folder, named");
+    s.send("code\r");
+    s.wait_for("saved layout code");
+    let saved = std::fs::read_to_string(s.dir.join("layouts/code.yaml")).unwrap();
+    assert!(
+        saved.contains("tool: files") && saved.contains("tool: system"),
+        "{saved}"
+    );
+    let prefs = std::fs::read_to_string(s.dir.join("state/layouts.yaml")).unwrap();
+    assert!(prefs.contains("code"), "{prefs}");
+    s.send("\x1b"); // done
+    s.pump(Duration::from_millis(300));
+    s.send("\x11");
+    s.wait_exit();
+    s.keep = true;
+    let dir = s.dir.clone();
+    drop(s);
+    // starting in that folder again opens the layout
+    let mut s = Session::launch("bash", dir);
+    s.wait_until("folder layout", |t| {
+        t.contains("files ·") && t.contains("system ·")
+    });
+    s.wait_for("PROMPT>");
+    // and by name from any shell
+    s.send("sv layout nope\r");
+    s.wait_for("no saved layout called nope");
+}

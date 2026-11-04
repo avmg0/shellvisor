@@ -257,6 +257,44 @@ fn draw_all(f: &mut Frame, app: &App) {
         b.render(inner, f.buffer_mut(), &app.board_snapshot());
     }
 
+    if let Some(ed) = &app.editor {
+        let (_, content, _) = app.regions();
+        let here = app.focused_cwd().unwrap_or_default();
+        let lines = ed.lines(&crate::layouted::Prefs::load(), &here);
+        let h = (lines.len() as u16 + 2).min(content.height);
+        let w = content.width.saturating_sub(4).min(110);
+        let r = Rect::new(
+            content.x + (content.width - w) / 2,
+            content.bottom().saturating_sub(h + 1),
+            w,
+            h,
+        );
+        f.render_widget(Clear, r);
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(AMBER))
+            .title(Span::styled(
+                " ▦ layout editor ",
+                Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+            ));
+        let inner = block.inner(r);
+        f.render_widget(block, r);
+        for (i, l) in lines.iter().enumerate() {
+            let st = if i == 0 {
+                Style::default().fg(CYAN)
+            } else {
+                Style::default().fg(DIM)
+            };
+            f.buffer_mut().set_stringn(
+                inner.x + 1,
+                inner.y + i as u16,
+                l,
+                inner.width.saturating_sub(2) as usize,
+                st,
+            );
+        }
+    }
+
     if let Some((msg, _)) = &app.notice {
         let (_, content, _) = app.regions();
         badge(f, content, if full { 1 } else { 0 }, &format!(" {msg} "));
@@ -371,6 +409,19 @@ fn draw_all(f: &mut Frame, app: &App) {
 }
 
 fn badge(f: &mut Frame, area: Rect, row: u16, text: &str) {
+    // too long for the screen: cut it rather than not showing it
+    let text: String = if text.chars().count() >= area.width as usize {
+        let keep = (area.width as usize).saturating_sub(2);
+        format!(
+            "{}… ",
+            text.chars()
+                .take(keep.saturating_sub(1))
+                .collect::<String>()
+        )
+    } else {
+        text.to_string()
+    };
+    let text = text.as_str();
     let w = text.chars().count() as u16;
     if area.width > w && row < area.height {
         f.buffer_mut().set_string(

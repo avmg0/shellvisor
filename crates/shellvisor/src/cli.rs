@@ -16,7 +16,7 @@ usage:
   sv exit      leave Shellvisor
   sv files [tree|list|columns|grid|git|find|size|recent]   the files pane
   sv sys       open the system pane (CPU, memory, disk, network, temperatures)
-  sv layout dev|monitor|files|data|agents   lay this tab out as a preset
+  sv layout [name]   a preset (dev monitor files data agents) or a saved layout · no name: list them
   sv flow 'a | b | c'             run a pipeline with a meter on every stage
   sv flowpane  open the Flow pane (what the shell is running, live)
   sv power on|off|auto            low-power mode (auto = on battery)
@@ -104,7 +104,20 @@ pub fn run(args: &[String]) -> i32 {
                 ("theme", Some(t @ ("light" | "dark" | "auto"))) => vec!["theme", t],
                 ("sys" | "system", None) => vec!["system"],
                 ("flowpane", None) => vec!["flow"],
-                ("layout", Some(l @ ("dev" | "monitor" | "files" | "data" | "agents"))) => {
+                ("layout", None) => {
+                    println!("presets: dev monitor files data agents");
+                    let saved = crate::layouted::saved_layouts();
+                    if saved.is_empty() {
+                        println!("saved:   none yet — alt+e opens the layout editor");
+                    } else {
+                        println!("saved:   {}", saved.join(" "));
+                    }
+                    return 0;
+                }
+                ("layout", Some(l))
+                    if l.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') =>
+                {
                     vec!["layout", l]
                 }
                 ("power", Some(m @ ("on" | "off" | "auto"))) => vec!["power", m],
