@@ -12,6 +12,7 @@ pub const NAME_LOWER: &str = "shellvisor";
 mod activity;
 mod agents;
 mod app;
+mod bus;
 mod cli;
 mod config;
 mod connect;
@@ -173,6 +174,8 @@ fn main() {
             if launch.integrated { "on" } else { "off" }.into(),
         ),
     ];
+    let bus_path = bus::socket_path(&paths::state_dir());
+    env.push((bus::ENV_SOCK.into(), bus_path.display().to_string()));
     if let Some(bin) = install_sv_link(&cache) {
         let path = std::env::var("PATH").unwrap_or_default();
         env.push(("PATH".into(), format!("{}:{path}", bin.display())));
@@ -192,6 +195,8 @@ fn main() {
         restore: cfg.restore,
         low_power: cfg.low_power,
         agent_worktree: cfg.agents.worktree,
+        agent_limits: cfg.agents.limits.get(),
+        bus_path,
         auto_approve,
         session_path: paths::state_dir().join("session.yaml"),
         warnings,

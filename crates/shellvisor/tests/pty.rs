@@ -945,3 +945,81 @@ fn agent_runs_in_a_worktree_asks_for_approval_and_takes_messages() {
     s.send("sv connect | sv get kind | sv uniq\r");
     s.wait_for("agent cli");
 }
+
+#[test]
+fn agents_spawn_sub_agents_within_limits_wait_and_stop_as_a_tree() {
+    let mut s = Session::start_with(
+        "bash",
+        "team",
+        "start_view: full\nagents:\n  limits:\n    max_children: 1\n",
+    );
+    s.wait_for("PROMPT>");
+    let helper = s.dir.join("helper.sh");
+    std::fs::write(
+        &helper,
+        "#!/bin/bash\necho \"helper working on: $*\"\nsleep 0.5\necho 'helper finished'\nread -p '> ' msg\necho \"helper got: $msg\"\nread -p '> ' msg\necho \"helper again: $msg\"\nread -p '> ' msg\n",
+    )
+    .unwrap();
+    let lead = s.dir.join("lead.sh");
+    std::fs::write(
+        &lead,
+        format!(
+            "#!/bin/bash\necho \"lead as $SHELLVISOR_AGENT\"\nsv agent spawn --name helper --cmd '{h} tests'\n\
+             sv agent spawn --name extra --cmd '{h} more' 2>&1 || echo \"second spawn exit $?\"\n\
+             sv agent wait helper\necho 'lead saw helper finish'\nread -p '> ' msg\n",
+            h = helper.display()
+        ),
+    )
+    .unwrap();
+    for f in [&helper, &lead] {
+        std::process::Command::new("chmod")
+            .arg("+x")
+            .arg(f)
+            .status()
+            .unwrap();
+    }
+    s.send(&format!(
+        "sv agent new --name lead --cmd '{}'\r",
+        lead.display()
+    ));
+    s.wait_for("lead as lead");
+    s.wait_for("helper working on: tests");
+    s.wait_for("● helper ← lead");
+    s.wait_for("refused: lead already has 1 sub-agents");
+    s.wait_for("second spawn exit 3");
+    s.wait_for("lead saw helper finish");
+    // from the plain shell in the first tab
+    s.send("\x1b1");
+    s.pump(Duration::from_millis(300));
+    s.send("clear; sv agent tree\r");
+    s.wait_until("tree", |t| {
+        t.contains("lead  command") && t.contains("└─ helper  command")
+    });
+    s.send("sv agent send helper 'run the slow ones'\r");
+    s.send("\x1b2");
+    s.wait_for("helper got: run the slow ones");
+    s.send("\x1b1");
+    s.pump(Duration::from_millis(300));
+    s.send("clear; sv agent log\r");
+    s.wait_until("bus log", |t| {
+        t.contains("tried to spawn extra") && t.contains("you → helper: run the slow ones")
+    });
+    s.send("clear; sv agent pause helper\r");
+    s.wait_for("paused helper");
+    s.send("\x1b2");
+    s.wait_for("⏸ paused");
+    s.send("\x1b1");
+    s.pump(Duration::from_millis(300));
+    s.send("clear; sv agent resume helper; sv agent send helper still-there\r");
+    s.wait_for("resumed helper");
+    s.send("\x1b2");
+    s.wait_for("helper again: still-there");
+    s.send("\x1b1");
+    s.pump(Duration::from_millis(300));
+    s.send("clear; sv agent pause helper; sv agent stop lead --tree\r");
+    s.wait_for("paused helper");
+    s.wait_for("stopped lead, helper");
+    s.send("clear; sv agent wait nobody; echo \"wait exit $?\"\r");
+    s.wait_for("no agent called nobody");
+    s.wait_for("wait exit 1");
+}

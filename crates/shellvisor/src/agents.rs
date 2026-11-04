@@ -371,6 +371,131 @@ pub struct Agent {
     /// Tokens used so far, from the CLI's own session log (Claude Code, Codex).
     pub tokens: Option<u64>,
     pub started_at: SystemTime,
+    /// The agent that spawned this one (None: started by you).
+    pub parent: Option<String>,
+    /// 1 for agents you start, parent's + 1 for sub-agents.
+    pub depth: u8,
+    /// Stopped with SIGSTOP (sv agent pause, or the budget cap).
+    pub paused: bool,
+    /// The stopped job's process group: once stopped, the shell takes the
+    /// terminal back, so it is no longer the foreground job.
+    pub paused_pg: Option<i32>,
+    /// It has worked since its last task (so "idle" now means "finished").
+    pub worked: bool,
+    /// The task it was given last.
+    pub task: String,
+    /// The CLI's own helper agents seen in its log (e.g. Claude Code's Task tool).
+    pub internal: Vec<String>,
+}
+
+/// How big an agent tree may grow (config `agents.limits`, or team.yaml).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    pub max_depth: u8,
+    pub max_agents: usize,
+    pub max_children: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Limits {
+            max_depth: 3,
+            max_agents: 10,
+            max_children: 3,
+        }
+    }
+}
+
+/// May `parent` spawn one more agent? `Err` carries the reason, for the parent.
+pub fn check_spawn(
+    limits: Limits,
+    active: &[(String, Option<String>, u8)],
+    parent: Option<&str>,
+) -> Result<u8, String> {
+    if active.len() >= limits.max_agents {
+        return Err(format!(
+            "refused: {} agents are already running (max_agents {})",
+            active.len(),
+            limits.max_agents
+        ));
+    }
+    let Some(p) = parent else { return Ok(1) };
+    let Some((_, _, depth)) = active.iter().find(|(n, _, _)| n == p) else {
+        return Err(format!("refused: no running agent called {p}"));
+    };
+    let depth = depth + 1;
+    if depth > limits.max_depth {
+        return Err(format!(
+            "refused: a sub-agent of {p} would be at depth {depth} (max_depth {})",
+            limits.max_depth
+        ));
+    }
+    let children = active
+        .iter()
+        .filter(|(_, par, _)| par.as_deref() == Some(p))
+        .count();
+    if children >= limits.max_children {
+        return Err(format!(
+            "refused: {p} already has {children} sub-agents (max_children {})",
+            limits.max_children
+        ));
+    }
+    Ok(depth)
+}
+
+/// Names under `root` in the tree (children, grandchildren…), not `root` itself.
+pub fn descendants(all: &[(String, Option<String>)], root: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut frontier = vec![root.to_string()];
+    while let Some(n) = frontier.pop() {
+        for (c, p) in all {
+            if p.as_deref() == Some(n.as_str()) && !out.contains(c) {
+                out.push(c.clone());
+                frontier.push(c.clone());
+            }
+        }
+    }
+    out
+}
+
+/// The CLI's own helper agents in a Claude Code transcript (Task tool calls).
+pub fn internal_agents(transcript: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in transcript.lines() {
+        if !line.contains("\"tool_use\"") {
+            continue;
+        }
+        let Ok(j) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(items) = j.pointer("/message/content").and_then(|c| c.as_array()) else {
+            continue;
+        };
+        for it in items {
+            if it.get("type").and_then(|t| t.as_str()) != Some("tool_use") {
+                continue;
+            }
+            let name = it.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            if name != "Task" && name != "Agent" {
+                continue;
+            }
+            let input = it.get("input");
+            let kind = input
+                .and_then(|i| i.get("subagent_type"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("helper");
+            let what = input
+                .and_then(|i| i.get("description"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            out.push(if what.is_empty() {
+                kind.to_string()
+            } else {
+                format!("{kind}: {what}")
+            });
+        }
+    }
+    out
 }
 
 pub const COLORS: [u8; 6] = [73, 176, 111, 179, 108, 167];
@@ -396,6 +521,13 @@ impl Agent {
             launched: true,
             tokens: None,
             started_at: SystemTime::now(),
+            parent: None,
+            depth: 1,
+            paused: false,
+            paused_pg: None,
+            worked: false,
+            task: String::new(),
+            internal: Vec::new(),
         }
     }
 
@@ -424,7 +556,12 @@ impl Agent {
 /// we can read: Claude Code (`~/.claude/projects/<folder>/<session>.jsonl`,
 /// `usage` on each reply) and Codex (`~/.codex/sessions/…/rollout-*.jsonl`,
 /// `total_tokens`). Others: None — shown as nothing rather than a guess.
-pub fn tokens(cli: Cli, dir: &Path, since: SystemTime) -> Option<u64> {
+/// Also returns the CLI's own helper agents seen in the same log.
+pub fn usage(cli: Cli, dir: &Path, since: SystemTime) -> (Option<u64>, Vec<String>) {
+    usage_inner(cli, dir, since).unwrap_or((None, Vec::new()))
+}
+
+fn usage_inner(cli: Cli, dir: &Path, since: SystemTime) -> Option<(Option<u64>, Vec<String>)> {
     let home = PathBuf::from(std::env::var_os("HOME")?);
     // logs written just before we noticed the agent still count
     let since = since.checked_sub(Duration::from_secs(5)).unwrap_or(since);
@@ -442,7 +579,8 @@ pub fn tokens(cli: Cli, dir: &Path, since: SystemTime) -> Option<u64> {
                 })
                 .collect();
             let file = newest_jsonl(&home.join(".claude/projects").join(key), since, 0)?;
-            Some(sum_usage(&std::fs::read_to_string(file).ok()?))
+            let text = std::fs::read_to_string(file).ok()?;
+            Some((Some(sum_usage(&text)), internal_agents(&text)))
         }
         Cli::Codex => {
             let file = newest_jsonl(&home.join(".codex/sessions"), since, 4)?;
@@ -450,7 +588,7 @@ pub fn tokens(cli: Cli, dir: &Path, since: SystemTime) -> Option<u64> {
             if !text.contains(&*dir.to_string_lossy()) {
                 return None; // another folder's session
             }
-            max_number(&text, "\"total_tokens\":")
+            Some((max_number(&text, "\"total_tokens\":"), Vec::new()))
         }
         _ => None,
     }
@@ -691,6 +829,59 @@ pub fn repo_head(dir: &Path) -> Option<(PathBuf, String)> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn spawn_limits_and_descendants() {
+        let l = super::Limits::default();
+        let a = |n: &str, p: Option<&str>, d: u8| (n.to_string(), p.map(String::from), d);
+        let active = vec![
+            a("lead", None, 1),
+            a("api", Some("lead"), 2),
+            a("ws", Some("api"), 3),
+        ];
+        assert_eq!(super::check_spawn(l, &active, None), Ok(1));
+        assert_eq!(super::check_spawn(l, &active, Some("lead")), Ok(2));
+        let deep = super::check_spawn(l, &active, Some("ws")).unwrap_err();
+        assert!(deep.contains("depth 4 (max_depth 3)"), "{deep}");
+        assert!(
+            super::check_spawn(l, &active, Some("ghost"))
+                .unwrap_err()
+                .contains("no running agent")
+        );
+        let full = vec![
+            a("api", None, 1),
+            a("c1", Some("api"), 2),
+            a("c2", Some("api"), 2),
+            a("c3", Some("api"), 2),
+        ];
+        assert!(
+            super::check_spawn(l, &full, Some("api"))
+                .unwrap_err()
+                .contains("3 sub-agents (max_children 3)")
+        );
+        let many: Vec<_> = (0..10).map(|i| a(&format!("a{i}"), None, 1)).collect();
+        assert!(
+            super::check_spawn(l, &many, None)
+                .unwrap_err()
+                .contains("max_agents 10")
+        );
+        let tree: Vec<(String, Option<String>)> = active
+            .iter()
+            .map(|(n, p, _)| (n.clone(), p.clone()))
+            .collect();
+        assert_eq!(super::descendants(&tree, "lead"), vec!["api", "ws"]);
+        assert!(super::descendants(&tree, "ws").is_empty());
+    }
+
+    #[test]
+    fn claude_helper_agents() {
+        let t = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Task","input":{"subagent_type":"Explore","description":"find the price feed"}}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}}"#;
+        assert_eq!(
+            super::internal_agents(t),
+            vec!["Explore: find the price feed"]
+        );
+    }
+
+    #[test]
     fn usage_from_session_logs() {
         let t = r#"{"type":"user","message":{"content":"hi"}}
 {"type":"assistant","message":{"usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":100}}}
@@ -712,7 +903,7 @@ mod tests {
         std::fs::write(logdir.join("s1.jsonl"), t).unwrap();
         let old = std::env::var_os("HOME");
         unsafe { std::env::set_var("HOME", &home) };
-        let got = super::tokens(super::Cli::Claude, dir, std::time::SystemTime::now());
+        let got = super::usage(super::Cli::Claude, dir, std::time::SystemTime::now()).0;
         match old {
             Some(h) => unsafe { std::env::set_var("HOME", h) },
             None => unsafe { std::env::remove_var("HOME") },

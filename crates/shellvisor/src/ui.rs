@@ -91,11 +91,15 @@ pub fn draw(f: &mut Frame, app: &App) {
             continue;
         };
         if let (true, Some(a)) = (full, p.agent.as_ref()) {
-            let mut title = format!(" ● {} · {} ", a.name, a.cli.name());
-            if let Some(b) = &a.branch {
+            let mut title = match &a.parent {
+                Some(parent) => format!(" ● {} ← {parent} · {} ", a.name, a.cli.name()),
+                None => format!(" ● {} · {} ", a.name, a.cli.name()),
+            };
+            if let (Some(b), None) = (&a.branch, &a.parent) {
                 title.push_str(&format!("· {b} "));
             }
             let status = match &a.status {
+                _ if a.paused => "⏸ paused".to_string(),
                 agents::Status::Working => format!("{} working", spinner(app)),
                 s => s.label(),
             };
@@ -106,6 +110,13 @@ pub fn draw(f: &mut Frame, app: &App) {
             }
             if let Some(t) = a.tokens {
                 title.push_str(&format!("· {} ", agents::fmt_tokens(t)));
+            }
+            if !a.internal.is_empty() {
+                title.push_str(&format!(
+                    "· +{} helper{} ",
+                    a.internal.len(),
+                    if a.internal.len() == 1 { "" } else { "s" }
+                ));
             }
             let mins = a.started.elapsed().as_secs() / 60;
             if mins > 0 {

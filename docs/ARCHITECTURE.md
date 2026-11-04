@@ -67,7 +67,7 @@ Chosen for minimal memory and predictable latency — **std threads + channels, 
 | **sampler** | system stats + thermals + process list; sleeps when no visible pane needs it | timer (2 s / 5 s low-power) |
 | **fs-watch** | `notify` (FSEvents on macOS) for the expanded folders only | file events |
 | **workers (≤2)** | on-demand jobs: git status/diff, size scan, find, pipeline relays | job queue; exit when idle |
-| **bus** | agent/CLI unix socket (only started when the first agent or `sv` query appears) | socket |
+| **bus** | agent/CLI unix socket: one thread accepting, one short thread per request (`sv agent spawn/wait/tree…`) | socket |
 
 ```
  input ─┐
@@ -197,11 +197,11 @@ key ─▶ global keys (ctrl+q, alt+`, F1, F5…)   — always win, even inside 
  sv agent  ─▶│ spawner ─▶ PTY + adapter ─▶ normalized events ─▶ UI columns / tree / timeline
              │    │         (claude / codex / gemini / generic) │
              │ approvals queue · budget ledger · worktree mgr   │
-             │ message bus (unix socket, JSON lines, 0600)      │
+             │ message bus (unix socket, a JSON line each way)  │
              └──────────────────────────────────────────────────┘
 ```
 - **Agent** = an agent CLI in its own PTY (hidden tab) + an **adapter** that turns its output into events: `Thinking`, `ToolCall`, `FileEdit{path,+,-}`, `Command`, `NeedsApproval`, `Usage{tokens,cost}`, `SpawnRequest`, `Done`. CLIs with structured output modes are parsed; others fall back to a generic text adapter.
-- **Sub-agents:** any agent can run `sv agent spawn …` in its shell → bus → runtime checks limits (depth ≤ 3, agents ≤ 10, children ≤ 3 by default) → spawns child with inherited budget share, approval rules and worktree. Over-limit requests are refused with a reason. Agents' *internal* sub-agents (e.g. a CLI's own helper agents) are shown dotted when the adapter can see them.
+- **Sub-agents:** any agent can run `sv agent spawn …` in its shell → bus → runtime checks limits (depth ≤ 3, agents ≤ 10, children ≤ 3 by default) → spawns the child in the parent's folder/worktree with the parent's "always" approvals (`$SHELLVISOR_AGENT` tells the bus who is asking). Over-limit requests are refused with a reason (exit 3 for the caller). `wait` replies when the agent has exited, or has worked and gone idle. Pause/resume/stop signal the agent's process group (SIGSTOP; SIGCONT + `fg`; SIGTERM), `--tree` includes descendants. Agents' *internal* sub-agents (Claude Code's Task helpers, read from its session log) are listed under the agent.
 - **Isolation:** one `git worktree` + branch per top-level agent; children share their parent's.
 - **Approvals:** policy from team.yaml (auto / ask / never per action class: read, test, lint, install, network, push, delete).
 - **Budget:** ledger per agent, rolled up per branch and team; pause-all at the cap.
@@ -224,7 +224,7 @@ key ─▶ global keys (ctrl+q, alt+`, F1, F5…)   — always win, even inside 
 | `~/.local/state/shellvisor/history.jsonl` | command history with exit code, duration, tab |
 | `~/.local/state/shellvisor/agents/<run>/` | full agent logs, usage ledger |
 | `<project>/.shellvisor/team.yaml` | agent team script |
-| `$TMPDIR/shellvisor-<uid>/bus.sock` | agent/CLI socket (0600, removed on exit) |
+| `~/.local/state/shellvisor/run/bus-<pid>.sock` | agent bus (folder 0700, removed on exit; path in `$SHELLVISOR_SOCK`) |
 
 ---
 

@@ -67,6 +67,9 @@ pub struct Options {
     pub low_power: LowPower,
     /// New agents get their own git worktree.
     pub agent_worktree: bool,
+    pub agent_limits: agents::Limits,
+    /// The agent message bus socket (`sv agent …`).
+    pub bus_path: PathBuf,
     /// Approval kinds answered automatically (config agents.approvals).
     pub auto_approve: Vec<agents::Action>,
     pub session_path: PathBuf,
@@ -125,6 +128,9 @@ impl Tool {
 
 const SAVE_EVERY: Duration = Duration::from_secs(1);
 
+/// One agent's files changed, tokens, and the CLI's own helper agents.
+type AgentReport = (PaneId, Vec<FileChange>, Option<u64>, Vec<String>);
+
 enum Ev {
     Input(Vec<u8>),
     Output(PaneId, Vec<u8>),
@@ -134,7 +140,9 @@ enum Ev {
     /// A command-bar pipeline finished: (title, rows or error).
     TableReady(String, Box<Result<Data, String>>),
     /// Files each agent has changed (from git).
-    AgentFiles(Vec<(PaneId, Vec<FileChange>, Option<u64>)>),
+    AgentFiles(Vec<AgentReport>),
+    /// A request on the agent bus, and where its reply goes.
+    Bus(serde_json::Value, Sender<serde_json::Value>),
     Resize,
     Quit,
 }
@@ -258,6 +266,10 @@ pub struct App {
     before_agents: Option<usize>,
     /// Last agents.json written (for `sv agents`).
     agents_json: String,
+    /// `sv agent wait` callers: (agent name, where to reply).
+    waiters: Vec<(String, Sender<serde_json::Value>)>,
+    /// What happened between agents (sv agent log): (unix time, text).
+    pub bus_log: std::collections::VecDeque<(i64, String)>,
     pub low_power: bool,
     power_manual: bool,
     focus_tick: u64,
@@ -336,6 +348,8 @@ pub fn run(opts: Options) -> io::Result<i32> {
         overlaps_seen: Vec::new(),
         before_agents: None,
         agents_json: String::new(),
+        waiters: Vec::new(),
+        bus_log: std::collections::VecDeque::new(),
         low_power,
         power_manual: !auto_power,
         focus_tick: 0,
@@ -413,9 +427,20 @@ pub fn run(opts: Options) -> io::Result<i32> {
             }
         })?;
     }
+    {
+        let tx = tx.clone();
+        if let Err(e) = crate::bus::listen(&app.opts.bus_path, move |req, reply| {
+            let _ = tx.send(Ev::Bus(req, reply));
+        }) {
+            app.opts.warnings.push(format!(
+                "agent bus: {e} — sv agent spawn/wait/tree won't work"
+            ));
+        }
+    }
     drop(tx);
 
     let result = app.event_loop(rx);
+    let _ = std::fs::remove_file(&app.opts.bus_path);
     app.save_session();
     for p in app.panes.values_mut() {
         p.pane.kill();
@@ -567,12 +592,23 @@ impl App {
     // ---------------------------------------------------------------- panes
 
     fn new_pane(&mut self, cwd: Option<PathBuf>) -> io::Result<PaneId> {
+        self.new_pane_env(cwd, Vec::new())
+    }
+
+    /// A new shell with extra environment variables (e.g. an agent's name).
+    fn new_pane_env(
+        &mut self,
+        cwd: Option<PathBuf>,
+        more_env: Vec<(String, String)>,
+    ) -> io::Result<PaneId> {
         let id = self.next_id;
         self.next_id += 1;
         let (rows, cols) = (self.screen.height.max(2), self.screen.width.max(2));
+        let mut env = self.opts.extra_env.clone();
+        env.extend(more_env);
         let spawned = Pane::spawn(
             &self.opts.launch,
-            &self.opts.extra_env,
+            &env,
             cwd.as_deref(),
             rows,
             cols,
@@ -822,6 +858,7 @@ impl App {
                     }
                     Ev::Battery(b) => self.on_battery(b),
                     Ev::AgentFiles(list) => self.on_agent_files(list),
+                    Ev::Bus(req, reply) => self.on_bus(req, reply),
                     Ev::TableReady(title, res) => {
                         self.bar_running = None;
                         match *res {
@@ -1231,7 +1268,8 @@ impl App {
                 let agent_done = p
                     .agent
                     .as_mut()
-                    .filter(|a| !matches!(a.status, agents::Status::Exited(_)))
+                    // a paused agent's job stopped; it hasn't ended
+                    .filter(|a| !a.paused && !matches!(a.status, agents::Status::Exited(_)))
                     .map(|a| {
                         a.status = agents::Status::Exited(code);
                         (a.name.clone(), a.files_summary(), a.branch.clone())
@@ -1725,6 +1763,345 @@ impl App {
         v
     }
 
+    fn agent_by_name(&self, name: &str) -> Option<&Agent> {
+        self.panes
+            .values()
+            .filter_map(|p| p.agent.as_ref())
+            .find(|a| a.name == name)
+    }
+
+    fn agent_pane(&self, name: &str) -> Option<PaneId> {
+        self.agent_ids().into_iter().find(|id| {
+            self.panes
+                .get(id)
+                .and_then(|p| p.agent.as_ref())
+                .is_some_and(|a| a.name == name)
+        })
+    }
+
+    /// Record something that happened between agents (sv agent log).
+    fn bus_event(&mut self, text: impl Into<String>) {
+        if self.bus_log.len() >= 300 {
+            self.bus_log.pop_front();
+        }
+        self.bus_log
+            .push_back((crate::data::value::now(), text.into()));
+    }
+
+    /// Finished = exited, or worked on its task and is now waiting for input.
+    fn agent_finished(a: &Agent) -> bool {
+        match a.status {
+            agents::Status::Exited(_) => true,
+            agents::Status::Idle => a.worked && !a.paused,
+            _ => false,
+        }
+    }
+
+    fn agent_summary(&self, id: PaneId) -> serde_json::Value {
+        let Some(p) = self.panes.get(&id) else {
+            return serde_json::Value::Null;
+        };
+        let Some(a) = p.agent.as_ref() else {
+            return serde_json::Value::Null;
+        };
+        let status = if a.paused {
+            "paused".to_string()
+        } else {
+            match &a.status {
+                agents::Status::Starting => "starting".into(),
+                agents::Status::Working => "working".into(),
+                agents::Status::Idle if a.worked => "done".into(),
+                agents::Status::Idle => "idle".into(),
+                agents::Status::NeedsApproval(_) => "needs approval".into(),
+                agents::Status::Exited(Some(0)) | agents::Status::Exited(None) => "exited".into(),
+                agents::Status::Exited(Some(c)) => format!("exited {c}"),
+            }
+        };
+        serde_json::json!({
+            "name": a.name,
+            "parent": a.parent,
+            "depth": a.depth,
+            "cli": a.cli.name(),
+            "status": status,
+            "task": a.task,
+            "branch": a.branch,
+            "folder": p.cwd,
+            "files": a.files.iter().map(|f| f.path.clone()).collect::<Vec<_>>(),
+            "added": a.files.iter().map(|f| f.added).sum::<u64>(),
+            "removed": a.files.iter().map(|f| f.removed).sum::<u64>(),
+            "tokens": a.tokens,
+            "helpers": a.internal,
+        })
+    }
+
+    /// A request from `sv agent …` (any shell or agent inside Shellvisor).
+    fn on_bus(&mut self, req: serde_json::Value, reply: Sender<serde_json::Value>) {
+        use crate::bus::{err, ok};
+        let op = req["op"].as_str().unwrap_or("").to_string();
+        let caller = req["caller"].as_str().map(String::from);
+        let field = |k: &str| req[k].as_str().unwrap_or("").to_string();
+        let name = field("name");
+        let answer = match op.as_str() {
+            "spawn" => self.bus_spawn(&req, caller),
+            "send" => match self.agent_pane(&field("to")) {
+                None => err(format!("no agent called {}", field("to"))),
+                Some(id) => {
+                    let text = field("text");
+                    if let Some(p) = self.panes.get_mut(&id) {
+                        // text, then Enter on its own so the CLI submits it
+                        let _ = p.pane.write(text.as_bytes());
+                        let _ = p.pane.write(b"\r");
+                        if let Some(a) = p.agent.as_mut() {
+                            a.task = text.clone();
+                            a.worked = false;
+                            a.last_output = Instant::now();
+                        }
+                    }
+                    let from = caller.clone().unwrap_or_else(|| "you".into());
+                    self.bus_event(format!(
+                        "{from} → {}: {}",
+                        field("to"),
+                        text.chars().take(80).collect::<String>()
+                    ));
+                    self.dirty = true;
+                    ok(serde_json::json!({}))
+                }
+            },
+            "wait" => match self.agent_pane(&name) {
+                None => err(format!("no agent called {name}")),
+                Some(id) => {
+                    let done = self
+                        .panes
+                        .get(&id)
+                        .and_then(|p| p.agent.as_ref())
+                        .is_some_and(Self::agent_finished);
+                    if done {
+                        ok(serde_json::json!({ "agent": self.agent_summary(id) }))
+                    } else {
+                        self.waiters.push((name, reply));
+                        return;
+                    }
+                }
+            },
+            "tree" => {
+                let rows: Vec<_> = self
+                    .agent_ids()
+                    .into_iter()
+                    .map(|id| self.agent_summary(id))
+                    .collect();
+                ok(serde_json::json!({ "agents": rows }))
+            }
+            "logs" => match self.agent_pane(&name) {
+                None => err(format!("no agent called {name}")),
+                Some(id) => {
+                    let p = &self.panes[&id];
+                    let cols = p.size.1;
+                    let lines: Vec<String> = p
+                        .pane
+                        .screen()
+                        .rows(0, cols)
+                        .map(|r| r.trim_end().to_string())
+                        .collect();
+                    ok(serde_json::json!({ "lines": lines }))
+                }
+            },
+            "pause" | "resume" | "stop" => {
+                self.bus_signal(&op, &name, req["tree"].as_bool().unwrap_or(false))
+            }
+            "log" => {
+                let events: Vec<_> = self
+                    .bus_log
+                    .iter()
+                    .map(|(t, e)| serde_json::json!({ "time": crate::data::value::iso_date(*t), "event": e }))
+                    .collect();
+                ok(serde_json::json!({ "events": events }))
+            }
+            other => err(format!("unknown request `{other}`")),
+        };
+        let _ = reply.send(answer);
+    }
+
+    fn bus_spawn(&mut self, req: &serde_json::Value, caller: Option<String>) -> serde_json::Value {
+        use crate::bus::{err, ok};
+        let field = |k: &str| req[k].as_str().unwrap_or("").trim().to_string();
+        let active: Vec<(String, Option<String>, u8)> = self
+            .panes
+            .values()
+            .filter_map(|p| p.agent.as_ref())
+            .filter(|a| !matches!(a.status, agents::Status::Exited(_)))
+            .map(|a| (a.name.clone(), a.parent.clone(), a.depth))
+            .collect();
+        // Sub-agent when an agent asks; `--top` from an agent starts a sibling tree.
+        let parent = caller.filter(|_| !req["top"].as_bool().unwrap_or(false));
+        let depth = match agents::check_spawn(self.opts.agent_limits, &active, parent.as_deref()) {
+            Ok(d) => d,
+            Err(why) => {
+                let who = parent.clone().unwrap_or_else(|| "you".into());
+                self.bus_event(format!("{who} tried to spawn {} — {why}", field("name")));
+                self.notice(format!("agent spawn {why}"));
+                return err(why);
+            }
+        };
+        let cmd = field("cmd");
+        let cli = if !cmd.is_empty() {
+            Cli::Generic
+        } else if let Some(c) = Cli::parse(&field("cli")) {
+            c
+        } else if field("cli").is_empty() {
+            // same CLI as the parent, else the first one installed
+            parent
+                .as_deref()
+                .and_then(|p| self.agent_by_name(p).map(|a| a.cli))
+                .or_else(|| agents::detect().first().map(|(c, _)| *c))
+                .unwrap_or(Cli::Claude)
+        } else {
+            return err(format!(
+                "unknown agent CLI `{}` — claude, codex, gemini, aider, or --cmd",
+                field("cli")
+            ));
+        };
+        // Children share their parent's folder (worktree); top-level agents get their own.
+        let (folder, worktree) = match parent.as_deref().and_then(|p| self.agent_pane(p)) {
+            Some(pid) => (Some(PathBuf::from(&self.panes[&pid].cwd)), false),
+            None => {
+                let folder = Some(PathBuf::from(field("folder"))).filter(|p| p.is_dir());
+                let want = req["worktree"]
+                    .as_bool()
+                    .unwrap_or(self.opts.agent_worktree);
+                let in_repo = folder
+                    .clone()
+                    .or_else(|| self.focused_cwd())
+                    .as_deref()
+                    .and_then(agents::repo_head)
+                    .is_some();
+                (folder, want && in_repo)
+            }
+        };
+        let parent_info = parent.clone().map(|p| (p, depth));
+        match self.start_agent(
+            parent_info,
+            cli,
+            &field("name"),
+            &field("task"),
+            &cmd,
+            worktree,
+            folder,
+        ) {
+            Ok(name) => ok(serde_json::json!({ "name": name, "parent": parent, "depth": depth })),
+            Err(e) => err(e),
+        }
+    }
+
+    /// pause / resume / stop an agent (and with `tree`, its sub-agents).
+    fn bus_signal(&mut self, op: &str, name: &str, tree: bool) -> serde_json::Value {
+        use crate::bus::{err, ok};
+        if self.agent_pane(name).is_none() {
+            return err(format!("no agent called {name}"));
+        }
+        let mut targets = vec![name.to_string()];
+        if tree {
+            let all: Vec<(String, Option<String>)> = self
+                .panes
+                .values()
+                .filter_map(|p| p.agent.as_ref())
+                .map(|a| (a.name.clone(), a.parent.clone()))
+                .collect();
+            targets.extend(agents::descendants(&all, name));
+        }
+        let mut done = Vec::new();
+        for t in &targets {
+            if self.signal_agent(t, op) {
+                done.push(t.clone());
+            }
+        }
+        self.bus_event(format!("{op} {}", done.join(", ")));
+        self.dirty = true;
+        ok(serde_json::json!({ "agents": done }))
+    }
+
+    /// Send SIGSTOP / SIGCONT / SIGTERM to the agent CLI (its process group).
+    fn signal_agent(&mut self, name: &str, op: &str) -> bool {
+        let Some(id) = self.agent_pane(name) else {
+            return false;
+        };
+        let Some(p) = self.panes.get_mut(&id) else {
+            return false;
+        };
+        let Some(a) = p.agent.as_mut() else {
+            return false;
+        };
+        if matches!(a.status, agents::Status::Exited(_)) {
+            return false;
+        }
+        let Some(pg) = a.paused_pg.or_else(|| p.pane.foreground_job()) else {
+            return false;
+        };
+        match op {
+            "pause" => {
+                if !a.paused {
+                    unsafe { libc::kill(-pg, libc::SIGSTOP) };
+                    a.paused = true;
+                    a.paused_pg = Some(pg);
+                }
+            }
+            "resume" => {
+                if a.paused {
+                    unsafe { libc::kill(-pg, libc::SIGCONT) };
+                    a.paused = false;
+                    a.paused_pg = None;
+                    a.last_output = Instant::now();
+                    // The shell noticed the stop and took the terminal back:
+                    // `fg` hands it to the agent again.
+                    if p.pane.foreground_job().is_none() {
+                        let _ = p.pane.write(b"fg\r");
+                    }
+                }
+            }
+            _ => {
+                unsafe {
+                    libc::kill(-pg, libc::SIGCONT);
+                    libc::kill(-pg, libc::SIGTERM);
+                }
+                if a.paused {
+                    // its command-end was already seen (and ignored) at the pause
+                    a.status = agents::Status::Exited(Some(128 + libc::SIGTERM));
+                }
+                a.paused = false;
+                a.paused_pg = None;
+            }
+        }
+        true
+    }
+
+    /// Answer `sv agent wait` callers whose agent has finished.
+    fn check_waiters(&mut self) {
+        if self.waiters.is_empty() {
+            return;
+        }
+        let waiters = std::mem::take(&mut self.waiters);
+        for (name, reply) in waiters {
+            match self.agent_pane(&name) {
+                None => {
+                    let _ = reply.send(crate::bus::err(format!("agent {name} is gone")));
+                }
+                Some(id) => {
+                    let done = self
+                        .panes
+                        .get(&id)
+                        .and_then(|p| p.agent.as_ref())
+                        .is_some_and(Self::agent_finished);
+                    if done {
+                        let _ = reply.send(crate::bus::ok(
+                            serde_json::json!({ "agent": self.agent_summary(id) }),
+                        ));
+                    } else {
+                        self.waiters.push((name, reply));
+                    }
+                }
+            }
+        }
+    }
+
     pub fn pending_approvals(&self) -> Vec<PaneId> {
         let mut v: Vec<(Instant, PaneId)> = self
             .panes
@@ -1840,8 +2217,8 @@ impl App {
                     f.custom.clone(),
                     f.worktree,
                 );
-                match self.start_agent(cli, &name, &prompt, &custom, wt, None) {
-                    Ok(()) => {
+                match self.start_agent(None, cli, &name, &prompt, &custom, wt, None) {
+                    Ok(_) => {
                         self.modal = Modal::None;
                         return;
                     }
@@ -1872,15 +2249,17 @@ impl App {
 
     /// Start an agent CLI in a new shell (in its own worktree when asked)
     /// and put it in the agents tab.
+    #[allow(clippy::too_many_arguments)] // one call per way an agent can start
     pub fn start_agent(
         &mut self,
+        parent: Option<(String, u8)>,
         cli: Cli,
         name: &str,
         prompt: &str,
         custom: &str,
         worktree: bool,
         folder: Option<PathBuf>,
-    ) -> Result<(), String> {
+    ) -> Result<String, String> {
         let name = if name.is_empty() {
             self.default_agent_name(cli)
         } else {
@@ -1904,6 +2283,15 @@ impl App {
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_default();
         let mut agent = Agent::new(name.clone(), cli, self.agents_made);
+        agent.task = prompt.trim().to_string();
+        if let Some((p, depth)) = &parent {
+            agent.parent = Some(p.clone());
+            agent.depth = *depth;
+            // a sub-agent inherits its parent's "always allow" answers
+            if let Some(pa) = self.agent_by_name(p) {
+                agent.always = pa.always.clone();
+            }
+        }
         let cwd = if worktree {
             let wt = agents::create_worktree(&here, &name)?;
             agent.repo = Some(wt.repo);
@@ -1918,7 +2306,12 @@ impl App {
             }
             here
         };
-        let id = self.new_pane(Some(cwd)).map_err(|e| e.to_string())?;
+        let id = self
+            .new_pane_env(
+                Some(cwd),
+                vec![(crate::bus::ENV_AGENT.to_string(), name.clone())],
+            )
+            .map_err(|e| e.to_string())?;
         self.agents_made += 1;
         let line = cli.launch(prompt, custom);
         if let Some(p) = self.panes.get_mut(&id) {
@@ -1929,7 +2322,11 @@ impl App {
         self.notice(format!(
             "agent {name} started · F9 agents · alt+a approvals"
         ));
-        Ok(())
+        self.bus_event(match &parent {
+            Some((p, d)) => format!("{p} spawned {name} (depth {d})"),
+            None => format!("{name} started ({})", cli.name()),
+        });
+        Ok(name)
     }
 
     /// Add a pane to the agents tab (creating it), as one more column.
@@ -2119,7 +2516,9 @@ impl App {
                 Some(serde_json::json!({
                     "name": a.name,
                     "cli": a.cli.name(),
-                    "status": a.status.label().trim_start_matches(|c: char| !c.is_alphanumeric()).to_string(),
+                    "status": if a.paused { "paused".to_string() } else { a.status.label().trim_start_matches(|c: char| !c.is_alphanumeric()).to_string() },
+                    "parent": a.parent.clone().unwrap_or_default(),
+                    "depth": a.depth,
                     "branch": a.branch.clone().unwrap_or_default(),
                     "files": a.files.len(),
                     "added": add,
@@ -2170,6 +2569,7 @@ impl App {
 
     /// Idle detection, trailing approval checks, and git change polling.
     fn tick_agents(&mut self) {
+        self.check_waiters();
         let ids = self.agent_ids();
         if ids.is_empty() {
             if !self.agents_json.is_empty() && self.agents_json != "[]" {
@@ -2189,11 +2589,12 @@ impl App {
                     let _ = p.pane.write(text.as_bytes());
                 }
                 if let Some(a) = p.agent.as_mut() {
-                    if matches!(a.status, agents::Status::Working)
-                        && a.last_output.elapsed() > agents::IDLE_AFTER
-                    {
-                        a.status = agents::Status::Idle;
-                        self.dirty = true;
+                    if matches!(a.status, agents::Status::Working) {
+                        a.worked = true;
+                        if a.last_output.elapsed() > agents::IDLE_AFTER {
+                            a.status = agents::Status::Idle;
+                            self.dirty = true;
+                        }
                     }
                 }
             }
@@ -2231,17 +2632,22 @@ impl App {
                 .into_iter()
                 .map(|(id, dir, base, cli, since)| {
                     let files = base.map(|b| agents::changes(&dir, &b)).unwrap_or_default();
-                    (id, files, agents::tokens(cli, &dir, since))
+                    let (tokens, helpers) = agents::usage(cli, &dir, since);
+                    (id, files, tokens, helpers)
                 })
                 .collect();
             let _ = tx.send(Ev::AgentFiles(out));
         });
     }
 
-    fn on_agent_files(&mut self, list: Vec<(PaneId, Vec<FileChange>, Option<u64>)>) {
+    fn on_agent_files(&mut self, list: Vec<AgentReport>) {
         self.agent_files_busy = false;
-        for (id, files, tokens) in list {
+        for (id, files, tokens, helpers) in list {
             if let Some(a) = self.panes.get_mut(&id).and_then(|p| p.agent.as_mut()) {
+                if a.internal != helpers {
+                    a.internal = helpers;
+                    self.dirty = true;
+                }
                 if tokens.is_some() && a.tokens != tokens {
                     a.tokens = tokens;
                     self.dirty = true;
@@ -2425,7 +2831,9 @@ impl App {
                 let wt = *mode == "worktree" && self.opts.agent_worktree;
                 // no repo → just run it here
                 let wt = wt && folder.as_deref().and_then(agents::repo_head).is_some();
-                if let Err(e) = self.start_agent(cli, &name, &unb(prompt), &unb(cmd), wt, folder) {
+                if let Err(e) =
+                    self.start_agent(None, cli, &name, &unb(prompt), &unb(cmd), wt, folder)
+                {
                     self.notice(format!("sv agent: {e}"));
                 }
                 Ok(())

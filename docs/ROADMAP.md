@@ -1,6 +1,6 @@
 # Shellvisor — Roadmap & Phases
 
-Status: v0.7 · 2026-11-04 · **P0 – P4 done** · see [ARCHITECTURE.md](ARCHITECTURE.md)
+Status: v0.8 · 2026-11-04 · **P0 – P4 done, P5a done** · see [ARCHITECTURE.md](ARCHITECTURE.md)
 
 Each phase ends with something you can **run and use daily**, and must stay inside the performance budget before the next phase starts. Sizes are relative (S ≈ a few days, M ≈ 1–2 weeks, L ≈ 2–4 weeks of focused work) — not promises.
 
@@ -127,6 +127,9 @@ Deliverables
 - Timeline view; message-bus log.
 
 Exit criteria: the board 16 team.yaml runs end-to-end; over-limit spawns are refused with a reason; budget cap pauses everything.
+
+**P5a done:** agent bus (unix socket in the state folder, 0700, `$SHELLVISOR_SOCK`; agents get `$SHELLVISOR_AGENT` so their requests say who asks). `sv agent spawn | send | wait | tree [--json] | logs [-f] | pause | resume | stop [--tree] | log`. Sub-agents share the parent's folder/worktree and its "always" approvals; limits (`agents.limits`: max_depth 3, max_agents 10, max_children 3) refuse with a reason (exit 3). Pause = SIGSTOP of the agent's job (resumed with SIGCONT + `fg`, since the shell takes the terminal back). Claude Code's own Task helpers appear as `+N helpers`. Column titles show `name ← parent` and ⏸ paused. 112 unit + 34 end-to-end tests (a fake lead agent spawns a helper, is refused a second, waits; tree, send, log, pause/resume, stop --tree from the shell).
+Still to do: `team.yaml` + `sv agent run` and the token budget (P5b); auto-plan, timeline, bus-log view (P5c).
 
 ---
 

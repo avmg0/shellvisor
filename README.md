@@ -121,6 +121,22 @@ sv connect                                                     # installed CLIs,
 
 Each agent gets a column in the agents tab (`F9`; `shift+F9` opens the New agent form). In a git repository it works in its own worktree and branch (`.shellvisor/worktrees/<name>`, branch `agent/<name>`), so agents never edit the same checkout — or yours. The column title shows its status (working ⠋, waiting for you, ⚑ needs approval, done), the files it changed with +/− lines, and tokens used (Claude Code and Codex, read from their own session logs). Type in a column to message that agent. When two agents change the same file you get a warning, and the files pane marks files agents have touched (◆ name).
 
+### Agents that start agents
+
+Every shell inside Shellvisor can reach it over a private socket, so an agent (or you, or a script) can run a team:
+
+```sh
+sv agent spawn --name tests 'write tests for the alerts endpoint'   # from inside an agent: a sub-agent
+sv agent send tests 'cover the 429 case too'                         # type a message into it
+sv agent wait tests                                                  # until it has finished its task
+sv agent tree                                                        # every agent, under its parent
+sv agent logs tests -f                                               # follow what its screen shows
+sv agent pause|resume|stop api --tree                                # an agent and all its sub-agents
+sv agent log                                                         # who spawned and messaged whom
+```
+
+A sub-agent works in its parent's folder (and worktree) and inherits the approvals its parent set to "always". Trees are limited — by default 3 levels deep, 10 agents running, 3 sub-agents per agent (`agents.limits` in config.yaml); a spawn over a limit is refused with the reason, which the asking agent sees. When Claude Code runs its own helper agents (its Task tool), the column title shows them as `+N helpers` and `sv agent tree` lists them under it.
+
 When agents ask for permission, `alt+a` lists every waiting prompt; `y` / `n` / `a` answers it — Shellvisor types the right key for that CLI. Already running an agent in a normal tab? `sv agent attach` turns that split into an agent column.
 
 ## Configuration
@@ -139,6 +155,10 @@ agents:
   worktree: true        # each new agent works in its own git worktree + branch
   approvals:            # answer agents' permission prompts for you: auto | ask
     test: auto          # read edit test lint install network push delete command
+  limits:               # how big agent trees may grow
+    max_depth: 3        # sub-agents of sub-agents …
+    max_agents: 10      # running at once
+    max_children: 3     # sub-agents per agent
 keys:                   # change or turn off any shortcut (F1 lists them all)
   new_tab: alt+n
   rename_tab: none      # frees alt+r for your shell

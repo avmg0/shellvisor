@@ -13,6 +13,10 @@
 //!   worktree: true        # each new agent works in its own git worktree + branch
 //!   approvals:            # answer agents' permission prompts for you: auto | ask
 //!     test: auto          # read edit test lint install network push delete command
+//!   limits:               # agent trees (sv agent spawn): depth, total, sub-agents each
+//!     max_depth: 3
+//!     max_agents: 10
+//!     max_children: 3
 //! keys:                   # change or turn off shortcuts (see `F1` for all actions)
 //!   new_tab: alt+n        # one key…
 //!   next_layout: [f7]     # …or a list
@@ -62,6 +66,37 @@ pub struct AgentsConfig {
     pub worktree: bool,
     /// action kind → "auto" or "ask"
     pub approvals: HashMap<String, String>,
+    pub limits: LimitsConfig,
+}
+
+/// `agents.limits` — how big agent trees may grow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LimitsConfig {
+    pub max_depth: u8,
+    pub max_agents: usize,
+    pub max_children: usize,
+}
+
+impl Default for LimitsConfig {
+    fn default() -> Self {
+        let d = crate::agents::Limits::default();
+        LimitsConfig {
+            max_depth: d.max_depth,
+            max_agents: d.max_agents,
+            max_children: d.max_children,
+        }
+    }
+}
+
+impl LimitsConfig {
+    pub fn get(self) -> crate::agents::Limits {
+        crate::agents::Limits {
+            max_depth: self.max_depth.max(1),
+            max_agents: self.max_agents.max(1),
+            max_children: self.max_children,
+        }
+    }
 }
 
 impl Default for AgentsConfig {
@@ -69,6 +104,7 @@ impl Default for AgentsConfig {
         AgentsConfig {
             worktree: true,
             approvals: HashMap::new(),
+            limits: LimitsConfig::default(),
         }
     }
 }
