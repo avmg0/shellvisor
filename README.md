@@ -178,6 +178,17 @@ sv agent stop --all
 
 Mistakes are reported before anything starts, with the agent and field (`agents[2] (tests): start after:db — no other agent called db`). Members listed in someone's `can_spawn` start when that agent spawns them; an agent may only start the names in its `can_spawn`, or any sub-agent if it has `max_children`. The budget counts tokens, not money — Shellvisor reads them from Claude Code and Codex session logs, and other agents can report theirs with `sv agent usage <tokens>`.
 
+### Agent board (alt+g)
+
+Four views over everything agents are doing (`tab` switches; `sv agent board tree|timeline|log` opens one):
+
+- **Plan** — type a goal (or run `sv agent plan 'add price alerts'`). A planner reads the repository and proposes tasks in stages, with scopes, estimates in tokens and overlap risks. Edit a title (`e`), reassign the agent CLI (`a`), drop a task (`x`), set how many run at once (`+`/`-`) and a token budget (`b`), re-plan (`r`). `⏎` dispatches everything; `s` runs one stage at a time (`⏎` releases the next). Each task gets its own worktree and branch; once all are done a reviewer agent compares the branches and reports.
+- **Tree** — who spawned whom, status, tokens and files, totals per branch, and the selected agent's task and latest output. `p` pauses or resumes a branch, `k` stops it, `m` merges an agent's branch into your checkout, `⏎` jumps to its column.
+- **Timeline** — every agent over time: working, waiting, approval, paused, done.
+- **Log** — spawns, messages, events, refusals and budget stops.
+
+The planner is `claude -p`, `codex exec -` or `gemini`, whichever is installed; set `agents.planner` in config.yaml to use another command (it gets the prompt on stdin and prints JSON).
+
 When agents ask for permission, `alt+a` lists every waiting prompt; `y` / `n` / `a` answers it — Shellvisor types the right key for that CLI. Already running an agent in a normal tab? `sv agent attach` turns that split into an agent column.
 
 ## Configuration
@@ -200,6 +211,7 @@ agents:
     max_depth: 3        # sub-agents of sub-agents …
     max_agents: 10      # running at once
     max_children: 3     # sub-agents per agent
+  planner: claude -p    # turns a goal into a task plan (alt+g → Plan)
 keys:                   # change or turn off any shortcut (F1 lists them all)
   new_tab: alt+n
   rename_tab: none      # frees alt+r for your shell

@@ -1,6 +1,6 @@
 # Shellvisor — Roadmap & Phases
 
-Status: v0.8 · 2026-11-04 · **P0 – P4 done, P5a–b done** · see [ARCHITECTURE.md](ARCHITECTURE.md)
+Status: v0.8 · 2026-11-04 · **P0 – P5 done** · see [ARCHITECTURE.md](ARCHITECTURE.md)
 
 Each phase ends with something you can **run and use daily**, and must stay inside the performance budget before the next phase starts. Sizes are relative (S ≈ a few days, M ≈ 1–2 weeks, L ≈ 2–4 weeks of focused work) — not promises.
 
@@ -11,7 +11,7 @@ Each phase ends with something you can **run and use daily**, and must stay insi
 | **P2** ✅ | Core panes | L | the default 4-pane workspace (files, stats, activity) | 1, 6, 9, 10 |
 | **P3** ✅ | Data | M | data-flow view and `sv` structured commands | 2, 13 |
 | **P4** ✅ | Agents I | L | run several coding agents side by side, manually | 5, 8, 16 |
-| **P5** | Agents II | L | sub-agents, team.yaml, auto-plan | 7, 15, 16 |
+| **P5** ✅ | Agents II | L | sub-agents, team.yaml, auto-plan | 7, 15, 16 |
 | **P6** | Polish & ship | M | the rest of the file views, layout editor, packaging | 4, 9, 10, 11 |
 
 ---
@@ -116,7 +116,7 @@ Exit criteria: 3 agents on one repo for an hour without UI lag; Shellvisor's own
 
 ---
 
-## P5 · Agents II — teams & sub-agents
+## P5 · Agents II — teams & sub-agents — ✅ done 2026-11-04
 **Goal:** orchestration.
 
 Deliverables
@@ -131,7 +131,10 @@ Exit criteria: the board 16 team.yaml runs end-to-end; over-limit spawns are ref
 **P5a done:** agent bus (unix socket in the state folder, 0700, `$SHELLVISOR_SOCK`; agents get `$SHELLVISOR_AGENT` so their requests say who asks). `sv agent spawn | send | wait | tree [--json] | logs [-f] | pause | resume | stop [--tree] | log`. Sub-agents share the parent's folder/worktree and its "always" approvals; limits (`agents.limits`: max_depth 3, max_agents 10, max_children 3) refuse with a reason (exit 3). Pause = SIGSTOP of the agent's job (resumed with SIGCONT + `fg`, since the shell takes the terminal back). Claude Code's own Task helpers appear as `+N helpers`. Column titles show `name ← parent` and ⏸ paused. 112 unit + 34 end-to-end tests (a fake lead agent spawns a helper, is refused a second, waits; tree, send, log, pause/resume, stop --tree from the shell).
 
 **P5b done:** `team.yaml` — team (name, budget_tokens, max_agents, max_depth), agents (id, cli or cmd, role orchestrator/worker, task, can_spawn, worktree, max_children, approve, mcp, start now / after:<id> / spawned), `on:` rules (`<agent>.<event>` → send text with {log} {agent} {event} {goal}). Checked in `sv` before anything starts, with the agent and field in every error; `budget_usd` is refused with the reason (Shellvisor sees tokens, not prices); missing CLIs and unconfigured MCP servers are noted. `sv agent run [file] "goal" [--dry-run]` · `--init` starter file · `emit` · `usage` · `budget [tokens]` · `pause|resume|stop --all`. The orchestrator gets the goal plus who it can start; members keep their team settings when spawned; events started / done / failed / exited / needs_approval come from status changes. Over budget → every team agent pauses; raising the budget resumes them. Command agents get their task in `$SHELLVISOR_TASK`. 114 unit + 35 end-to-end tests (the board 16 team with scripted agents: validation error, dry run, lead spawns api and is refused db, tests starts after api, tests.failed reaches api, the budget pauses all, raising it resumes, stop --all ends the team).
-Still to do (P5c): auto-plan, timeline view, bus-log view.
+
+**P5c done — P5 complete:** agent board (`alt+g`, leader `e`, `sv agent board`, `sv agent plan "goal"`). Plan: the planner CLI (claude -p / codex exec - / gemini, or `agents.planner`) gets the goal on stdin and returns a JSON task graph; tasks are staged by their deps, cycles refused, scopes checked for overlap; edit / reassign / drop, parallel limit, token budget, dispatch all or step by step, re-plan. Dispatch turns the plan into a team (one worktree + branch per task, `after:` deps, a review agent after everything) and the team scheduler keeps at most N busy. Tree: branches with tokens / files totals, details and live output of the selected agent, pause / stop / merge a branch. Timeline from each agent's status history. Log view of the bus. `team.yaml` `start: after:a,b` takes several agents. Measured: 2.34 MB binary. 117 unit + 36 end-to-end tests (a scripted planner and workers: plan, edit, dispatch with 2 stages, review, tree / timeline / log, merge into main).
+
+*Changes from plan:* estimates and budgets are tokens, never dollars. The orchestrator's review runs as an agent that reports; merging stays your call (Tree, `m`).
 
 ---
 

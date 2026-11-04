@@ -12,6 +12,7 @@ pub const NAME_LOWER: &str = "shellvisor";
 mod activity;
 mod agents;
 mod app;
+mod board;
 mod bus;
 mod cli;
 mod config;
@@ -197,6 +198,7 @@ fn main() {
         low_power: cfg.low_power,
         agent_worktree: cfg.agents.worktree,
         agent_limits: cfg.agents.limits.get(),
+        planner: cfg.agents.planner.clone(),
         bus_path,
         auto_approve,
         session_path: paths::state_dir().join("session.yaml"),

@@ -67,6 +67,9 @@ pub struct AgentsConfig {
     /// action kind → "auto" or "ask"
     pub approvals: HashMap<String, String>,
     pub limits: LimitsConfig,
+    /// Command that turns a goal into a plan (prompt on stdin, JSON out).
+    /// Default: `claude -p`, `codex exec -` or `gemini`, whichever is installed.
+    pub planner: Option<String>,
 }
 
 /// `agents.limits` — how big agent trees may grow.
@@ -105,6 +108,7 @@ impl Default for AgentsConfig {
             worktree: true,
             approvals: HashMap::new(),
             limits: LimitsConfig::default(),
+            planner: None,
         }
     }
 }

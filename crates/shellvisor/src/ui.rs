@@ -194,6 +194,15 @@ pub fn draw(f: &mut Frame, app: &App) {
         t.render(inner, f.buffer_mut());
     }
 
+    if let Some(b) = &app.board {
+        let (_, content, _) = app.regions();
+        f.render_widget(Clear, content);
+        let block = pane_block(" ◆ agent board ".to_string(), true);
+        let inner = block.inner(content);
+        f.render_widget(block, content);
+        b.render(inner, f.buffer_mut(), &app.board_snapshot());
+    }
+
     if let Some((msg, _)) = &app.notice {
         let (_, content, _) = app.regions();
         badge(f, content, if full { 1 } else { 0 }, &format!(" {msg} "));
@@ -296,7 +305,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Modal::None => {}
     }
 
-    if !matches!(app.modal, Modal::Help) && app.table.is_none() {
+    if !matches!(app.modal, Modal::Help) && app.table.is_none() && app.board.is_none() {
         if let Some((_, _, inner)) = app.visible().into_iter().find(|(id, _, _)| *id == focused) {
             if let Some((x, y)) = app.panes.get(&focused).and_then(|p| p.pane.cursor()) {
                 if x < inner.width && y < inner.height {

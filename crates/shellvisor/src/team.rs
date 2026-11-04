@@ -106,6 +106,10 @@ pub struct Member {
     pub approve: Vec<String>,
     pub mcp: Vec<String>,
     pub start: Start,
+    /// Stage in an auto-plan (1, 2, …); 0 in team.yaml. Step-by-step
+    /// dispatch starts one stage at a time.
+    #[serde(default)]
+    pub stage: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -114,7 +118,7 @@ pub enum Start {
     /// When the team starts.
     Now,
     /// When another member has finished.
-    After(String),
+    After(Vec<String>),
     /// Only when an agent (or you) runs `sv agent spawn --name <id>`.
     Spawned,
 }
@@ -268,15 +272,29 @@ pub fn parse(text: &str) -> Result<Team, String> {
             Some("now") => Some(Start::Now),
             Some("spawned" | "on_spawn") => Some(Start::Spawned),
             Some(s) => match s.strip_prefix("after:").map(str::trim) {
-                Some(dep) if ids.iter().any(|x| x == dep) && dep != a.id => {
-                    Some(Start::After(dep.to_string()))
+                Some(list) => {
+                    let deps: Vec<String> = list
+                        .split(',')
+                        .map(|d| d.trim().to_string())
+                        .filter(|d| !d.is_empty())
+                        .collect();
+                    if deps.is_empty() {
+                        return Err(format!("{at}: start after: — after which agent?"));
+                    }
+                    for dep in &deps {
+                        if !ids.contains(dep) || *dep == a.id {
+                            return Err(format!(
+                                "{at}: start after:{dep} — no other agent called {dep}"
+                            ));
+                        }
+                    }
+                    Some(Start::After(deps))
                 }
-                Some(dep) => {
+                None => {
                     return Err(format!(
-                        "{at}: start after:{dep} — no other agent called {dep}"
+                        "{at}: start `{s}` — now, after:<id>[,<id>…] or spawned"
                     ));
                 }
-                None => return Err(format!("{at}: start `{s}` — now, after:<id> or spawned")),
             },
         };
         agents.push((
@@ -292,6 +310,7 @@ pub fn parse(text: &str) -> Result<Team, String> {
                 approve: a.approve.clone(),
                 mcp: a.mcp.clone(),
                 start: Start::Now,
+                stage: 0,
             },
             start,
         ));
@@ -315,25 +334,22 @@ pub fn parse(text: &str) -> Result<Team, String> {
             m
         })
         .collect();
-    // after: chains must reach something that starts
-    for m in &members {
-        let mut seen = vec![m.id.clone()];
-        let mut cur = m.start.clone();
-        while let Start::After(dep) = cur {
-            if seen.contains(&dep) {
-                return Err(format!(
-                    "agents ({}): start after: goes round in a circle ({} → {dep})",
-                    m.id,
-                    seen.join(" → ")
-                ));
-            }
-            seen.push(dep.clone());
-            cur = members
-                .iter()
-                .find(|x| x.id == dep)
-                .map(|x| x.start.clone())
-                .unwrap_or(Start::Now);
-        }
+    // after: chains must not go round in a circle
+    let graph: Vec<(String, Vec<String>)> = members
+        .iter()
+        .map(|m| {
+            let deps = match &m.start {
+                Start::After(d) => d.clone(),
+                _ => Vec::new(),
+            };
+            (m.id.clone(), deps)
+        })
+        .collect();
+    if let Some(path) = find_cycle(&graph) {
+        return Err(format!(
+            "agents: start after: goes round in a circle ({})",
+            path.join(" → ")
+        ));
     }
     if !members.iter().any(|m| m.start == Start::Now) {
         return Err(
@@ -380,6 +396,43 @@ pub fn parse(text: &str) -> Result<Team, String> {
         agents: members,
         rules,
     })
+}
+
+/// A dependency cycle, as the ids around it (first repeated at the end).
+pub fn find_cycle(graph: &[(String, Vec<String>)]) -> Option<Vec<String>> {
+    fn visit(
+        g: &[(String, Vec<String>)],
+        id: &str,
+        path: &mut Vec<String>,
+        done: &mut Vec<String>,
+    ) -> Option<Vec<String>> {
+        if let Some(i) = path.iter().position(|p| p == id) {
+            let mut c = path[i..].to_vec();
+            c.push(id.to_string());
+            return Some(c);
+        }
+        if done.iter().any(|d| d == id) {
+            return None;
+        }
+        path.push(id.to_string());
+        if let Some((_, deps)) = g.iter().find(|(n, _)| n == id) {
+            for d in deps {
+                if let Some(c) = visit(g, d, path, done) {
+                    return Some(c);
+                }
+            }
+        }
+        path.pop();
+        done.push(id.to_string());
+        None
+    }
+    let mut done = Vec::new();
+    for (id, _) in graph {
+        if let Some(c) = visit(graph, id, &mut Vec::new(), &mut done) {
+            return Some(c);
+        }
+    }
+    None
 }
 
 fn budget_usd_error() -> String {
@@ -471,7 +524,7 @@ on:
         assert_eq!(api.start, Start::Spawned);
         assert!(api.may_spawn("anything").is_ok());
         let tests = t.member("tests").unwrap();
-        assert_eq!(tests.start, Start::After("api".into()));
+        assert_eq!(tests.start, Start::After(vec!["api".into()]));
         assert!(
             tests
                 .may_spawn("x")
@@ -514,11 +567,7 @@ on:
             "start: after:db",
             "no other agent called db",
         );
-        bad(
-            "start: after:api",
-            "start: later",
-            "now, after:<id> or spawned",
-        );
+        bad("start: after:api", "start: later", "now, after:<id>");
         bad(
             "approve: [install, network]",
             "approve: [install, nuke]",

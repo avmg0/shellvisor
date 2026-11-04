@@ -205,6 +205,8 @@ key ─▶ global keys (ctrl+q, alt+`, F1, F5…)   — always win, even inside 
 - **Isolation:** one `git worktree` + branch per top-level agent; children share their parent's.
 - **Approvals:** policy from team.yaml (auto / ask / never per action class: read, test, lint, install, network, push, delete).
 - **Teams:** `team.yaml` is parsed and checked by `sv` (team.rs), sent over the bus as JSON; the app keeps one running team: members start now, after another is done, or when spawned; status changes become events (started, done, failed, exited, needs_approval; `sv agent emit` adds others) that drive `on:` rules and `after:` starts.
+- **Auto-plan:** board.rs asks the planner CLI (prompt on stdin) for `{"tasks":[…]}`, stages tasks by deps, and turns the edited plan into a team (one member per task with `after:` deps, plus a review member). `TeamRun.parallel` caps busy members; step mode releases stages one at a time.
+- **Board:** an overlay drawn from a snapshot of the agents (status history for the timeline, last screen lines for details); merges run `git merge --no-ff agent/<name>` on a short thread.
 - **Budget:** tokens per agent (CLI session logs, or `sv agent usage`), summed per team; pause-all at the cap, resume when raised. No money: prices change and the logs only have tokens.
 - **Auto-plan:** an orchestrator agent proposes a staged task graph → user edits → dispatch.
 - **Connections:** detects installed agent CLIs and login state, configured MCP servers, ssh hosts; API keys in macOS Keychain, never displayed or logged.

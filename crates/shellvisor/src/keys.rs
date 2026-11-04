@@ -108,6 +108,7 @@ pub enum Cmd {
     Agents,
     NewAgent,
     Approvals,
+    AgentBoard,
     AttachAgent,
 }
 
@@ -276,6 +277,12 @@ pub const ACTIONS: &[(&str, Cmd, &[&str], &str)] = &[
         Cmd::Approvals,
         &["alt+a"],
         "agents waiting for approval: y allow · n deny · a always",
+    ),
+    (
+        "agent_board",
+        Cmd::AgentBoard,
+        &["alt+g"],
+        "agent board: plan a team from a goal · tree · timeline · log",
     ),
     (
         "attach_agent",
@@ -544,6 +551,7 @@ pub fn after_leader(key: &[u8]) -> Option<Cmd> {
         b"a" => Approvals,
         b"+" | b"A" => NewAgent,
         b"g" => Agents,
+        b"e" => AgentBoard,
         b"\x1b[A" => Focus(Dir::Up),
         b"\x1b[B" => Focus(Dir::Down),
         b"\x1b[C" => Focus(Dir::Right),
@@ -553,7 +561,7 @@ pub fn after_leader(key: &[u8]) -> Option<Cmd> {
     })
 }
 
-pub const LEADER_HINT: &str = " ctrl+] → t tab · w close tab · x close split · \\ split │ · - split ─ · o next split · z zoom · l layout · m menu · f files · s system · d flow · g agents · + new agent · a approvals · ; command bar · v table · b basic view · r rename · 1-9 tab · ? help · ctrl+] send ctrl+] ";
+pub const LEADER_HINT: &str = " ctrl+] → t tab · w close tab · x close split · \\ split │ · - split ─ · o next split · z zoom · l layout · m menu · f files · s system · d flow · g agents · + new agent · a approvals · e agent board · ; command bar · v table · b basic view · r rename · 1-9 tab · ? help · ctrl+] send ctrl+] ";
 
 /// On macOS, Option+key types these characters unless the terminal is set to
 /// send Option as Alt/Meta. Seeing one alone means alt shortcuts can't work.

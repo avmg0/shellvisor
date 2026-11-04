@@ -68,6 +68,7 @@ pub struct Options {
     /// New agents get their own git worktree.
     pub agent_worktree: bool,
     pub agent_limits: agents::Limits,
+    pub planner: Option<String>,
     /// The agent message bus socket (`sv agent …`).
     pub bus_path: PathBuf,
     /// Approval kinds answered automatically (config agents.approvals).
@@ -138,6 +139,41 @@ struct TeamRun {
     /// Over budget: these agents were paused for it.
     capped: Option<Vec<String>>,
     warned: bool,
+    /// Members that have finished their task.
+    done: Vec<String>,
+    /// Members running at once (auto-plan dispatch); None: no limit.
+    parallel: Option<usize>,
+    /// Step by step: members of stages up to this one may start.
+    step: Option<u32>,
+}
+
+/// Ask the planner: the prompt on its stdin, its stdout back.
+fn run_planner(cmd: &str, prompt: &str, folder: &std::path::Path) -> Result<String, String> {
+    use std::io::Write as _;
+    let mut child = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .current_dir(folder)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("couldn't run the planner `{cmd}`: {e}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(prompt.as_bytes());
+    }
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    if !out.status.success() && !text.contains('{') {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let line = err
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("no output");
+        return Err(format!("the planner `{cmd}` failed: {line}"));
+    }
+    Ok(text)
 }
 
 /// One agent's files changed, tokens, and the CLI's own helper agents.
@@ -153,6 +189,9 @@ enum Ev {
     TableReady(String, Box<Result<Data, String>>),
     /// Files each agent has changed (from git).
     AgentFiles(Vec<AgentReport>),
+    /// The planner's answer: (run, its output or why it failed).
+    Plan(u64, Result<String, String>),
+    Notice(String),
     /// A request on the agent bus, and where its reply goes.
     Bus(serde_json::Value, Sender<serde_json::Value>),
     Resize,
@@ -282,6 +321,10 @@ pub struct App {
     waiters: Vec<(String, Sender<serde_json::Value>)>,
     /// The team started with `sv agent run` (one at a time).
     team: Option<TeamRun>,
+    /// The agent board (alt+g).
+    pub board: Option<crate::board::Board>,
+    /// Kept while the board is closed, so the plan survives.
+    plan_kept: Option<crate::board::Plan>,
     /// What happened between agents (sv agent log): (unix time, text).
     pub bus_log: std::collections::VecDeque<(i64, String)>,
     pub low_power: bool,
@@ -364,6 +407,8 @@ pub fn run(opts: Options) -> io::Result<i32> {
         agents_json: String::new(),
         waiters: Vec::new(),
         team: None,
+        board: None,
+        plan_kept: None,
         bus_log: std::collections::VecDeque::new(),
         low_power,
         power_manual: !auto_power,
@@ -874,6 +919,8 @@ impl App {
                     Ev::Battery(b) => self.on_battery(b),
                     Ev::AgentFiles(list) => self.on_agent_files(list),
                     Ev::Bus(req, reply) => self.on_bus(req, reply),
+                    Ev::Plan(run, out) => self.on_plan(run, out),
+                    Ev::Notice(msg) => self.notice(msg),
                     Ev::TableReady(title, res) => {
                         self.bar_running = None;
                         match *res {
@@ -1406,6 +1453,10 @@ impl App {
     fn on_input(&mut self, bytes: &[u8]) -> io::Result<()> {
         let mut forward: Vec<u8> = Vec::new();
         for key in keys::tokenize(bytes) {
+            if self.board.is_some() && self.modal == Modal::None {
+                self.board_key(key);
+                continue;
+            }
             if self.table.is_some() && self.modal == Modal::None {
                 self.table_key(key)?;
                 if self.quit.is_some() {
@@ -2086,35 +2137,49 @@ impl App {
             .or_else(|| self.focused_cwd())
             .unwrap_or_default();
         let goal = req["goal"].as_str().unwrap_or("").trim().to_string();
-        let first: Vec<String> = team
-            .agents
-            .iter()
-            .filter(|m| m.start == crate::team::Start::Now)
-            .map(|m| m.id.clone())
-            .collect();
+        match self.begin_team(team, goal, folder, None, None) {
+            Ok((tname, started)) => ok(serde_json::json!({ "team": tname, "started": started })),
+            Err(e) => err(e),
+        }
+    }
+
+    /// Start a team: everything that can start now (team.yaml, or a dispatched plan).
+    fn begin_team(
+        &mut self,
+        team: crate::team::Team,
+        goal: String,
+        folder: PathBuf,
+        parallel: Option<usize>,
+        step: Option<u32>,
+    ) -> Result<(String, Vec<String>), String> {
         let tname = team.name.clone();
         let budget = team.budget_tokens;
         self.team = Some(TeamRun {
             team,
-            goal: goal.clone(),
+            goal,
             folder,
             started: Vec::new(),
             capped: None,
             warned: false,
+            done: Vec::new(),
+            parallel,
+            step,
         });
-        let mut started = Vec::new();
-        for id in first {
-            match self.start_member(&id, None, "") {
-                Ok(n) => started.push(n),
-                Err(e) => {
-                    for n in &started {
-                        self.signal_agent(n, "stop");
-                    }
-                    self.team = None;
-                    return err(format!("{id}: {e}"));
+        let started = match self.schedule() {
+            Ok(s) => s,
+            Err(e) => {
+                let names = self
+                    .team
+                    .as_ref()
+                    .map(|t| t.started.clone())
+                    .unwrap_or_default();
+                for n in &names {
+                    self.signal_agent(n, "stop");
                 }
+                self.team = None;
+                return Err(e);
             }
-        }
+        };
         self.bus_event(format!(
             "team {tname} started: {}{}",
             started.join(", "),
@@ -2122,7 +2187,50 @@ impl App {
                 .map(|b| format!(" · budget {}", agents::fmt_tokens(b)))
                 .unwrap_or_default()
         ));
-        ok(serde_json::json!({ "team": tname, "started": started }))
+        Ok((tname, started))
+    }
+
+    /// Members ready to start: `now`, or every `after:` agent done — within the
+    /// team's parallel limit and released stage. Returns who started.
+    fn schedule(&mut self) -> Result<Vec<String>, String> {
+        let mut started = Vec::new();
+        while let Some(tr) = &self.team {
+            if tr.capped.is_some() {
+                break;
+            }
+            // busy members: running and not finished with their task
+            let running = self
+                .team_agents(&tr.team.name)
+                .iter()
+                .filter(|(n, r)| *r && tr.team.member(n).is_some() && !tr.done.contains(n))
+                .count();
+            if tr.parallel.is_some_and(|p| running >= p) {
+                break;
+            }
+            let next = tr.team.agents.iter().find(|m| {
+                !tr.started.contains(&m.id)
+                    && tr.step.is_none_or(|s| m.stage <= s)
+                    && match &m.start {
+                        crate::team::Start::Now => true,
+                        crate::team::Start::After(deps) => deps.iter().all(|d| tr.done.contains(d)),
+                        crate::team::Start::Spawned => false,
+                    }
+            });
+            let Some(id) = next.map(|m| m.id.clone()) else {
+                break;
+            };
+            match self.start_member(&id, None, "") {
+                Ok(n) => started.push(n),
+                Err(e) => {
+                    if let Some(tr) = self.team.as_mut() {
+                        tr.started.push(id.clone()); // don't retry forever
+                    }
+                    self.bus_event(format!("couldn't start {id}: {e}"));
+                    return Err(format!("{id}: {e}"));
+                }
+            }
+        }
+        Ok(started)
     }
 
     /// (name, still running) for every agent of a team.
@@ -2236,6 +2344,7 @@ impl App {
                 }
             ));
             self.check_budget();
+            let _ = self.schedule();
         }
         let mut v = self.team_summary();
         v["resumed"] = serde_json::json!(resumed);
@@ -2294,21 +2403,12 @@ impl App {
                 )
             })
             .collect();
-        let after: Vec<String> = if event == "done" {
-            tr.team
-                .agents
-                .iter()
-                .filter(|m| m.start == crate::team::Start::After(agent.to_string()))
-                .filter(|m| !tr.started.contains(&m.id))
-                .map(|m| m.id.clone())
-                .collect()
-        } else {
-            Vec::new()
-        };
-        for id in after {
-            if let Err(e) = self.start_member(&id, None, "") {
-                self.bus_event(format!("couldn't start {id} after {agent}: {e}"));
+        if event == "done" && tr.team.member(agent).is_some() && !tr.done.iter().any(|d| d == agent)
+        {
+            if let Some(tr) = self.team.as_mut() {
+                tr.done.push(agent.to_string());
             }
+            let _ = self.schedule();
         }
         let n = rules.len();
         let from = format!("{agent}.{event}");
@@ -2362,6 +2462,7 @@ impl App {
                 continue;
             }
             let old = std::mem::replace(&mut a.reported, key);
+            a.history.push((Instant::now(), key));
             if old.is_empty() {
                 events.push((a.name.clone(), "started"));
             }
@@ -2384,15 +2485,23 @@ impl App {
         for (name, ev) in events {
             self.fire(&name, ev, "");
         }
+        if self.team.is_some() {
+            let _ = self.schedule(); // slots freed by agents that exited
+        }
         if let Some(tr) = &self.team {
             let name = tr.team.name.clone();
             let all = self.team_agents(&name);
-            // a member still due to start after one that is running
-            let waiting = tr.team.agents.iter().any(|m| match &m.start {
-                crate::team::Start::After(dep) => {
-                    !tr.started.contains(&m.id) && all.iter().any(|(n, r)| n == dep && *r)
-                }
-                _ => false,
+            // a member that can still start: queued, held for the next
+            // step, or after agents that are all done or still running
+            let waiting = tr.team.agents.iter().any(|m| {
+                !tr.started.contains(&m.id)
+                    && match &m.start {
+                        crate::team::Start::Now => true,
+                        crate::team::Start::After(deps) => deps
+                            .iter()
+                            .all(|d| tr.done.contains(d) || all.iter().any(|(n, r)| n == d && *r)),
+                        crate::team::Start::Spawned => false,
+                    }
             });
             if !all.is_empty() && all.iter().all(|(_, running)| !running) && !waiting {
                 let used = self.team_tokens(&name);
@@ -2407,6 +2516,355 @@ impl App {
                 self.notice(format!("✔ team {name} finished"));
                 self.team = None;
             }
+        }
+    }
+
+    // ------------------------------------------------------------ agent board
+
+    /// The planner command, and the agent that plans (and later reviews).
+    fn planner(&self) -> Option<(String, String)> {
+        if let Some(cmd) = self.opts.planner.clone().filter(|c| !c.trim().is_empty()) {
+            let who = cmd
+                .split_whitespace()
+                .next()
+                .unwrap_or("planner")
+                .to_string();
+            let who = if Cli::parse(&who).is_some() {
+                who
+            } else {
+                String::new()
+            };
+            return Some((cmd, who));
+        }
+        agents::detect().into_iter().find_map(|(c, _)| match c {
+            Cli::Claude => Some(("claude -p".to_string(), "claude".to_string())),
+            Cli::Codex => Some(("codex exec -".into(), "codex".into())),
+            Cli::Gemini => Some(("gemini".into(), "gemini".into())),
+            _ => None,
+        })
+    }
+
+    fn open_board(
+        &mut self,
+        view: Option<crate::board::View>,
+        goal: Option<(String, Option<PathBuf>)>,
+    ) {
+        use crate::board::{Board, Phase, Plan, View};
+        let folder = goal
+            .as_ref()
+            .and_then(|(_, f)| f.clone())
+            .or_else(|| self.focused_cwd())
+            .unwrap_or_default();
+        let mut plan = self.plan_kept.take().unwrap_or_else(|| {
+            let (planner, who) = self.planner().unwrap_or_default();
+            let clis: Vec<String> = agents::detect()
+                .into_iter()
+                .filter(|(c, _)| *c != Cli::Generic)
+                .map(|(c, _)| c.name().to_string())
+                .collect();
+            Plan {
+                goal: String::new(),
+                phase: Phase::Goal,
+                tasks: Vec::new(),
+                sel: 0,
+                edit: None,
+                parallel: 3,
+                budget: None,
+                clis,
+                planner: if planner.is_empty() {
+                    "no planner".into()
+                } else {
+                    planner
+                },
+                reviewer: who,
+                folder: folder.clone(),
+                step: false,
+                run: 0,
+            }
+        });
+        let start = goal.is_some();
+        if let Some((g, _)) = goal {
+            plan.goal = g;
+            plan.folder = folder;
+            plan.tasks.clear();
+            plan.phase = Phase::Goal;
+        }
+        let view = view.unwrap_or(match (&plan.phase, self.agent_ids().is_empty()) {
+            (Phase::Dispatched(_), _) | (_, true) => View::Plan,
+            _ => View::Tree,
+        });
+        self.board = Some(Board::new(view, plan));
+        self.dirty = true;
+        if start {
+            self.start_planner();
+        }
+    }
+
+    fn close_board(&mut self) {
+        if let Some(b) = self.board.take() {
+            self.plan_kept = Some(b.plan);
+        }
+        self.dirty = true;
+    }
+
+    fn board_key(&mut self, key: &[u8]) {
+        let snap = self.board_snapshot();
+        let Some(b) = self.board.as_mut() else { return };
+        if key == b"\x1bg" && !b.typing() {
+            self.close_board(); // alt+g again
+            return;
+        }
+        let (redraw, act) = b.key(key, &snap);
+        if redraw {
+            self.dirty = true;
+        }
+        use crate::board::BoardAct;
+        match act {
+            None => {}
+            Some(BoardAct::Close) => self.close_board(),
+            Some(BoardAct::Open(name)) => {
+                if let Some(id) = self.agent_pane(&name) {
+                    self.close_board();
+                    self.focus_pane(id);
+                }
+            }
+            Some(BoardAct::Signal(op, name)) => {
+                let v = self.bus_signal(op, &name, true);
+                if let Some(e) = v["error"].as_str() {
+                    self.notice(e.to_string());
+                }
+            }
+            Some(BoardAct::Merge(name)) => self.merge_agent(&name),
+            Some(BoardAct::Plan) => self.start_planner(),
+            Some(BoardAct::Dispatch) => self.dispatch_plan(),
+            Some(BoardAct::NextStage) => {
+                let msg = match self.team.as_mut() {
+                    Some(tr) if tr.step.is_some() => {
+                        let last = tr.team.agents.iter().map(|m| m.stage).max().unwrap_or(0);
+                        let s = (tr.step.unwrap_or(0) + 1).min(last);
+                        tr.step = Some(s);
+                        format!("stage {s} released")
+                    }
+                    _ => "the plan isn't running step by step".into(),
+                };
+                self.bus_event(msg.clone());
+                self.notice(msg);
+                let _ = self.schedule();
+            }
+        }
+    }
+
+    /// Run the planner in the background; its answer comes back as Ev::Plan.
+    fn start_planner(&mut self) {
+        let Some((cmd, _)) = self.planner() else {
+            if let Some(b) = self.board.as_mut() {
+                b.plan.phase = crate::board::Phase::Failed(
+                    "no planner: install Claude Code, Codex or Gemini CLI, or set agents.planner in config.yaml".into(),
+                );
+            }
+            return;
+        };
+        let Some(b) = self.board.as_mut() else { return };
+        let p = &mut b.plan;
+        p.run += 1;
+        p.phase = crate::board::Phase::Planning(Instant::now());
+        let run = p.run;
+        let prompt = crate::board::planner_prompt(&p.goal, &p.clis);
+        let folder = p.folder.clone();
+        let tx = self.tx.clone();
+        self.dirty = true;
+        let _ = spawn_thread("planner".into(), move || {
+            let out = run_planner(&cmd, &prompt, &folder);
+            let _ = tx.send(Ev::Plan(run, out));
+        });
+    }
+
+    fn on_plan(&mut self, run: u64, out: Result<String, String>) {
+        let default = self
+            .board
+            .as_ref()
+            .map(|b| &b.plan)
+            .or(self.plan_kept.as_ref())
+            .map(|p| p.reviewer.clone())
+            .filter(|r| !r.is_empty())
+            .or_else(|| agents::detect().first().map(|(c, _)| c.name().to_string()))
+            .unwrap_or_else(|| "claude".into());
+        let plan = match (self.board.as_mut(), self.plan_kept.as_mut()) {
+            (Some(b), _) => &mut b.plan,
+            (None, Some(p)) => p,
+            _ => return,
+        };
+        if plan.run != run {
+            return;
+        }
+        use crate::board::Phase;
+        plan.phase = match out.and_then(|text| crate::board::parse_plan(&text, &default)) {
+            Ok(tasks) => {
+                // a command planner (no CLI name): its tasks name the agents, and
+                // the first task's agent reviews
+                if plan.reviewer.is_empty() {
+                    plan.reviewer = tasks.first().map(|t| t.agent.clone()).unwrap_or_default();
+                }
+                plan.tasks = tasks;
+                plan.sel = 0;
+                Phase::Ready
+            }
+            Err(e) => Phase::Failed(e),
+        };
+        self.dirty = true;
+    }
+
+    fn dispatch_plan(&mut self) {
+        let Some(b) = self.board.as_ref() else { return };
+        let p = b.plan.clone();
+        if let Some(tr) = &self.team {
+            let name = tr.team.name.clone();
+            if self.team_agents(&name).iter().any(|(_, r)| *r) {
+                self.notice(format!(
+                    "team {name} is still running — stop it first (sv agent stop --all)"
+                ));
+                return;
+            }
+        }
+        let name = format!("plan-{}", self.agents_made + 1);
+        let reviewer = if p.reviewer.is_empty() {
+            p.tasks.first().map(|t| t.agent.clone()).unwrap_or_default()
+        } else {
+            p.reviewer.clone()
+        };
+        let team = crate::board::plan_to_team(&name, &p.tasks, &p.goal, &reviewer, p.budget);
+        let step = p.step.then_some(1);
+        match self.begin_team(
+            team,
+            p.goal.clone(),
+            p.folder.clone(),
+            Some(p.parallel),
+            step,
+        ) {
+            Ok((tname, started)) => {
+                if let Some(b) = self.board.as_mut() {
+                    b.plan.phase = crate::board::Phase::Dispatched(tname.clone());
+                }
+                self.notice(format!("team {tname} started: {}", started.join(", ")));
+            }
+            Err(e) => self.notice(format!("dispatch: {e}")),
+        }
+        self.dirty = true;
+    }
+
+    /// Merge an agent's branch into the checkout it came from.
+    fn merge_agent(&mut self, name: &str) {
+        let Some(a) = self.agent_by_name(name) else {
+            return;
+        };
+        let (Some(repo), Some(branch)) = (a.repo.clone(), a.branch.clone()) else {
+            self.notice(format!("{name} has no branch of its own"));
+            return;
+        };
+        let tx = self.tx.clone();
+        self.bus_event(format!("merging {branch}"));
+        let _ = spawn_thread("merge".into(), move || {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["merge", "--no-ff", "--no-edit", &branch])
+                .output();
+            let msg = match out {
+                Ok(o) if o.status.success() => format!("✔ merged {branch}"),
+                Ok(o) => {
+                    let e = String::from_utf8_lossy(&o.stdout).to_string()
+                        + &String::from_utf8_lossy(&o.stderr);
+                    let line = e
+                        .lines()
+                        .find(|l| {
+                            l.contains("CONFLICT") || l.contains("error") || l.contains("fatal")
+                        })
+                        .unwrap_or("git merge failed");
+                    format!("✖ merge {branch}: {line} — finish it in your shell (git status)")
+                }
+                Err(e) => format!("✖ merge {branch}: {e}"),
+            };
+            let _ = tx.send(Ev::Notice(msg));
+        });
+    }
+
+    /// What the board shows.
+    pub fn board_snapshot(&self) -> crate::board::Snap {
+        use crate::board::{Node, Snap, TeamInfo};
+        let now = Instant::now();
+        let nodes = self
+            .agent_ids()
+            .into_iter()
+            .filter_map(|id| {
+                let p = self.panes.get(&id)?;
+                let a = p.agent.as_ref()?;
+                let v = self.agent_summary(id);
+                let orchestrator = self
+                    .team
+                    .as_ref()
+                    .and_then(|t| t.team.member(&a.name))
+                    .is_some_and(|m| m.orchestrator);
+                let tail: Vec<String> = p
+                    .pane
+                    .screen()
+                    .rows(0, p.size.1)
+                    .map(|r| r.trim_end().to_string())
+                    .filter(|r| !r.trim().is_empty())
+                    .collect();
+                let tail = tail[tail.len().saturating_sub(12)..].to_vec();
+                Some(Node {
+                    name: a.name.clone(),
+                    parent: a.parent.clone(),
+                    depth: a.depth,
+                    // a command agent: its command, if the team says what it is
+                    cli: match self.team.as_ref().and_then(|t| t.team.member(&a.name)) {
+                        Some(m) if a.cli == Cli::Generic && !m.cmd.is_empty() => m.cmd.clone(),
+                        _ => a.cli.name().to_string(),
+                    },
+                    status: v["status"].as_str().unwrap_or("").to_string(),
+                    tokens: a.tokens,
+                    task: a.task.clone(),
+                    branch: a.branch.clone(),
+                    files: a.files.len(),
+                    added: a.files.iter().map(|f| f.added).sum(),
+                    removed: a.files.iter().map(|f| f.removed).sum(),
+                    helpers: a.internal.clone(),
+                    orchestrator,
+                    color: a.color,
+                    history: a
+                        .history
+                        .iter()
+                        .map(|(t, k)| (t.saturating_duration_since(a.started).as_secs_f64(), *k))
+                        .collect(),
+                    age: now.duration_since(a.started).as_secs_f64(),
+                    tail,
+                })
+            })
+            .collect();
+        let team = self.team.as_ref().map(|t| TeamInfo {
+            name: t.team.name.clone(),
+            used: self.team_tokens(&t.team.name),
+            budget: t.team.budget_tokens,
+            capped: t.capped.is_some(),
+            step: t.step,
+            stages: t.team.agents.iter().map(|m| m.stage).max().unwrap_or(0),
+        });
+        let l = self.opts.agent_limits;
+        Snap {
+            nodes,
+            team,
+            log: self.bus_log.iter().cloned().collect(),
+            max_depth: self
+                .team
+                .as_ref()
+                .and_then(|t| t.team.max_depth)
+                .unwrap_or(l.max_depth),
+            max_agents: self
+                .team
+                .as_ref()
+                .and_then(|t| t.team.max_agents)
+                .unwrap_or(l.max_agents),
+            max_children: l.max_children,
         }
     }
 
@@ -3318,6 +3776,20 @@ impl App {
                 Ok(())
             }
             ["system"] => self.show_tool("system", false),
+            ["agent", "board", view] => {
+                self.open_board(crate::board::View::parse(view), None);
+                Ok(())
+            }
+            ["agent", "plan", goal, cwd] => {
+                let unb = |s: &str| {
+                    sv_proto::b64_decode(s)
+                        .map(|v| String::from_utf8_lossy(&v).into_owned())
+                        .unwrap_or_default()
+                };
+                let folder = Some(PathBuf::from(unb(cwd))).filter(|p| p.is_dir());
+                self.open_board(Some(crate::board::View::Plan), Some((unb(goal), folder)));
+                Ok(())
+            }
             ["agent", "attach"] => {
                 self.attach_agent();
                 Ok(())
@@ -3682,6 +4154,7 @@ impl App {
             }
             Cmd::ExploreTable => self.explore_table(),
             Cmd::Agents => self.toggle_agents(),
+            Cmd::AgentBoard => self.open_board(None, None),
             Cmd::NewAgent => self.open_new_agent(),
             Cmd::Approvals => {
                 if self.pending_approvals().is_empty() {

@@ -390,6 +390,8 @@ pub struct Agent {
     pub team: Option<String>,
     /// Status last reported as events (started, done, failed…).
     pub reported: &'static str,
+    /// Every status change, for the timeline.
+    pub history: Vec<(Instant, &'static str)>,
 }
 
 /// How big an agent tree may grow (config `agents.limits`, or team.yaml).
@@ -534,6 +536,7 @@ impl Agent {
             internal: Vec::new(),
             team: None,
             reported: "",
+            history: Vec::new(),
         }
     }
 

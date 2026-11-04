@@ -24,6 +24,7 @@ usage:
   sv agent new --cmd '<command>' [--name N]   any other agent CLI
   sv agent attach   make the agent running in this shell an agent column
   sv agent run team.yaml 'goal'   start a team of agents (team.yaml)
+  sv agent plan 'goal'            plan a team from a goal · sv agent board   tree, timeline, log (alt+g)
   sv agent spawn|send|wait|tree|logs|pause|resume|stop|log|emit|budget   (sv agent for details)
   sv agents    the agents as a table · sv connect   CLIs, logins, MCP servers, ssh hosts
   sv data      list the data commands (ls, ps, open, where, sort-by, to csv…)
@@ -164,6 +165,27 @@ fn agent(args: &[String]) -> i32 {
             | "emit" | "usage" | "budget"),
         ) => agent_bus(op, &args[1..]),
         Some("run") => agent_run(&args[1..]),
+        Some("board") => {
+            let view = args.get(1).map(String::as_str).unwrap_or("tree");
+            if crate::board::View::parse(view).is_none() {
+                eprintln!("sv agent board: plan, tree, timeline or log");
+                return 2;
+            }
+            send_seq(request_sequence(&["agent", "board", view]))
+        }
+        Some("plan") => {
+            let goal = args[1..].join(" ");
+            if goal.trim().is_empty() {
+                eprintln!("sv agent plan: what should the team do? sv agent plan \"goal\"");
+                return 2;
+            }
+            let b = |s: &str| sv_proto::b64(s.as_bytes());
+            let cwd = std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            let (g, c) = (b(&goal), b(&cwd));
+            send_seq(request_sequence(&["agent", "plan", &g, &c]))
+        }
         Some("attach") => send_seq(request_sequence(&["agent", "attach"])),
         Some("new") => {
             let mut cli = String::new();
@@ -245,7 +267,9 @@ usage: sv agent new [claude|codex|gemini|aider] [--name N] [--here] [\"first tas
        sv agent emit <event> [\"details\"]  tell the team something happened (e.g. failed)
        sv agent usage <tokens>          report tokens used (agents that don't log them)
        sv agent budget [tokens]         the team's budget: show, or raise and resume
-       sv agent pause|resume|stop --all";
+       sv agent pause|resume|stop --all
+       sv agent plan \"goal\"            a planner proposes tasks; edit them, then dispatch
+       sv agent board [plan|tree|timeline|log]   the agent board (alt+g)";
 
 /// `sv agent …` commands that need an answer: over the agent bus.
 fn agent_bus(op: &str, args: &[String]) -> i32 {
@@ -614,7 +638,11 @@ fn agent_run(args: &[String]) -> i32 {
             };
             let when = match &m.start {
                 Start::Now => "starts now".to_string(),
-                Start::After(d) => format!("starts when {d} is done"),
+                Start::After(d) => format!(
+                    "starts when {} {} done",
+                    d.join(" and "),
+                    if d.len() == 1 { "is" } else { "are" }
+                ),
                 Start::Spawned => {
                     let by: Vec<&str> = t
                         .agents

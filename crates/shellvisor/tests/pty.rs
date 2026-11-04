@@ -1092,3 +1092,96 @@ fn a_team_yaml_runs_end_to_end_with_rules_and_a_budget_cap() {
     s.send("clear; sleep 1; sv agent log | tail -3\r");
     s.wait_for("team price-alerts finished");
 }
+
+#[test]
+fn auto_plan_dispatches_stages_then_review_and_merges_from_the_tree() {
+    let dir = scratch("plan");
+    let work = dir.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    git_repo(&work);
+    for (k, v) in [("user.email", "a@b"), ("user.name", "t")] {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&work)
+            .args(["config", k, v])
+            .status()
+            .unwrap();
+    }
+    let worker = dir.join("worker.sh");
+    std::fs::write(
+        &worker,
+        "#!/bin/bash\necho \"worker $SHELLVISOR_AGENT: ${SHELLVISOR_TASK:0:30}\"\n\
+         echo \"$SHELLVISOR_AGENT\" > \"$SHELLVISOR_AGENT.txt\"\ngit add -A >/dev/null 2>&1\n\
+         git commit -qm \"$SHELLVISOR_AGENT work\" >/dev/null 2>&1\necho \"$SHELLVISOR_AGENT finished\"\nread -p '> ' x\n",
+    )
+    .unwrap();
+    let planner = dir.join("planner.sh");
+    std::fs::write(
+        &planner,
+        format!(
+            "#!/bin/bash\ngrep -q 'ONLY a JSON object' || exit 3\nsleep 0.3\necho 'Plan:'\n\
+             echo '{{\"tasks\": [{{\"id\": \"api\", \"title\": \"Add POST /alerts\", \"scope\": \"src/api/\", \"agent\": \"{w}\"}}, \
+             {{\"id\": \"ui\", \"title\": \"Alert form\", \"scope\": \"src/ui/\", \"agent\": \"{w}\"}}, \
+             {{\"id\": \"tests\", \"title\": \"Tests for alerts\", \"deps\": [\"api\", \"ui\"], \"agent\": \"{w}\"}}]}}'\n",
+            w = worker.display()
+        ),
+    )
+    .unwrap();
+    for f in [&worker, &planner] {
+        std::process::Command::new("chmod")
+            .arg("+x")
+            .arg(f)
+            .status()
+            .unwrap();
+    }
+    std::fs::write(
+        dir.join("config.yaml"),
+        format!(
+            "start_view: full\nagents:\n  planner: {}\n",
+            planner.display()
+        ),
+    )
+    .unwrap();
+    let mut s = Session::launch("bash", dir.clone());
+    s.wait_for("PROMPT>");
+    s.send(&format!(
+        "cd {}; sv agent plan 'add price alerts'\r",
+        work.display()
+    ));
+    s.wait_for("agent board");
+    s.wait_for("Proposed plan · 3 tasks · 2 stages");
+    s.wait_for("stage 1 · 2 in parallel");
+    s.send("e\x15Build the API\r"); // edit the first task's title
+    s.wait_for("Build the API");
+    s.send("\r"); // dispatch
+    s.wait_for("Running · 3 tasks");
+    s.wait_until("stage 1 done, tests and review ran", |t| {
+        t.contains("tests") && t.matches("done").count() >= 4
+    });
+    s.send("\t"); // tree
+    s.wait_until("tree", |t| {
+        t.contains("◆ review") && t.contains("branch") && t.contains("agents")
+    });
+    s.send("\t"); // timeline
+    s.wait_for("now");
+    s.send("\t"); // log
+    s.wait_until("log", |t| {
+        t.contains("team plan-") && t.contains("started: api, ui")
+    });
+    s.send("\t\t"); // plan → tree
+    s.wait_for("◆ review");
+    s.send("m"); // merge the first agent's branch (api)
+    s.wait_for("merge agent/api into your branch? y/n");
+    s.send("y");
+    s.wait_for("merged agent/api");
+    assert!(
+        work.join("api.txt").exists(),
+        "api's work is in the main checkout"
+    );
+    s.send("\x1b"); // close the board
+    s.pump(Duration::from_millis(300));
+    s.send("\x1b1");
+    s.pump(Duration::from_millis(300));
+    s.send("clear; sv agent log | grep -c 'tests.done'\r");
+    s.wait_for("1");
+}
