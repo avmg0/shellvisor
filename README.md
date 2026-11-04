@@ -54,7 +54,7 @@ shellvisor --shell bash    # or pick: zsh, bash, or a full path
 | `F9` · `shift+F9` | agents tab · new agent |
 | `alt+a` | agents waiting for approval: `y` allow · `n` deny · `a` always |
 | `sv layout dev` | files + shell + system + flow (also `monitor`, `files`, `data`, `agents`; or `alt+m`) |
-| `alt+e` | layout editor: split in a shell, files, system or flow pane, close, resize; save by name, as the default, or for this folder (`sv layout <name>` opens a saved one) |
+| `alt+e` | layout editor: start from a preset or a saved layout, add shell / files / git / system / thermals / flow panes, remove, resize (keys or mouse), undo; nothing changes until ⏎, esc puts it back. Save by name, as the default, or for this folder (`sv layout <name>` opens a saved one) |
 | `alt+m` | tab menu |
 | ``alt+` `` · `sv off` / `sv on` | basic view ⇄ full view |
 | `ctrl+]` then a letter | leader key — every shortcut, in every terminal (`ctrl+] ?` lists them) |

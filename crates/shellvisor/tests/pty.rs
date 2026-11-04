@@ -1195,17 +1195,23 @@ fn layout_editor_builds_saves_and_reopens_a_folder_layout() {
     let mut s = Session::start_with("bash", "layout", "start_view: full\nrestore: never\n");
     s.wait_for("PROMPT>");
     s.send("\x1be"); // alt+e
-    s.wait_for("layout editor");
-    s.wait_for("[1 shell]");
-    s.send("2\\"); // files, split right
-    s.wait_for("files ·");
-    s.send("3-"); // system, below the files pane
-    s.wait_for("system ·");
-    s.send(">>");
-    s.send("f");
-    s.wait_for("save for this folder, named");
+    s.wait_until("editor screen", |t| {
+        t.contains("Edit layout") && t.contains("EDITING") && t.contains("1 dev")
+    });
+    s.send("\\"); // add Files (the palette's pick) to the right
+    s.wait_for("new");
+    s.send("]]-"); // System stats, below it
+    s.wait_until("system pane added", |t| {
+        t.contains("System stats") && t.contains("save as:")
+    });
+    s.send(">>f"); // resize, open it in this folder
+    s.send("n");
     s.send("code\r");
+    s.send("\r"); // save & use
     s.wait_for("saved layout code");
+    s.wait_until("applied", |t| {
+        t.contains("files ·") && t.contains("system ·")
+    });
     let saved = std::fs::read_to_string(s.dir.join("layouts/code.yaml")).unwrap();
     assert!(
         saved.contains("tool: files") && saved.contains("tool: system"),
@@ -1213,7 +1219,6 @@ fn layout_editor_builds_saves_and_reopens_a_folder_layout() {
     );
     let prefs = std::fs::read_to_string(s.dir.join("state/layouts.yaml")).unwrap();
     assert!(prefs.contains("code"), "{prefs}");
-    s.send("\x1b"); // done
     s.pump(Duration::from_millis(300));
     s.send("\x11");
     s.wait_exit();

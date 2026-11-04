@@ -42,6 +42,7 @@ pub enum SavedNode {
         b: Box<SavedNode>,
     },
     Pane {
+        #[serde(default, skip_serializing_if = "String::is_empty")]
         cwd: String,
         /// "files" or "system" for a tool pane; absent for a shell.
         #[serde(default, skip_serializing_if = "Option::is_none")]

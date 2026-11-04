@@ -259,40 +259,11 @@ fn draw_all(f: &mut Frame, app: &App) {
 
     if let Some(ed) = &app.editor {
         let (_, content, _) = app.regions();
-        let here = app.focused_cwd().unwrap_or_default();
-        let lines = ed.lines(&crate::layouted::Prefs::load(), &here);
-        let h = (lines.len() as u16 + 2).min(content.height);
-        let w = content.width.saturating_sub(4).min(110);
-        let r = Rect::new(
-            content.x + (content.width - w) / 2,
-            content.bottom().saturating_sub(h + 1),
-            w,
-            h,
-        );
-        f.render_widget(Clear, r);
-        let block = Block::bordered()
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(AMBER))
-            .title(Span::styled(
-                " ▦ layout editor ",
-                Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
-            ));
-        let inner = block.inner(r);
-        f.render_widget(block, r);
-        for (i, l) in lines.iter().enumerate() {
-            let st = if i == 0 {
-                Style::default().fg(CYAN)
-            } else {
-                Style::default().fg(DIM)
-            };
-            f.buffer_mut().set_stringn(
-                inner.x + 1,
-                inner.y + i as u16,
-                l,
-                inner.width.saturating_sub(2) as usize,
-                st,
-            );
-        }
+        f.render_widget(Clear, content);
+        let block = pane_block(" ▦ layout editor ".to_string(), true);
+        let inner = block.inner(content);
+        f.render_widget(block, content);
+        ed.render(inner, f.buffer_mut());
     }
 
     if let Some((msg, _)) = &app.notice {

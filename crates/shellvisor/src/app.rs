@@ -114,7 +114,9 @@ pub enum Tool {
 impl Tool {
     pub fn kind(&self) -> &'static str {
         match self {
+            Tool::Files(f) if f.view == files::View::Git => "git",
             Tool::Files(_) => "files",
+            Tool::System(s) if s.thermal => "thermal",
             Tool::System(_) => "system",
             Tool::Flow(_) => "flow",
         }
@@ -757,7 +759,7 @@ impl App {
     /// A saved leaf: a shell in its folder, or a tool pane.
     fn new_leaf(&mut self, l: &Leaf) -> io::Result<PaneId> {
         match l.tool.as_deref() {
-            Some(kind @ ("files" | "system" | "flow")) => {
+            Some(kind @ ("files" | "git" | "system" | "thermal" | "flow")) => {
                 let cwd = if l.cwd.is_empty() {
                     std::env::current_dir().unwrap_or_default()
                 } else {
@@ -772,12 +774,17 @@ impl App {
     fn new_tool(&mut self, kind: &str, cwd: PathBuf) -> PaneId {
         let id = self.next_id;
         self.next_id += 1;
-        let tool = if kind == "system" {
-            Tool::System(SysPane::new())
+        let tool = if kind == "system" || kind == "thermal" {
+            let mut sp = SysPane::new();
+            sp.thermal = kind == "thermal";
+            Tool::System(sp)
         } else if kind == "flow" {
             Tool::Flow(FlowPane::new())
         } else {
-            let (f, jobs) = FilesPane::new(cwd);
+            let (mut f, mut jobs) = FilesPane::new(cwd);
+            if kind == "git" {
+                jobs.extend(f.set_view(files::View::Git));
+            }
             self.run_jobs(id, jobs);
             Tool::Files(f)
         };
@@ -3697,6 +3704,12 @@ impl App {
     }
 
     fn on_mouse(&mut self, ev: MouseEv) -> io::Result<()> {
+        if let Some(ed) = self.editor.as_mut() {
+            if ed.mouse(ev.x, ev.y, ev.is_left_press(), ev.is_motion(), ev.release) {
+                self.dirty = true;
+            }
+            return Ok(());
+        }
         // drag a divider between splits to resize them
         if let Some(path) = self.drag.clone() {
             if ev.release {
@@ -3975,94 +3988,136 @@ impl App {
 
     // ------------------------------------------------------------ layout editor
 
+    fn open_editor(&mut self) {
+        use crate::layouted::{Editor, Preset, builtin_presets, kind_of};
+        let t = &self.tabs[self.active];
+        let kinds: Vec<(PaneId, crate::layouted::Kind)> = t
+            .root
+            .panes()
+            .into_iter()
+            .map(|id| (id, kind_of(self.tools.get(&id).map(|t| t.kind()))))
+            .collect();
+        let mut presets = builtin_presets();
+        for name in crate::layouted::saved_layouts() {
+            if let Ok(node) = crate::layouted::load_layout(&name) {
+                presets.push(Preset {
+                    name,
+                    saved: true,
+                    node,
+                });
+            }
+        }
+        let folder = self.focused_cwd().unwrap_or_default();
+        self.editor = Some(Editor::new(
+            &t.root.clone(),
+            &kinds,
+            t.focus,
+            folder,
+            presets,
+        ));
+        self.dirty = true;
+    }
+
     fn editor_key(&mut self, key: &[u8]) -> io::Result<()> {
-        use crate::layouted::{EdAct, SaveAs};
         self.dirty = true;
         let Some(ed) = self.editor.as_mut() else {
             return Ok(());
         };
-        let Some(act) = ed.key(key, crate::layouted::saved_layouts) else {
-            return Ok(());
-        };
-        match act {
-            EdAct::Close => self.editor = None,
-            EdAct::Focus(d) => self.run_cmd(Cmd::Focus(d))?,
-            EdAct::Resize(d) => self.run_cmd(Cmd::Resize(d))?,
-            EdAct::ClosePane => {
-                if self.tabs[self.active].root.panes().len() > 1 {
-                    self.run_cmd(Cmd::ClosePane)?;
-                } else {
-                    self.notice("the last pane of a tab stays");
-                }
-            }
-            EdAct::Split(axis, kind) => {
-                if kind == "shell" {
-                    self.run_cmd(if axis == Axis::Horizontal {
-                        Cmd::SplitRight
-                    } else {
-                        Cmd::SplitDown
-                    })?;
-                } else {
-                    let cwd = self
-                        .focused_cwd()
-                        .or_else(|| std::env::current_dir().ok())
-                        .unwrap_or_default();
-                    let id = self.new_tool(kind, cwd);
-                    let t = &mut self.tabs[self.active];
-                    let at = t.focus;
-                    t.root.split(at, axis, id);
-                    t.focus = id;
-                    t.arrangement = None;
-                    self.relayout();
-                }
-            }
-            EdAct::Save(name, how) => {
-                let node = self.capture_layout();
-                match crate::layouted::save_layout(&name, &node) {
-                    Ok(path) => {
-                        let mut prefs = crate::layouted::Prefs::load();
-                        let extra = match how {
-                            SaveAs::Name => String::new(),
-                            SaveAs::Default => {
-                                prefs.default = Some(name.clone());
-                                " · used for new sessions".into()
-                            }
-                            SaveAs::Folder => {
-                                let here = self.focused_cwd().unwrap_or_default();
-                                prefs
-                                    .folders
-                                    .insert(here.display().to_string(), name.clone());
-                                format!(
-                                    " · opens when Shellvisor starts in {}",
-                                    ui::short_path(&here.to_string_lossy())
-                                )
-                            }
-                        };
-                        if how != SaveAs::Name {
-                            let _ = prefs.save();
-                        }
-                        let _ = path;
-                        self.notice(format!("saved layout {name}{extra}"));
-                    }
-                    Err(e) => self.notice(format!("couldn't save layout: {e}")),
-                }
-            }
-            EdAct::Open(name) => {
-                if let Err(e) = self.open_layout(&name) {
-                    self.notice(e);
-                }
-            }
+        match ed.key(key) {
+            None => {}
+            Some(crate::layouted::EdAct::Cancel) => self.editor = None,
+            Some(crate::layouted::EdAct::Apply) => self.apply_editor(),
         }
         Ok(())
     }
 
-    /// The current tab's shape, without folders (it opens wherever you are).
-    fn capture_layout(&self) -> SavedNode {
-        let leaf = |id: PaneId| Leaf {
-            cwd: String::new(),
-            tool: self.tools.get(&id).map(|t| t.kind().to_string()),
+    /// Put the edited layout on the tab: keep running panes, create new
+    /// ones, close the ones left out (not while they run something), save.
+    fn apply_editor(&mut self) {
+        let Some(ed) = self.editor.clone() else {
+            return;
         };
-        SavedNode::capture(&self.tabs[self.active].root, &leaf)
+        let dropped = ed.dropped();
+        let busy = self.busy(&dropped, None);
+        if !busy.is_empty() {
+            if let Some(e) = self.editor.as_mut() {
+                e.message = Some(format!(
+                    "{} still running in a pane you removed — finish it or keep that pane (u)",
+                    Self::describe(&busy)
+                ));
+            }
+            return;
+        }
+        let here = ed.folder.clone();
+        let mut ids: Vec<Option<PaneId>> = vec![None; ed.slots.len()];
+        for i in ed.tree.panes() {
+            let slot = &ed.slots[i as usize];
+            let id = match (slot.existing, slot.kind.tool) {
+                (Some(id), _) => id,
+                (None, Some(tool)) => self.new_tool(tool, here.clone()),
+                (None, None) => match self.new_pane(Some(here.clone())) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        self.notice(format!("layout: {e}"));
+                        return;
+                    }
+                },
+            };
+            ids[i as usize] = Some(id);
+        }
+        fn real(n: &Node, ids: &[Option<PaneId>]) -> Node {
+            match n {
+                Node::Leaf(i) => Node::Leaf(ids[*i as usize].unwrap_or(0)),
+                Node::Split { axis, ratio, a, b } => Node::Split {
+                    axis: *axis,
+                    ratio: *ratio,
+                    a: Box::new(real(a, ids)),
+                    b: Box::new(real(b, ids)),
+                },
+            }
+        }
+        let root = real(&ed.tree, &ids);
+        for id in dropped {
+            if let Some(mut p) = self.panes.remove(&id) {
+                p.pane.kill();
+            }
+            self.tools.remove(&id);
+        }
+        let t = &mut self.tabs[self.active];
+        t.root = root;
+        t.focus = ids[ed.sel as usize].unwrap_or(t.focus);
+        t.zoomed = false;
+        t.arrangement = None;
+        self.editor = None;
+        self.relayout();
+        if ed.name.is_empty() {
+            self.notice("layout applied");
+            return;
+        }
+        match crate::layouted::save_layout(&ed.name, &ed.saved()) {
+            Ok(_) => {
+                let mut prefs = crate::layouted::Prefs::load();
+                let mut extra = String::new();
+                if ed.make_default {
+                    prefs.default = Some(ed.name.clone());
+                    extra += " · used for new sessions";
+                }
+                if ed.for_folder {
+                    prefs
+                        .folders
+                        .insert(here.display().to_string(), ed.name.clone());
+                    extra += &format!(
+                        " · opens when Shellvisor starts in {}",
+                        ui::short_path(&here.to_string_lossy())
+                    );
+                }
+                if ed.make_default || ed.for_folder {
+                    let _ = prefs.save();
+                }
+                self.notice(format!("saved layout {}{extra}", ed.name));
+            }
+            Err(e) => self.notice(format!("couldn't save layout: {e}")),
+        }
     }
 
     /// Open a saved layout: in this tab if it holds a single shell (which is
@@ -4367,7 +4422,7 @@ impl App {
                     self.set_view(View::Full);
                 }
                 self.tabs[tab].zoomed = false;
-                self.editor = Some(crate::layouted::Editor::default());
+                self.open_editor();
             }
             Cmd::NewAgent => self.open_new_agent(),
             Cmd::Approvals => {

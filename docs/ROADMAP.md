@@ -171,6 +171,8 @@ Deliverables
 - Release workflow: build both macOS targets (arm64 and x86_64) on one Mac runner, so a release needs a single Mac machine (GitHub's Mac runners were short on capacity for 1.0.0).
 - Update GitHub Actions to Node 24 versions (`actions/checkout`, `upload-artifact`, `download-artifact`, `attest-build-provenance`) to clear the deprecation warnings.
 
+- Layout editor as designed on board 4 (done): its own screen with preset thumbnails (built-in and saved, `1`–`9` or click), a palette (shell, files, git changes, system stats, thermals, data flow; `[ ]` or click), a map of the tab (select, split, change kind, remove, resize in 5 % steps with keys or by dragging, undo), and a save form (name, default, this folder) with the YAML that will be written. Edits apply on ⏎ only; esc cancels; running panes are kept, and a removed pane that is still running a command blocks the apply with a message.
+
 Exit criteria: `sv resize` covered by an end-to-end test; a `v1.0.1` tag releases with one macOS job; CI and Release runs show no deprecation warnings.
 
 ---
