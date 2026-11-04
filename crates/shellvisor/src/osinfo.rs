@@ -86,6 +86,47 @@ pub fn on_battery() -> Option<bool> {
     }
 }
 
+/// Copy text with the system clipboard tool, if there is one. Returns
+/// false when none worked (the caller then falls back to OSC 52).
+pub fn copy_to_clipboard(text: &str) -> bool {
+    use std::io::Write;
+    let tools: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
+        &[("pbcopy", &[])]
+    } else {
+        &[
+            ("wl-copy", &[]),
+            ("xclip", &["-selection", "clipboard"]),
+            ("xsel", &["--clipboard", "--input"]),
+        ]
+    };
+    for (tool, args) in tools {
+        let needs_display = *tool != "pbcopy";
+        if needs_display
+            && std::env::var_os("DISPLAY").is_none()
+            && std::env::var_os("WAYLAND_DISPLAY").is_none()
+        {
+            continue;
+        }
+        let child = std::process::Command::new(tool)
+            .args(*args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        if let Ok(mut c) = child {
+            let ok = c
+                .stdin
+                .take()
+                .map(|mut i| i.write_all(text.as_bytes()).is_ok())
+                .unwrap_or(false);
+            if ok && c.wait().map(|s| s.success()).unwrap_or(false) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

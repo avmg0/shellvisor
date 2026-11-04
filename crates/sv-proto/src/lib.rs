@@ -13,6 +13,7 @@
 //! | `OSC 7770 ; cmd ; <base64>`     | text of the command being run   |
 //! | `OSC 7770 ; mode ; on/off/exit` | switch Shellvisor view / quit    |
 //! | `OSC 7770 ; do ; word [; arg]`  | open a pane, preset, power mode |
+//! | `OSC 7770 ; table ; <base64>`   | an `sv` table was saved at path |
 
 use base64::Engine as _;
 
@@ -74,6 +75,18 @@ pub enum ShellEvent {
     Mode(Mode),
     /// `sv files`, `sv sys`, `sv layout dev`, `sv power auto`…
     Request(Vec<String>),
+    /// `sv` printed a table and saved its rows (JSON lines) at this path.
+    Table(String),
+}
+
+/// Base64 (standard alphabet) — for OSC payloads and OSC 52 clipboard.
+pub fn b64(data: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(data)
+}
+
+/// The escape sequence `sv` prints after a table it saved at `path`.
+pub fn table_sequence(path: &str) -> String {
+    format!("\x1b]7770;table;{}\x07", b64(path.as_bytes()))
 }
 
 /// The escape sequence `sv` prints for a request like `["layout", "dev"]`.
@@ -113,6 +126,14 @@ pub fn parse_osc(params: &[&[u8]]) -> Option<ShellEvent> {
         }
         [id, b"cmd"] if *id == OSC_SHELLVISOR => Some(ShellEvent::CommandText(String::new())),
         [id, b"mode", m] if *id == OSC_SHELLVISOR => Mode::parse(m).map(ShellEvent::Mode),
+        [id, b"table", data] if *id == OSC_SHELLVISOR => {
+            let raw = base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .ok()?;
+            Some(ShellEvent::Table(
+                String::from_utf8_lossy(&raw).into_owned(),
+            ))
+        }
         [id, b"do", words @ ..] if *id == OSC_SHELLVISOR && !words.is_empty() => {
             Some(ShellEvent::Request(
                 words
@@ -208,6 +229,12 @@ mod tests {
             Some(ShellEvent::Request(vec!["layout".into(), "dev".into()]))
         );
         assert_eq!(parse_osc(&split("7770;do")), None);
+        let seq = table_sequence("/tmp/t 1.jsonl");
+        let body = seq.trim_start_matches("\x1b]").trim_end_matches('\x07');
+        assert_eq!(
+            parse_osc(&split(body)),
+            Some(ShellEvent::Table("/tmp/t 1.jsonl".into()))
+        );
     }
 
     #[test]

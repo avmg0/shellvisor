@@ -25,6 +25,7 @@ mod paths;
 mod session;
 mod shell;
 mod sysmon;
+mod tableview;
 mod term;
 mod ui;
 mod workspace;

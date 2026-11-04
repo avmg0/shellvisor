@@ -116,12 +116,52 @@ pub fn draw(f: &mut Frame, app: &App) {
         draw_status(f, app, r);
     }
 
+    if let Some(t) = &app.table {
+        let (_, content, _) = app.regions();
+        f.render_widget(Clear, content);
+        let block = pane_block(format!(" ▦ {} ", t.title), true);
+        let inner = block.inner(content);
+        f.render_widget(block, content);
+        t.render(inner, f.buffer_mut());
+    }
+
     if let Some((msg, _)) = &app.notice {
         let (_, content, _) = app.regions();
         badge(f, content, if full { 1 } else { 0 }, &format!(" {msg} "));
     }
 
     match &app.modal {
+        Modal::Bar(line) => {
+            let row = status.unwrap_or(Rect::new(
+                0,
+                app.screen.height.saturating_sub(1),
+                app.screen.width,
+                1,
+            ));
+            f.render_widget(Clear, row);
+            let label = " sv ▸ ";
+            let hint = if line.is_empty() {
+                "   e.g. ps | where cpu > 5 | sort-by cpu -r   ·   ⏎ table · alt+⏎ to shell · ↑ history · esc"
+            } else {
+                "   ⏎ table · alt+⏎ to shell · esc"
+            };
+            let line_w = line.chars().count() as u16;
+            let spans = Line::from(vec![
+                Span::styled(
+                    label,
+                    Style::default()
+                        .bg(AMBER)
+                        .fg(INK)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(format!(" {line}")),
+                Span::styled(hint, Style::default().fg(DIM)),
+            ]);
+            f.render_widget(Paragraph::new(spans).style(Style::default().bg(BAR)), row);
+            let x = row.x + label.chars().count() as u16 + 1 + line_w;
+            f.set_cursor_position(Position::new(x.min(row.right().saturating_sub(1)), row.y));
+            return;
+        }
         Modal::Leader => {
             let row = status.unwrap_or(Rect::new(
                 0,
@@ -179,7 +219,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Modal::None => {}
     }
 
-    if !matches!(app.modal, Modal::Help) {
+    if !matches!(app.modal, Modal::Help) && app.table.is_none() {
         if let Some((_, _, inner)) = app.visible().into_iter().find(|(id, _, _)| *id == focused) {
             if let Some((x, y)) = app.panes.get(&focused).and_then(|p| p.pane.cursor()) {
                 if x < inner.width && y < inner.height {
@@ -367,6 +407,15 @@ fn draw_status(f: &mut Frame, app: &App, r: Rect) {
             format!(" {}{more} ", activity_text(app, first)),
             Style::default().fg(AMBER).bg(BAR),
         ));
+    } else if let Some(cmd) = &app.bar_running {
+        left.push(Span::styled(
+            format!(
+                " {} sv {} ",
+                spinner(app),
+                cmd.chars().take(40).collect::<String>()
+            ),
+            Style::default().fg(AMBER).bg(BAR),
+        ));
     } else if let Some(p) = p {
         if p.running {
             let secs = p.started.map(|s| s.elapsed().as_secs()).unwrap_or(0);
@@ -431,6 +480,10 @@ const SECTIONS: &[(&str, &str)] = &[
     (
         "toggle_files",
         "Panes — in files: ⏎ open · i insert path · c cd · e edit · p preview · / filter · tab view",
+    ),
+    (
+        "explore_table",
+        "Data — in a table: s sort · / filter · c CSV · J JSON · m Markdown · ⏎ insert cell",
     ),
 ];
 

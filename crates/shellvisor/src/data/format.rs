@@ -388,13 +388,17 @@ pub fn parse_ssv(text: &str) -> Data {
     Data::Table(rows)
 }
 
-/// Guess the format of piped-in text.
+/// Guess the format of piped-in text: JSON / JSON lines (also bare numbers,
+/// one per line) if every line parses, else one row per line.
 pub fn parse_auto(text: &str) -> Result<Data, String> {
     let t = text.trim_start();
     if t.starts_with('{') || t.starts_with('[') {
         return parse_json(text);
     }
-    Ok(parse_lines(text))
+    match parse_json(text) {
+        Ok(d) if !t.is_empty() => Ok(d),
+        _ => Ok(parse_lines(text)),
+    }
 }
 
 // ------------------------------------------------------------------ text out

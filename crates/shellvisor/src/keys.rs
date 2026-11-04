@@ -102,6 +102,8 @@ pub enum Cmd {
     ToggleSystem,
     LowPower,
     Preset(Preset),
+    ExploreTable,
+    CommandBar,
 }
 
 /// Ready-made layouts for a tab.
@@ -242,6 +244,18 @@ pub const ACTIONS: &[(&str, Cmd, &[&str], &str)] = &[
         Cmd::ToggleSystem,
         &["f3"],
         "system pane: open · focus · close (also: sv sys)",
+    ),
+    (
+        "explore_table",
+        Cmd::ExploreTable,
+        &["f4"],
+        "explore the last sv table: sort, filter, copy",
+    ),
+    (
+        "command_bar",
+        Cmd::CommandBar,
+        &["alt+;"],
+        "command bar: ls | where size > 1mb | sort-by size -r",
     ),
     (
         "preset_dev",
@@ -485,6 +499,8 @@ pub fn after_leader(key: &[u8]) -> Option<Cmd> {
         b"q" => Quit,
         b"f" => ToggleFiles,
         b"s" => ToggleSystem,
+        b";" | b":" => CommandBar,
+        b"v" => ExploreTable,
         b"\x1b[A" => Focus(Dir::Up),
         b"\x1b[B" => Focus(Dir::Down),
         b"\x1b[C" => Focus(Dir::Right),
@@ -494,7 +510,7 @@ pub fn after_leader(key: &[u8]) -> Option<Cmd> {
     })
 }
 
-pub const LEADER_HINT: &str = " ctrl+] → t tab · w close tab · x close split · \\ split │ · - split ─ · o next split · z zoom · l layout · m menu · f files · s system · b basic view · r rename · 1-9 tab · ? help · ctrl+] send ctrl+] ";
+pub const LEADER_HINT: &str = " ctrl+] → t tab · w close tab · x close split · \\ split │ · - split ─ · o next split · z zoom · l layout · m menu · f files · s system · ; command bar · v table · b basic view · r rename · 1-9 tab · ? help · ctrl+] send ctrl+] ";
 
 /// On macOS, Option+key types these characters unless the terminal is set to
 /// send Option as Alt/Meta. Seeing one alone means alt shortcuts can't work.

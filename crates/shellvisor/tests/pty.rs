@@ -798,3 +798,48 @@ fn sv_data_pipelines_in_bash() {
     s.run("sv open people.csv | sv avg age | cat");
     s.wait_for("35.33");
 }
+
+#[test]
+fn f4_explores_the_last_table() {
+    let mut s = Session::start_full("tableview");
+    s.wait_for("PROMPT>");
+    let work = s.dir.join("work");
+    for (n, size) in [("alpha.txt", 10), ("beta.txt", 3000), ("gamma.txt", 200)] {
+        std::fs::write(work.join(n), vec![b'x'; size]).unwrap();
+    }
+    s.run("sv ls");
+    s.wait_for("F4 explores this table");
+    s.send("\x1bOS"); // F4
+    s.wait_for("3 of 3 rows");
+    s.send("l"); // type column
+    s.send("l"); // size column
+    s.send("S"); // sort descending
+    s.wait_for("sorted by size ↓");
+    s.send("c"); // copy as CSV (no clipboard tool here → OSC 52)
+    s.wait_for("copied 4 lines as CSV");
+    s.send("h");
+    s.send("h"); // back to name
+    s.send("\r"); // insert the selected cell (beta.txt, the biggest) at the prompt
+    s.wait_for("PROMPT> beta.txt");
+}
+
+#[test]
+fn command_bar_runs_a_pipeline_into_a_table() {
+    let mut s = Session::start_full("cmdbar");
+    s.wait_for("PROMPT>");
+    let work = s.dir.join("work");
+    std::fs::write(work.join("keep-me.log"), "x").unwrap();
+    std::fs::write(work.join("other.txt"), "x").unwrap();
+    s.send("\x1b;"); // alt+;
+    s.wait_for("sv ▸");
+    s.send("ls | where name =~ keep");
+    s.send("\r");
+    s.wait_for("1 of 1 rows");
+    assert!(!s.text().contains("other.txt"), "{}", s.text());
+    s.send("q");
+    s.wait_until("table closed", |t| !t.contains("1 of 1 rows"));
+    // a scalar result is shown as a notice
+    s.send("\x1b;");
+    s.send("ls | count\r");
+    s.wait_for("ls | count = 2");
+}

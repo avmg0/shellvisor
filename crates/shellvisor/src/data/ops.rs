@@ -232,6 +232,12 @@ fn test(v: &Value, op: Op, lit: &Value, raw: &str) -> bool {
     }
 }
 
+/// A row test from `where`-style words, for the table viewer's filter.
+pub fn row_matcher(words: &[String]) -> Result<impl Fn(&Record) -> bool, String> {
+    let groups = parse_where(words)?;
+    Ok(move |r: &Record| keep(r, &groups))
+}
+
 fn keep(row: &Record, groups: &[Vec<Cond>]) -> bool {
     groups.iter().any(|g| {
         g.iter().all(|c| {

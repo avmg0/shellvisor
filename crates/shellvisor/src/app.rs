@@ -13,6 +13,7 @@
 
 use crate::activity::{self, Activity};
 use crate::config::{LowPower, Restore};
+use crate::data::value::Data;
 use crate::files::{self, Act, Done, FilesPane, Job, Outcome};
 use crate::history::{Entry, History};
 use crate::keys::{self, Cmd, Keymap, Preset};
@@ -20,6 +21,7 @@ use crate::mouse::MouseEv;
 use crate::session::{Leaf, SavedNode, SavedTab, Session};
 use crate::shell::Launch;
 use crate::sysmon::SysPane;
+use crate::tableview::{TableAct, TableView};
 use crate::term::{InputModes, Pane};
 use crate::ui;
 use crate::workspace::{Axis, Node, PaneId, Tab, neighbor};
@@ -116,6 +118,8 @@ enum Ev {
     PaneExit(PaneId, i32),
     Job(PaneId, Box<Done>),
     Battery(Option<bool>),
+    /// A command-bar pipeline finished: (title, rows or error).
+    TableReady(String, Box<Result<Data, String>>),
     Resize,
     Quit,
 }
@@ -134,6 +138,8 @@ pub struct PaneState {
     pub bell: bool,
     /// A download/install spotted from the command line.
     pub activity: Option<Activity>,
+    /// Rows of the last table `sv` printed here (for F4).
+    pub table: Option<PathBuf>,
     progress_at: Instant,
     /// New output since progress was last read.
     progress_due: bool,
@@ -161,11 +167,19 @@ pub enum Modal {
     Confirm(Pending, String),
     /// Tab menu, with the highlighted row.
     Menu(usize),
+    /// The command bar (alt+;), with what's typed so far.
+    Bar(String),
 }
 
 pub struct App {
     pub panes: HashMap<PaneId, PaneState>,
     pub tools: HashMap<PaneId, Tool>,
+    /// The table viewer, when open (over the panes).
+    pub table: Option<TableView>,
+    /// A command-bar pipeline is running.
+    pub bar_running: Option<String>,
+    bar_history: Vec<String>,
+    bar_pos: Option<usize>,
     pub low_power: bool,
     power_manual: bool,
     focus_tick: u64,
@@ -234,6 +248,10 @@ pub fn run(opts: Options) -> io::Result<i32> {
     let mut app = App {
         panes: HashMap::new(),
         tools: HashMap::new(),
+        table: None,
+        bar_running: None,
+        bar_history: Vec::new(),
+        bar_pos: None,
         low_power,
         power_manual: !auto_power,
         focus_tick: 0,
@@ -518,6 +536,7 @@ impl App {
                 unseen: false,
                 bell: false,
                 activity: None,
+                table: None,
                 progress_at: Instant::now(),
                 progress_due: false,
                 focused_at: 0,
@@ -710,6 +729,23 @@ impl App {
                         }
                     }
                     Ev::Battery(b) => self.on_battery(b),
+                    Ev::TableReady(title, res) => {
+                        self.bar_running = None;
+                        match *res {
+                            Ok(Data::Value(v))
+                                if !matches!(
+                                    v,
+                                    crate::data::value::Value::List(_)
+                                        | crate::data::value::Value::Record(_)
+                                ) =>
+                            {
+                                self.notice(format!("{title} = {}", v.display()))
+                            }
+                            Ok(d) => self.table = Some(TableView::new(title, d)),
+                            Err(e) => self.notice(e),
+                        }
+                        self.dirty = true;
+                    }
                     Ev::Resize => {
                         let (cols, rows) = terminal::size().unwrap_or((80, 24));
                         self.screen = Rect::new(0, 0, cols, rows);
@@ -1080,6 +1116,12 @@ impl App {
                 }
             }
             ShellEvent::Request(words) => self.on_request(&words),
+            ShellEvent::Table(path) => {
+                p.table = Some(PathBuf::from(path));
+                if !self.option_hint_shown || self.notice.is_none() {
+                    self.notice("▦ F4 explores this table — sort, filter, copy");
+                }
+            }
             ShellEvent::PromptShown => {}
             ShellEvent::Mode(Mode::On) => self.set_view(View::Full),
             ShellEvent::Mode(Mode::Off) => self.set_view(View::Basic),
@@ -1138,8 +1180,59 @@ impl App {
     fn on_input(&mut self, bytes: &[u8]) -> io::Result<()> {
         let mut forward: Vec<u8> = Vec::new();
         for key in keys::tokenize(bytes) {
+            if self.table.is_some() && self.modal == Modal::None {
+                self.table_key(key)?;
+                if self.quit.is_some() {
+                    return Ok(());
+                }
+                continue;
+            }
             // Modal states swallow keys first.
             match self.modal.clone() {
+                Modal::Bar(mut line) => {
+                    self.dirty = true;
+                    match key {
+                        b"\r" => {
+                            self.modal = Modal::None;
+                            self.run_bar(line);
+                        }
+                        b"\x1b\r" => {
+                            // alt+enter: put it in the shell instead
+                            self.modal = Modal::None;
+                            let cmd = format!("sv {}", app_quote_pipeline(&line));
+                            self.type_in_shell(&cmd);
+                        }
+                        b"\x1b" | [0x03] => self.modal = Modal::None,
+                        [0x7f] | [0x08] => {
+                            line.pop();
+                            self.modal = Modal::Bar(line);
+                        }
+                        [0x15] => self.modal = Modal::Bar(String::new()),
+                        b"\x1b[A" | b"\x1bOA" | b"\x1b[B" | b"\x1bOB" => {
+                            let n = self.bar_history.len();
+                            if n > 0 {
+                                let up = key[2] == b'A';
+                                let pos = match (self.bar_pos, up) {
+                                    (None, true) => Some(n - 1),
+                                    (None, false) => None,
+                                    (Some(p), true) => Some(p.saturating_sub(1)),
+                                    (Some(p), false) if p + 1 < n => Some(p + 1),
+                                    (Some(_), false) => None,
+                                };
+                                self.bar_pos = pos;
+                                let text =
+                                    pos.map(|p| self.bar_history[p].clone()).unwrap_or_default();
+                                self.modal = Modal::Bar(text);
+                            }
+                        }
+                        k if !k.is_empty() && k[0] >= 0x20 && k[0] != 0x7f && k[0] != 0x1b => {
+                            line.push_str(&String::from_utf8_lossy(k));
+                            self.modal = Modal::Bar(line);
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
                 Modal::Help => {
                     self.modal = Modal::None;
                     self.dirty = true;
@@ -1260,6 +1353,143 @@ impl App {
             forward.extend_from_slice(key);
         }
         self.flush_forward(&mut forward)
+    }
+
+    fn table_key(&mut self, key: &[u8]) -> io::Result<()> {
+        if let Some(ev) = MouseEv::parse_sgr(key) {
+            if let (Some(t), Some(dir)) = (self.table.as_mut(), ev.wheel()) {
+                t.wheel(dir);
+                self.dirty = true;
+            }
+            return Ok(());
+        }
+        // A few global keys still work over the table.
+        match self.opts.keymap.lookup(key) {
+            Some(c @ (Cmd::Quit | Cmd::Help | Cmd::CommandBar)) => return self.run_cmd(c),
+            Some(Cmd::ExploreTable) => {
+                self.table = None;
+                self.dirty = true;
+                return Ok(());
+            }
+            _ => {}
+        }
+        let Some(t) = self.table.as_mut() else {
+            return Ok(());
+        };
+        let (redraw, act) = t.key(key);
+        if redraw {
+            self.dirty = true;
+        }
+        match act {
+            None => {}
+            Some(TableAct::Close) => self.table = None,
+            Some(TableAct::Copy(text, fmt)) => {
+                let rows = text.lines().count();
+                self.copy(&text);
+                self.notice(format!("copied {rows} lines as {fmt}"));
+            }
+            Some(TableAct::Insert(text)) => {
+                self.table = None;
+                let q = format!("{} ", shell_quote(&text));
+                self.type_in_shell_raw(&q);
+            }
+        }
+        Ok(())
+    }
+
+    /// System clipboard, else OSC 52 through the real terminal.
+    fn copy(&mut self, text: &str) {
+        if !crate::osinfo::copy_to_clipboard(text) {
+            let seq = format!("\x1b]52;c;{}\x07", sv_proto::b64(text.as_bytes()));
+            let mut out = io::stdout();
+            let _ = out.write_all(seq.as_bytes());
+            let _ = out.flush();
+        }
+    }
+
+    /// Type text at the prompt of the active tab's shell (no Enter), and focus it.
+    fn type_in_shell_raw(&mut self, text: &str) {
+        let Some(shell) = self.paired_shell(self.active) else {
+            self.notice("no shell in this tab");
+            return;
+        };
+        if let Some(p) = self.panes.get_mut(&shell) {
+            let _ = p.pane.write(text.as_bytes());
+        }
+        self.tabs[self.active].focus = shell;
+        self.dirty = true;
+    }
+
+    /// Replace the prompt line with `cmd` (no Enter), so the user can run or edit it.
+    fn type_in_shell(&mut self, cmd: &str) {
+        self.type_in_shell_raw(&format!("\x05\x15{cmd}"));
+    }
+
+    /// F4: open the last table `sv` printed in this tab's shell.
+    fn explore_table(&mut self) {
+        let path = self
+            .paired_shell(self.active)
+            .and_then(|id| self.panes.get(&id))
+            .and_then(|p| p.table.clone())
+            .or_else(|| self.panes.values().filter_map(|p| p.table.clone()).max());
+        let Some(path) = path else {
+            self.notice(
+                "no table yet — run an sv command (e.g. sv ls), or alt+; for the command bar",
+            );
+            return;
+        };
+        match std::fs::read_to_string(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|t| crate::data::format::parse_json(&t))
+        {
+            Ok(d) => self.table = Some(TableView::new("last sv table", d)),
+            Err(e) => self.notice(format!("table: {e}")),
+        }
+        self.dirty = true;
+    }
+
+    /// Run a command-bar pipeline as `shellvisor sv '…'` in the shell's folder.
+    fn run_bar(&mut self, line: String) {
+        let line = line.trim().to_string();
+        if line.is_empty() {
+            return;
+        }
+        if self.bar_history.last() != Some(&line) {
+            self.bar_history.push(line.clone());
+            if self.bar_history.len() > 100 {
+                self.bar_history.remove(0);
+            }
+        }
+        self.bar_pos = None;
+        let cwd = self
+            .focused_cwd()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default();
+        let exe = std::env::current_exe().unwrap_or_else(|_| "shellvisor".into());
+        let tx = self.tx.clone();
+        self.bar_running = Some(line.clone());
+        let _ = spawn_thread("bar".into(), move || {
+            let out = std::process::Command::new(exe)
+                .arg("sv")
+                .arg(&line)
+                .current_dir(&cwd)
+                .stdin(std::process::Stdio::null())
+                .output();
+            let res = match out {
+                Ok(o) if o.status.success() => {
+                    let text = String::from_utf8_lossy(&o.stdout);
+                    if text.trim().is_empty() {
+                        Ok(Data::Table(Vec::new()))
+                    } else {
+                        crate::data::format::parse_auto(&text)
+                    }
+                }
+                Ok(o) => Err(String::from_utf8_lossy(&o.stderr).trim().to_string()),
+                Err(e) => Err(format!("sv: {e}")),
+            };
+            let _ = tx.send(Ev::TableReady(line, Box::new(res)));
+        });
+        self.dirty = true;
     }
 
     fn tool_key(&mut self, id: PaneId, key: &[u8]) {
@@ -1713,6 +1943,12 @@ impl App {
                 self.power_manual = true;
                 self.set_low_power(!self.low_power);
             }
+            Cmd::ExploreTable => self.explore_table(),
+            Cmd::CommandBar => {
+                self.table = None;
+                self.bar_pos = None;
+                self.modal = Modal::Bar(String::new());
+            }
             Cmd::ScrollUp | Cmd::ScrollDown => {
                 let id = self.input_target();
                 if let Some(p) = self.panes.get_mut(&id) {
@@ -1733,6 +1969,11 @@ fn relative(p: &std::path::Path, cwd: &std::path::Path) -> String {
         Ok(r) => r.display().to_string(),
         Err(_) => p.display().to_string(),
     }
+}
+
+/// `ls | where size > 1mb` → `'ls | where size > 1mb'` for `sv` at a prompt.
+fn app_quote_pipeline(line: &str) -> String {
+    format!("'{}'", line.replace('\'', "'\\''"))
 }
 
 /// Quote for a POSIX shell only when needed.

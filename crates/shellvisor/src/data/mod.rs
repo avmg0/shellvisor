@@ -210,12 +210,29 @@ pub fn run(args: &[String]) -> i32 {
     let res = match out {
         Err(text) => stdout.write_all(text.as_bytes()),
         Ok(d) if std::io::stdout().is_terminal() => {
+            let inside = crate::cli::inside();
+            let rows = match &d {
+                Data::Table(r) => r.len(),
+                Data::Value(value::Value::List(l)) => l.len(),
+                _ => 0,
+            };
             let st = format::Style {
                 color: true,
                 width: term_width(),
-                max_rows: 1000,
+                max_rows: if inside { 200 } else { 1000 },
             };
-            stdout.write_all(format::render_text(&d, &st).as_bytes())
+            let mut text = format::render_text(&d, &st);
+            if inside && rows > 0 {
+                if let Some(path) = save_table(&d) {
+                    if rows > st.max_rows {
+                        text.push_str(
+                            "\x1b[38;5;179m  F4 explores all rows — sort, filter, copy\x1b[0m\n",
+                        );
+                    }
+                    text.push_str(&sv_proto::table_sequence(&path.display().to_string()));
+                }
+            }
+            stdout.write_all(text.as_bytes())
         }
         Ok(d) => format::write_jsonl(&d, &mut stdout),
     };
@@ -224,6 +241,26 @@ pub fn run(args: &[String]) -> i32 {
         Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => 0,
         Err(e) => fail(&e.to_string()),
     }
+}
+
+/// Keep the rows of the last tables (newest 20) so Shellvisor can open them
+/// in the table viewer.
+fn save_table(d: &Data) -> Option<std::path::PathBuf> {
+    let dir = crate::paths::state_dir().join("tables");
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(format!("{}-{}.jsonl", value::now(), std::process::id()));
+    let mut f = std::io::BufWriter::new(std::fs::File::create(&path).ok()?);
+    format::write_jsonl(d, &mut f).ok()?;
+    f.flush().ok()?;
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        let mut files: Vec<_> = rd.flatten().map(|e| e.path()).collect();
+        files.sort();
+        let excess = files.len().saturating_sub(20);
+        for old in &files[..excess] {
+            let _ = std::fs::remove_file(old);
+        }
+    }
+    Some(path)
 }
 
 fn fail(msg: &str) -> i32 {
@@ -255,6 +292,9 @@ mod tests {
         // plain text becomes lines
         let out = run_line("where line has b | count", Some("abc\nxyz\nbbb\n")).unwrap();
         assert_eq!(out, Ok(Data::Value(Value::Int(2))));
+        // bare numbers (seq 3) are numbers
+        let out = run_line("sum", Some("1\n2\n3\n")).unwrap();
+        assert_eq!(out, Ok(Data::Value(Value::Int(6))));
     }
 
     #[test]
