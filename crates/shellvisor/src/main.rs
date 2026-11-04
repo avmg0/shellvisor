@@ -10,6 +10,7 @@ pub const NAME: &str = "Shellvisor";
 pub const NAME_LOWER: &str = "shellvisor";
 
 mod activity;
+mod agents;
 mod app;
 mod cli;
 mod config;
@@ -137,7 +138,9 @@ fn main() {
         eprintln!("shellvisor: {w}");
     }
 
-    let (keymap, warnings) = keys::Keymap::new(&cfg.key_overrides());
+    let (keymap, mut warnings) = keys::Keymap::new(&cfg.key_overrides());
+    let (auto_approve, agent_warnings) = cfg.agents.auto_actions();
+    warnings.extend(agent_warnings);
     for w in &warnings {
         eprintln!("shellvisor: {w}");
     }
@@ -187,6 +190,8 @@ fn main() {
         keymap,
         restore: cfg.restore,
         low_power: cfg.low_power,
+        agent_worktree: cfg.agents.worktree,
+        auto_approve,
         session_path: paths::state_dir().join("session.yaml"),
         warnings,
     });

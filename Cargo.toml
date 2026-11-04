@@ -1,5 +1,7 @@
 [workspace]
 members = ["crates/shellvisor", "crates/sv-proto"]
+# vendored upstream code: built as a dependency, not linted or formatted here
+exclude = ["crates/vt100"]
 resolver = "3"
 
 [workspace.package]

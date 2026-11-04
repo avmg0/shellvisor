@@ -105,6 +105,10 @@ pub enum Cmd {
     ExploreTable,
     CommandBar,
     ToggleFlow,
+    Agents,
+    NewAgent,
+    Approvals,
+    AttachAgent,
 }
 
 /// Ready-made layouts for a tab.
@@ -254,6 +258,30 @@ pub const ACTIONS: &[(&str, Cmd, &[&str], &str)] = &[
         Cmd::ToggleFlow,
         &["f8"],
         "flow pane: the running job, or sv flow meters (also: sv flowpane)",
+    ),
+    (
+        "agents",
+        Cmd::Agents,
+        &["f9"],
+        "agents tab: go there and back (opens New agent if there are none)",
+    ),
+    (
+        "new_agent",
+        Cmd::NewAgent,
+        &["shift+f9"],
+        "new agent: Claude Code, Codex, Gemini CLI, Aider or any command",
+    ),
+    (
+        "approvals",
+        Cmd::Approvals,
+        &["alt+a"],
+        "agents waiting for approval: y allow · n deny · a always",
+    ),
+    (
+        "attach_agent",
+        Cmd::AttachAgent,
+        &[],
+        "make the agent running in this split an agent column",
     ),
     (
         "explore_table",
@@ -513,6 +541,9 @@ pub fn after_leader(key: &[u8]) -> Option<Cmd> {
         b";" | b":" => CommandBar,
         b"v" => ExploreTable,
         b"d" => ToggleFlow,
+        b"a" => Approvals,
+        b"+" | b"A" => NewAgent,
+        b"g" => Agents,
         b"\x1b[A" => Focus(Dir::Up),
         b"\x1b[B" => Focus(Dir::Down),
         b"\x1b[C" => Focus(Dir::Right),
@@ -522,7 +553,7 @@ pub fn after_leader(key: &[u8]) -> Option<Cmd> {
     })
 }
 
-pub const LEADER_HINT: &str = " ctrl+] → t tab · w close tab · x close split · \\ split │ · - split ─ · o next split · z zoom · l layout · m menu · f files · s system · d flow · ; command bar · v table · b basic view · r rename · 1-9 tab · ? help · ctrl+] send ctrl+] ";
+pub const LEADER_HINT: &str = " ctrl+] → t tab · w close tab · x close split · \\ split │ · - split ─ · o next split · z zoom · l layout · m menu · f files · s system · d flow · g agents · + new agent · a approvals · ; command bar · v table · b basic view · r rename · 1-9 tab · ? help · ctrl+] send ctrl+] ";
 
 /// On macOS, Option+key types these characters unless the terminal is set to
 /// send Option as Alt/Meta. Seeing one alone means alt shortcuts can't work.

@@ -92,6 +92,11 @@ pub fn b64(data: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(data)
 }
 
+/// Decode standard base64 (None if malformed).
+pub fn b64_decode(s: &str) -> Option<Vec<u8>> {
+    base64::engine::general_purpose::STANDARD.decode(s).ok()
+}
+
 /// The escape sequence `sv` prints after a table it saved at `path`.
 pub fn table_sequence(path: &str) -> String {
     format!("\x1b]7770;table;{}\x07", b64(path.as_bytes()))

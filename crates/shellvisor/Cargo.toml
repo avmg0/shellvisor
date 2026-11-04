@@ -20,4 +20,4 @@ signal-hook = "0.3"
 toml = { version = "1", default-features = false, features = ["parse", "serde", "std"] }
 sysinfo = { version = "0.40", default-features = false, features = ["system", "disk", "network", "component"] }
 sv-proto = { version = "0.1.0", path = "../sv-proto" }
-vt100 = "0.16"
+vt100 = { version = "0.16", path = "../vt100" }

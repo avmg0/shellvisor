@@ -1,0 +1,17 @@
+# Vendored copy of vt100 0.16.2 (https://github.com/doy/vt100-rust, MIT,
+# by Jesse Luehrs) with one change for Shellvisor — see SHELLVISOR.md.
+[package]
+name = "vt100"
+version = "0.16.2"
+edition = "2021"
+rust-version = "1.70"
+authors = ["Jesse Luehrs <doy@tozt.net>"]
+description = "Library for parsing terminal data (vendored for Shellvisor)"
+license = "MIT"
+repository = "https://github.com/doy/vt100-rust"
+publish = false
+
+[dependencies]
+itoa = "1.0.15"
+unicode-width = "0.2.1"
+vte = "0.15.0"

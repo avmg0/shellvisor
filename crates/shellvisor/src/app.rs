@@ -12,6 +12,7 @@
 //! The app thread owns all state and redraws only when something changed.
 
 use crate::activity::{self, Activity};
+use crate::agents::{self, Agent, Cli, FileChange};
 use crate::config::{LowPower, Restore};
 use crate::data::value::Data;
 use crate::files::{self, Act, Done, FilesPane, Job, Outcome};
@@ -25,14 +26,14 @@ use crate::sysmon::SysPane;
 use crate::tableview::{TableAct, TableView};
 use crate::term::{InputModes, Pane};
 use crate::ui;
-use crate::workspace::{Axis, Node, PaneId, Tab, neighbor};
+use crate::workspace::{Arrangement, Axis, Node, PaneId, Tab, arrange, neighbor};
 use crossterm::{cursor, execute, terminal};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread;
@@ -64,6 +65,10 @@ pub struct Options {
     pub keymap: Keymap,
     pub restore: Restore,
     pub low_power: LowPower,
+    /// New agents get their own git worktree.
+    pub agent_worktree: bool,
+    /// Approval kinds answered automatically (config agents.approvals).
+    pub auto_approve: Vec<agents::Action>,
     pub session_path: PathBuf,
     /// Problems found in config.yaml, shown once at start.
     pub warnings: Vec<String>,
@@ -80,6 +85,8 @@ pub const MENU: &[(&str, Cmd)] = &[
     ("Layout: files", Cmd::Preset(Preset::Files)),
     ("Layout: data", Cmd::Preset(Preset::Data)),
     ("Flow pane", Cmd::ToggleFlow),
+    ("New agent", Cmd::NewAgent),
+    ("Make this an agent column", Cmd::AttachAgent),
     ("Rearrange splits", Cmd::NextLayout),
     ("Zoom split", Cmd::Zoom),
     ("Close split", Cmd::ClosePane),
@@ -126,6 +133,8 @@ enum Ev {
     Battery(Option<bool>),
     /// A command-bar pipeline finished: (title, rows or error).
     TableReady(String, Box<Result<Data, String>>),
+    /// Files each agent has changed (from git).
+    AgentFiles(Vec<(PaneId, Vec<FileChange>)>),
     Resize,
     Quit,
 }
@@ -148,6 +157,14 @@ pub struct PaneState {
     pub table: Option<PathBuf>,
     /// Stats file of the last `sv flow` run here.
     pub flow: Option<PathBuf>,
+    /// This shell runs a coding agent.
+    pub agent: Option<Agent>,
+    /// Typed once the shell shows its first prompt (so it isn't echoed twice).
+    pending_input: Option<(String, Instant)>,
+    /// Don't look for approval prompts before this (just answered one).
+    agent_quiet_until: Instant,
+    agent_check_at: Instant,
+    agent_check_due: bool,
     progress_at: Instant,
     /// New output since progress was last read.
     progress_due: bool,
@@ -177,6 +194,49 @@ pub enum Modal {
     Menu(usize),
     /// The command bar (alt+;), with what's typed so far.
     Bar(String),
+    /// The New agent dialog.
+    NewAgent(Box<NewAgentForm>),
+    /// Agents waiting for approval, with the highlighted row.
+    Approvals(usize),
+}
+
+/// The New agent dialog's fields.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewAgentForm {
+    pub clis: Vec<Cli>,
+    pub cli: usize,
+    pub name: String,
+    pub prompt: String,
+    /// The command line, for a custom agent.
+    pub custom: String,
+    pub worktree: bool,
+    /// 0 CLI · 1 name · 2 instruction / command · 3 worktree
+    pub field: usize,
+    pub error: Option<String>,
+    /// Where it will run.
+    pub folder: String,
+}
+
+impl NewAgentForm {
+    pub fn cli(&self) -> Cli {
+        self.clis[self.cli]
+    }
+
+    fn text_field(&mut self) -> Option<&mut String> {
+        let generic = self.cli() == Cli::Generic;
+        match self.field {
+            1 => Some(&mut self.name),
+            2 if generic => Some(&mut self.custom),
+            2 => Some(&mut self.prompt),
+            _ => None,
+        }
+    }
+}
+
+pub enum Answer {
+    Allow,
+    Always,
+    Deny,
 }
 
 pub struct App {
@@ -188,6 +248,14 @@ pub struct App {
     pub bar_running: Option<String>,
     bar_history: Vec<String>,
     bar_pos: Option<usize>,
+    /// Agents started so far (for colours and default names).
+    agents_made: usize,
+    agent_files_at: Instant,
+    agent_files_busy: bool,
+    /// Overlap warnings already shown.
+    overlaps_seen: Vec<String>,
+    /// The tab F9 came from.
+    before_agents: Option<usize>,
     pub low_power: bool,
     power_manual: bool,
     focus_tick: u64,
@@ -260,6 +328,11 @@ pub fn run(opts: Options) -> io::Result<i32> {
         bar_running: None,
         bar_history: Vec::new(),
         bar_pos: None,
+        agents_made: 0,
+        agent_files_at: Instant::now(),
+        agent_files_busy: false,
+        overlaps_seen: Vec::new(),
+        before_agents: None,
         low_power,
         power_manual: !auto_power,
         focus_tick: 0,
@@ -546,6 +619,11 @@ impl App {
                 activity: None,
                 table: None,
                 flow: None,
+                agent: None,
+                pending_input: None,
+                agent_quiet_until: Instant::now(),
+                agent_check_at: Instant::now(),
+                agent_check_due: false,
                 progress_at: Instant::now(),
                 progress_due: false,
                 focused_at: 0,
@@ -740,6 +818,7 @@ impl App {
                         }
                     }
                     Ev::Battery(b) => self.on_battery(b),
+                    Ev::AgentFiles(list) => self.on_agent_files(list),
                     Ev::TableReady(title, res) => {
                         self.bar_running = None;
                         match *res {
@@ -843,6 +922,7 @@ impl App {
         for id in due {
             self.update_progress(id);
         }
+        self.tick_agents();
         let target = self.input_target();
         if target != self.last_focus {
             self.last_focus = target;
@@ -1077,8 +1157,18 @@ impl App {
             if p.activity.is_some() {
                 p.progress_due = true;
             }
+            if let Some(a) = p.agent.as_mut() {
+                a.last_output = Instant::now();
+                if matches!(a.status, agents::Status::Idle | agents::Status::Starting) && p.running
+                {
+                    a.status = agents::Status::Working;
+                    self.dirty = true;
+                }
+                p.agent_check_due = true;
+            }
         }
         self.update_progress(id);
+        self.check_agent(id);
         if on_screen {
             self.dirty = true;
         }
@@ -1105,6 +1195,15 @@ impl App {
                 p.started = Some(Instant::now());
                 p.running = true;
                 p.activity = activity::classify(&p.command);
+                if let Some(a) = p.agent.as_mut() {
+                    // the agent (or another command) runs again in its column
+                    let cli = Cli::of_command(&p.command);
+                    if cli != Cli::Generic || !a.launched {
+                        a.cli = if cli == Cli::Generic { a.cli } else { cli };
+                    }
+                    a.status = agents::Status::Working;
+                    a.started = Instant::now();
+                }
                 self.dirty = true;
             }
             ShellEvent::CommandFinished(code) => {
@@ -1123,6 +1222,14 @@ impl App {
                     });
                 }
                 let took = p.started.map(|s| s.elapsed().as_secs()).unwrap_or(0);
+                let agent_done = p
+                    .agent
+                    .as_mut()
+                    .filter(|a| !matches!(a.status, agents::Status::Exited(_)))
+                    .map(|a| {
+                        a.status = agents::Status::Exited(code);
+                        (a.name.clone(), a.files_summary(), a.branch.clone())
+                    });
                 let done = p.activity.take();
                 p.running = false;
                 p.started = None;
@@ -1138,6 +1245,19 @@ impl App {
                             format!("✖ {} failed (exit {c}) · {}", a.label, ui::fmt_secs(took))
                         }
                     });
+                }
+                if let Some((name, files, branch)) = agent_done {
+                    let what = if files.is_empty() {
+                        "no changes".to_string()
+                    } else {
+                        files
+                    };
+                    let on = branch.map(|b| format!(" on {b}")).unwrap_or_default();
+                    self.notice(match code {
+                        Some(0) | None => format!("✔ agent {name} finished · {what}{on}"),
+                        Some(c) => format!("✖ agent {name} exited ({c}) · {what}{on}"),
+                    });
+                    self.agent_files_at = Instant::now() - Duration::from_secs(60);
                 }
                 // Commands change files: refresh this tab's file panes.
                 if let Some(t) = self.tab_of(id) {
@@ -1160,7 +1280,11 @@ impl App {
                     self.notice("▦ F4 explores this table — sort, filter, copy");
                 }
             }
-            ShellEvent::PromptShown => {}
+            ShellEvent::PromptShown => {
+                if let Some((text, _)) = p.pending_input.take() {
+                    let _ = p.pane.write(text.as_bytes());
+                }
+            }
             ShellEvent::Mode(Mode::On) => self.set_view(View::Full),
             ShellEvent::Mode(Mode::Off) => self.set_view(View::Basic),
             ShellEvent::Mode(Mode::Exit) => self.request_quit(Some(id)),
@@ -1227,6 +1351,45 @@ impl App {
             }
             // Modal states swallow keys first.
             match self.modal.clone() {
+                Modal::NewAgent(form) => {
+                    self.dirty = true;
+                    self.new_agent_key(*form, key);
+                    continue;
+                }
+                Modal::Approvals(sel) => {
+                    self.dirty = true;
+                    let list = self.pending_approvals();
+                    let n = list.len();
+                    if n == 0 {
+                        self.modal = Modal::None;
+                        continue;
+                    }
+                    let sel = sel.min(n - 1);
+                    let id = list[sel];
+                    match key {
+                        b"\x1b[A" | b"\x1bOA" | b"k" => {
+                            self.modal = Modal::Approvals((sel + n - 1) % n)
+                        }
+                        b"\x1b[B" | b"\x1bOB" | b"j" => {
+                            self.modal = Modal::Approvals((sel + 1) % n)
+                        }
+                        b"y" | b"Y" => self.answer(id, Answer::Allow),
+                        b"a" | b"A" => self.answer(id, Answer::Always),
+                        b"n" | b"N" => self.answer(id, Answer::Deny),
+                        b"\r" => {
+                            // go to that agent to answer it yourself
+                            self.modal = Modal::None;
+                            self.focus_pane(id);
+                        }
+                        _ => self.modal = Modal::None,
+                    }
+                    if matches!(self.modal, Modal::Approvals(_))
+                        && self.pending_approvals().is_empty()
+                    {
+                        self.modal = Modal::None;
+                    }
+                    continue;
+                }
                 Modal::Bar(mut line) => {
                     self.dirty = true;
                     match key {
@@ -1530,6 +1693,488 @@ impl App {
         self.dirty = true;
     }
 
+    // ---------------------------------------------------------------- agents
+
+    /// The tab holding agent columns.
+    pub fn agents_tab(&self) -> Option<usize> {
+        self.tabs.iter().position(|t| {
+            t.root
+                .panes()
+                .iter()
+                .any(|id| self.panes.get(id).is_some_and(|p| p.agent.is_some()))
+        })
+    }
+
+    /// Agent panes, oldest first.
+    pub fn agent_ids(&self) -> Vec<PaneId> {
+        let mut v: Vec<PaneId> = self
+            .panes
+            .iter()
+            .filter(|(_, p)| p.agent.is_some())
+            .map(|(id, _)| *id)
+            .collect();
+        v.sort();
+        v
+    }
+
+    pub fn pending_approvals(&self) -> Vec<PaneId> {
+        let mut v: Vec<(Instant, PaneId)> = self
+            .panes
+            .iter()
+            .filter_map(|(id, p)| p.agent.as_ref()?.approval().map(|a| (a.since, *id)))
+            .collect();
+        v.sort();
+        v.into_iter().map(|(_, id)| id).collect()
+    }
+
+    fn focus_pane(&mut self, id: PaneId) {
+        if let Some(t) = self.tab_of(id) {
+            self.switch_tab(t);
+            self.tabs[t].focus = id;
+            if self.view == View::Basic {
+                self.view = View::Full;
+            }
+            self.relayout();
+        }
+    }
+
+    fn toggle_agents(&mut self) {
+        match self.agents_tab() {
+            Some(t) if t == self.active => {
+                let back = self
+                    .before_agents
+                    .take()
+                    .filter(|b| *b < self.tabs.len() && *b != t)
+                    .unwrap_or(0);
+                self.switch_tab(back);
+            }
+            Some(t) => {
+                self.before_agents = Some(self.active);
+                if self.view == View::Basic {
+                    self.view = View::Full;
+                }
+                self.switch_tab(t);
+                self.relayout();
+            }
+            None => self.open_new_agent(),
+        }
+    }
+
+    fn open_new_agent(&mut self) {
+        let mut clis: Vec<Cli> = agents::detect().into_iter().map(|(c, _)| c).collect();
+        let none = clis.is_empty();
+        clis.push(Cli::Generic);
+        let folder = self
+            .focused_cwd()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default();
+        let in_repo = agents::repo_head(&folder).is_some();
+        let mut form = NewAgentForm {
+            clis,
+            cli: 0,
+            name: String::new(),
+            prompt: String::new(),
+            custom: String::new(),
+            worktree: self.opts.agent_worktree && in_repo,
+            field: 2,
+            error: none.then(|| "no agent CLI found on PATH (claude, codex, gemini, aider) — run any command as a custom agent".to_string()),
+            folder: ui::short_path(&folder.to_string_lossy()),
+        };
+        form.name = self.default_agent_name(form.cli());
+        self.modal = Modal::NewAgent(Box::new(form));
+    }
+
+    fn default_agent_name(&self, cli: Cli) -> String {
+        let base = match cli {
+            Cli::Generic => "agent",
+            c => c.name(),
+        };
+        let taken: Vec<String> = self
+            .panes
+            .values()
+            .filter_map(|p| p.agent.as_ref().map(|a| a.name.clone()))
+            .collect();
+        if !taken.iter().any(|t| t == base) {
+            return base.to_string();
+        }
+        (2..)
+            .map(|i| format!("{base}-{i}"))
+            .find(|n| !taken.contains(n))
+            .unwrap()
+    }
+
+    fn new_agent_key(&mut self, mut f: NewAgentForm, key: &[u8]) {
+        match key {
+            b"\x1b" | [0x03] => {
+                self.modal = Modal::None;
+                return;
+            }
+            b"\t" | b"\x1b[B" | b"\x1bOB" => f.field = (f.field + 1) % 4,
+            b"\x1b[Z" | b"\x1b[A" | b"\x1bOA" => f.field = (f.field + 3) % 4,
+            b"\x1b[C" | b"\x1bOC" | b"\x1b[D" | b"\x1bOD" if f.field == 0 => {
+                let n = f.clis.len();
+                let old_default = self.default_agent_name(f.cli());
+                f.cli = if key.ends_with(b"C") {
+                    (f.cli + 1) % n
+                } else {
+                    (f.cli + n - 1) % n
+                };
+                if f.name == old_default || f.name.is_empty() {
+                    f.name = self.default_agent_name(f.cli());
+                }
+            }
+            b" " | b"\x1b[C" | b"\x1b[D" if f.field == 3 => f.worktree = !f.worktree,
+            b"\r" => {
+                let (cli, name, prompt, custom, wt) = (
+                    f.cli(),
+                    f.name.trim().to_string(),
+                    f.prompt.clone(),
+                    f.custom.clone(),
+                    f.worktree,
+                );
+                match self.start_agent(cli, &name, &prompt, &custom, wt, None) {
+                    Ok(()) => {
+                        self.modal = Modal::None;
+                        return;
+                    }
+                    Err(e) => f.error = Some(e),
+                }
+            }
+            [0x7f] | [0x08] => {
+                if let Some(t) = f.text_field() {
+                    t.pop();
+                }
+            }
+            [0x15] => {
+                if let Some(t) = f.text_field() {
+                    t.clear();
+                }
+            }
+            k if !k.is_empty() && k[0] >= 0x20 && k[0] != 0x7f && k[0] != 0x1b => {
+                if let Some(t) = f.text_field() {
+                    if t.chars().count() < 2000 {
+                        t.push_str(&String::from_utf8_lossy(k));
+                    }
+                }
+            }
+            _ => {}
+        }
+        self.modal = Modal::NewAgent(Box::new(f));
+    }
+
+    /// Start an agent CLI in a new shell (in its own worktree when asked)
+    /// and put it in the agents tab.
+    pub fn start_agent(
+        &mut self,
+        cli: Cli,
+        name: &str,
+        prompt: &str,
+        custom: &str,
+        worktree: bool,
+        folder: Option<PathBuf>,
+    ) -> Result<(), String> {
+        let name = if name.is_empty() {
+            self.default_agent_name(cli)
+        } else {
+            name.to_string()
+        };
+        if !agents::valid_name(&name) {
+            return Err(format!("name `{name}`: use letters, digits, - and _"));
+        }
+        if self
+            .panes
+            .values()
+            .any(|p| p.agent.as_ref().is_some_and(|a| a.name == name))
+        {
+            return Err(format!("there is already an agent called {name}"));
+        }
+        if cli == Cli::Generic && custom.trim().is_empty() {
+            return Err("type the command that starts your agent".into());
+        }
+        let here = folder
+            .or_else(|| self.focused_cwd())
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default();
+        let mut agent = Agent::new(name.clone(), cli, self.agents_made);
+        let cwd = if worktree {
+            let wt = agents::create_worktree(&here, &name)?;
+            agent.repo = Some(wt.repo);
+            agent.branch = Some(wt.branch);
+            agent.base = Some(wt.base);
+            agent.worktree = Some(wt.path.clone());
+            wt.path
+        } else {
+            if let Some((repo, head)) = agents::repo_head(&here) {
+                agent.repo = Some(repo);
+                agent.base = Some(head);
+            }
+            here
+        };
+        let id = self.new_pane(Some(cwd)).map_err(|e| e.to_string())?;
+        self.agents_made += 1;
+        let line = cli.launch(prompt, custom);
+        if let Some(p) = self.panes.get_mut(&id) {
+            p.agent = Some(agent);
+            p.pending_input = Some((format!("{line}\r"), Instant::now()));
+        }
+        self.place_in_agents_tab(id);
+        self.notice(format!(
+            "agent {name} started · F9 agents · alt+a approvals"
+        ));
+        Ok(())
+    }
+
+    /// Add a pane to the agents tab (creating it), as one more column.
+    fn place_in_agents_tab(&mut self, id: PaneId) {
+        let t = match self
+            .agents_tab()
+            .filter(|t| !self.tabs[*t].root.contains(id))
+        {
+            Some(t) => {
+                let mut panes = self.tabs[t].root.panes();
+                panes.push(id);
+                let how = if panes.len() <= 4 {
+                    Arrangement::Columns
+                } else {
+                    Arrangement::Grid
+                };
+                self.tabs[t].root = arrange(&panes, how);
+                t
+            }
+            None => {
+                let mut tab = Tab::new(id);
+                tab.name = Some("agents".into());
+                self.tabs.push(tab);
+                self.tabs.len() - 1
+            }
+        };
+        if self.active != t {
+            self.before_agents = Some(self.active);
+        }
+        self.tabs[t].focus = id;
+        self.tabs[t].zoomed = false;
+        if self.view == View::Basic {
+            self.view = View::Full;
+        }
+        self.switch_tab(t);
+        self.relayout();
+    }
+
+    /// The focused split runs an agent CLI: make it an agent column.
+    fn attach_agent(&mut self) {
+        let id = self.input_target();
+        let Some(p) = self.panes.get(&id) else { return };
+        if p.agent.is_some() {
+            self.notice("this split is already an agent column");
+            return;
+        }
+        if !p.running {
+            self.notice("start the agent in this split first (e.g. claude), then attach it");
+            return;
+        }
+        let cli = Cli::of_command(&p.command);
+        let name = self.default_agent_name(cli);
+        let mut agent = Agent::new(name.clone(), cli, self.agents_made);
+        agent.launched = false;
+        agent.status = agents::Status::Working;
+        if let Some((repo, head)) = agents::repo_head(Path::new(&p.cwd)) {
+            agent.repo = Some(repo);
+            agent.base = Some(head);
+        }
+        self.agents_made += 1;
+        // take it out of its tab (without stopping it) and into the agents tab
+        let target = self.agents_tab();
+        if let Some(t) = self.tab_of(id) {
+            if target != Some(t) {
+                match self.tabs[t].root.clone().remove(id) {
+                    Some(root) => {
+                        if self.tabs[t].focus == id {
+                            self.tabs[t].focus = root.panes()[0];
+                        }
+                        self.tabs[t].root = root;
+                    }
+                    None => {
+                        // it was the tab's only pane: the tab becomes the agents tab
+                        self.tabs[t].name = Some("agents".into());
+                    }
+                }
+            }
+        }
+        if let Some(p) = self.panes.get_mut(&id) {
+            p.agent = Some(agent);
+        }
+        self.place_in_agents_tab(id);
+        self.notice(format!("{name} is now an agent column"));
+    }
+
+    /// Answer an agent's approval prompt with its CLI's own keys.
+    fn answer(&mut self, id: PaneId, ans: Answer) {
+        let Some(p) = self.panes.get_mut(&id) else {
+            return;
+        };
+        let Some(a) = p.agent.as_mut() else { return };
+        let Some(ap) = a.approval().cloned() else {
+            return;
+        };
+        let k = a.cli.keys();
+        let keys = match ans {
+            Answer::Allow => k.allow,
+            Answer::Always => {
+                if !a.always.contains(&ap.action) {
+                    a.always.push(ap.action);
+                }
+                k.always
+            }
+            Answer::Deny => k.deny,
+        };
+        let _ = p.pane.write(keys.as_bytes());
+        a.status = agents::Status::Working;
+        p.agent_quiet_until = Instant::now() + Duration::from_millis(800);
+        self.dirty = true;
+    }
+
+    /// Look at an agent's screen for an approval prompt (≤ 5×/s).
+    fn check_agent(&mut self, id: PaneId) {
+        let auto = self.opts.auto_approve.clone();
+        let Some(p) = self.panes.get_mut(&id) else {
+            return;
+        };
+        if p.agent.is_none()
+            || !p.agent_check_due
+            || p.agent_check_at.elapsed() < Duration::from_millis(200)
+        {
+            return;
+        }
+        if Instant::now() < p.agent_quiet_until {
+            return;
+        }
+        p.agent_check_due = false;
+        p.agent_check_at = Instant::now();
+        let cols = p.size.1;
+        let rows: Vec<String> = p.pane.screen().rows(0, cols).collect();
+        let a = p.agent.as_mut().unwrap();
+        let found = if p.running {
+            agents::detect_approval(a.cli, &rows)
+        } else {
+            None
+        };
+        let mut notice = None;
+        match found {
+            Some(ap) => {
+                let same = a.approval().is_some_and(|old| old.what == ap.what);
+                if !same {
+                    if a.always.contains(&ap.action) || auto.contains(&ap.action) {
+                        let _ = p.pane.write(a.cli.keys().allow.as_bytes());
+                        p.agent_quiet_until = Instant::now() + Duration::from_millis(800);
+                        notice = Some(format!(
+                            "auto-approved {} for {}: {}",
+                            ap.action.name(),
+                            a.name,
+                            ap.what
+                        ));
+                        a.status = agents::Status::Working;
+                    } else {
+                        notice = Some(format!(
+                            "⚑ {} asks to {}: {} — alt+a",
+                            a.name,
+                            ap.action.name(),
+                            ap.what
+                        ));
+                        a.status = agents::Status::NeedsApproval(ap);
+                    }
+                    self.dirty = true;
+                }
+            }
+            None => {
+                if a.approval().is_some() {
+                    a.status = agents::Status::Working;
+                    self.dirty = true;
+                }
+            }
+        }
+        if let Some(n) = notice {
+            self.notice(n);
+        }
+    }
+
+    /// Idle detection, trailing approval checks, and git change polling.
+    fn tick_agents(&mut self) {
+        let ids = self.agent_ids();
+        if ids.is_empty() {
+            return;
+        }
+        for id in &ids {
+            if let Some(p) = self.panes.get_mut(id) {
+                // a shell without our hooks never says "prompt": type it anyway
+                if p.pending_input
+                    .as_ref()
+                    .is_some_and(|(_, at)| at.elapsed() > Duration::from_secs(2))
+                {
+                    let (text, _) = p.pending_input.take().unwrap();
+                    let _ = p.pane.write(text.as_bytes());
+                }
+                if let Some(a) = p.agent.as_mut() {
+                    if matches!(a.status, agents::Status::Working)
+                        && a.last_output.elapsed() > agents::IDLE_AFTER
+                    {
+                        a.status = agents::Status::Idle;
+                        self.dirty = true;
+                    }
+                }
+            }
+            self.check_agent(*id);
+        }
+        let every = if self.low_power {
+            Duration::from_secs(15)
+        } else {
+            Duration::from_secs(5)
+        };
+        if self.agent_files_busy || self.agent_files_at.elapsed() < every {
+            return;
+        }
+        let work: Vec<(PaneId, PathBuf, String)> = ids
+            .iter()
+            .filter_map(|id| {
+                let p = self.panes.get(id)?;
+                let a = p.agent.as_ref()?;
+                let dir = a.worktree.clone().or_else(|| a.repo.clone())?;
+                Some((*id, dir, a.base.clone()?))
+            })
+            .collect();
+        self.agent_files_at = Instant::now();
+        if work.is_empty() {
+            return;
+        }
+        self.agent_files_busy = true;
+        let tx = self.tx.clone();
+        let _ = spawn_thread("agent-git".into(), move || {
+            let out = work
+                .into_iter()
+                .map(|(id, dir, base)| (id, agents::changes(&dir, &base)))
+                .collect();
+            let _ = tx.send(Ev::AgentFiles(out));
+        });
+    }
+
+    fn on_agent_files(&mut self, list: Vec<(PaneId, Vec<FileChange>)>) {
+        self.agent_files_busy = false;
+        for (id, files) in list {
+            if let Some(a) = self.panes.get_mut(&id).and_then(|p| p.agent.as_mut()) {
+                if a.files != files {
+                    a.files = files;
+                    self.dirty = true;
+                }
+            }
+        }
+        let over = agents::overlaps(self.panes.values().filter_map(|p| p.agent.as_ref()));
+        for (path, names) in over {
+            if !self.overlaps_seen.contains(&path) {
+                self.overlaps_seen.push(path.clone());
+                self.notice(format!("⚠ {} both changed {path}", names.join(" and ")));
+            }
+        }
+    }
+
     fn tool_key(&mut self, id: PaneId, key: &[u8]) {
         let out = match self.tools.get_mut(&id) {
             Some(Tool::Files(f)) => f.key(key),
@@ -1673,6 +2318,31 @@ impl App {
                 Ok(())
             }
             ["system"] => self.show_tool("system", false),
+            ["agent", "attach"] => {
+                self.attach_agent();
+                Ok(())
+            }
+            ["agent", "new", cli, name, mode, prompt, cmd, cwd] => {
+                let unb = |s: &str| {
+                    sv_proto::b64_decode(s)
+                        .map(|v| String::from_utf8_lossy(&v).into_owned())
+                        .unwrap_or_default()
+                };
+                let cli = Cli::parse(cli).unwrap_or(Cli::Generic);
+                let name = if *name == "-" {
+                    String::new()
+                } else {
+                    name.to_string()
+                };
+                let folder = Some(PathBuf::from(unb(cwd))).filter(|p| p.is_dir());
+                let wt = *mode == "worktree" && self.opts.agent_worktree;
+                // no repo → just run it here
+                let wt = wt && folder.as_deref().and_then(agents::repo_head).is_some();
+                if let Err(e) = self.start_agent(cli, &name, &unb(prompt), &unb(cmd), wt, folder) {
+                    self.notice(format!("sv agent: {e}"));
+                }
+                Ok(())
+            }
             ["flow"] => self.show_tool("flow", false),
             ["layout", name] => match Preset::parse(name) {
                 Some(p) => self.apply_preset(p),
@@ -2005,6 +2675,16 @@ impl App {
                 self.set_low_power(!self.low_power);
             }
             Cmd::ExploreTable => self.explore_table(),
+            Cmd::Agents => self.toggle_agents(),
+            Cmd::NewAgent => self.open_new_agent(),
+            Cmd::Approvals => {
+                if self.pending_approvals().is_empty() {
+                    self.notice("no agent is waiting for approval");
+                } else {
+                    self.modal = Modal::Approvals(0);
+                }
+            }
+            Cmd::AttachAgent => self.attach_agent(),
             Cmd::ToggleFlow => self.show_tool("flow", true)?,
             Cmd::CommandBar => {
                 self.table = None;

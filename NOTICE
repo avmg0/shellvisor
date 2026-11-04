@@ -3,3 +3,7 @@ Copyright 2026 avmg0 <15078558+avmg0@users.noreply.github.com>
 
 This product is licensed under the Apache License, Version 2.0.
 See the LICENSE file for the full license text.
+
+This product includes a modified copy of vt100 0.16.2
+(https://github.com/doy/vt100-rust), Copyright (c) Jesse Luehrs, licensed
+under the MIT License — see crates/vt100/LICENSE and crates/vt100/SHELLVISOR.md.

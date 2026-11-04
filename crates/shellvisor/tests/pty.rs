@@ -865,3 +865,70 @@ fn sv_flow_meters_a_pipeline_and_the_flow_pane_shows_it() {
         t.contains("finished") && t.contains("20.0k → 6878 lines · 34% kept")
     });
 }
+
+// ------------------------------------------------------------------ P4 agents
+
+fn git_repo(dir: &std::path::Path) {
+    let g = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+    };
+    g(&["init", "-q", "-b", "main"]);
+    std::fs::write(dir.join("README.md"), "# demo\n").unwrap();
+    g(&["add", "."]);
+    g(&[
+        "-c",
+        "user.email=a@b",
+        "-c",
+        "user.name=t",
+        "commit",
+        "-qm",
+        "init",
+    ]);
+}
+
+#[test]
+fn agent_runs_in_a_worktree_asks_for_approval_and_takes_messages() {
+    let mut s = Session::start_full("agent");
+    s.wait_for("PROMPT>");
+    let work = s.dir.join("work");
+    git_repo(&work);
+    let fake = s.dir.join("fake-agent.sh");
+    std::fs::write(
+        &fake,
+        "#!/bin/bash\necho \"fake agent: $*\"\necho 'x = 1' > app.py\nsleep 0.3\nprintf 'Install the test dependency? (y/n) '\nread ans\necho \"you said: $ans\"\nread -p '> ' msg\necho \"got message: $msg\"\n",
+    )
+    .unwrap();
+    std::process::Command::new("chmod")
+        .arg("+x")
+        .arg(&fake)
+        .status()
+        .unwrap();
+    s.send(&format!(
+        "sv agent new --name api --cmd '{} go'\r",
+        fake.display()
+    ));
+    s.wait_until("agent column", |t| {
+        top(t).contains("◆ 1 agent") && t.contains("● api")
+    });
+    s.wait_for("fake agent: go");
+    s.wait_for("agent/api"); // its own branch
+    s.wait_for("⚑"); // asks for approval
+    s.send("\x1ba"); // alt+a: the approvals list
+    s.wait_for("waiting for approval");
+    s.send("y");
+    s.wait_for("you said: y");
+    s.wait_for("1 file +1"); // git sees its change (in its worktree)
+    assert!(work.join(".shellvisor/worktrees/api/app.py").exists());
+    assert!(
+        !work.join("app.py").exists(),
+        "the main checkout is untouched"
+    );
+    s.send("hello\r"); // typing goes to the agent
+    s.wait_for("got message: hello");
+    s.wait_for("agent api finished");
+}

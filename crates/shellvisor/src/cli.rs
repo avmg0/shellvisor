@@ -20,6 +20,9 @@ usage:
   sv flow 'a | b | c'             run a pipeline with a meter on every stage
   sv flowpane  open the Flow pane (what the shell is running, live)
   sv power on|off|auto            low-power mode (auto = on battery)
+  sv agent new [claude|codex|gemini|aider] [--name N] [--here] ['first task']
+  sv agent new --cmd '<command>' [--name N]   any other agent CLI
+  sv agent attach   make the agent running in this shell an agent column
   sv data      list the data commands (ls, ps, open, where, sort-by, to csv…)
   sv status    is Shellvisor running in this terminal?
   sv version   print the version
@@ -84,6 +87,7 @@ pub fn run(args: &[String]) -> i32 {
             }
         }
         "flow" => crate::flowrun::run(&args[1..]),
+        "agent" | "agents" => agent(&args[1..]),
         "files" | "sys" | "system" | "flowpane" | "layout" | "power" => {
             if !inside() {
                 return not_running(cmd);
@@ -139,6 +143,77 @@ pub fn run(args: &[String]) -> i32 {
         }
         other => {
             eprintln!("sv: unknown command `{other}`\n\n{HELP}");
+            2
+        }
+    }
+}
+
+fn agent(args: &[String]) -> i32 {
+    if !inside() {
+        return not_running("agent");
+    }
+    let usage = "usage: sv agent new [claude|codex|gemini|aider] [--name N] [--here] [\"first task\"]\n       sv agent new --cmd \"<command>\" [--name N]\n       sv agent attach";
+    match args.first().map(String::as_str) {
+        Some("attach") => send_seq(request_sequence(&["agent", "attach"])),
+        Some("new") => {
+            let mut cli = String::new();
+            let (mut name, mut cmd, mut here, mut prompt) =
+                (String::new(), String::new(), false, Vec::new());
+            let mut it = args[1..].iter();
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "--name" | "-n" => name = it.next().cloned().unwrap_or_default(),
+                    "--cmd" | "-c" => cmd = it.next().cloned().unwrap_or_default(),
+                    "--here" => here = true,
+                    x if cli.is_empty()
+                        && prompt.is_empty()
+                        && crate::agents::Cli::parse(x).is_some() =>
+                    {
+                        cli = x.to_string()
+                    }
+                    x => prompt.push(x.to_string()),
+                }
+            }
+            if !cmd.is_empty() {
+                cli = "command".into();
+            }
+            if cli.is_empty() {
+                cli = match crate::agents::detect().first() {
+                    Some((c, _)) => c.name().to_string(),
+                    None => {
+                        eprintln!(
+                            "sv agent: no agent CLI found (claude, codex, gemini, aider) — use --cmd \"<command>\""
+                        );
+                        return 1;
+                    }
+                };
+            }
+            if !name.is_empty() && !crate::agents::valid_name(&name) {
+                eprintln!("sv agent: name `{name}` — use letters, digits, - and _");
+                return 2;
+            }
+            let b = |s: &str| sv_proto::b64(s.as_bytes());
+            let words = [
+                "agent".to_string(),
+                "new".into(),
+                cli,
+                if name.is_empty() { "-".into() } else { name },
+                if here {
+                    "here".into()
+                } else {
+                    "worktree".into()
+                },
+                b(&prompt.join(" ")),
+                b(&cmd),
+                b(&std::env::current_dir()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default()),
+            ];
+            let refs: Vec<&str> = words.iter().map(String::as_str).collect();
+            send_seq(request_sequence(&refs))
+        }
+        _ => {
+            eprintln!("{usage}");
             2
         }
     }

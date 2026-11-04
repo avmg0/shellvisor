@@ -9,6 +9,10 @@
 //! mouse: true             # mouse wheel scrolls history; hold Option (iTerm2) or
 //!                         # turn off View → Allow Mouse Reporting (Terminal.app) to select text
 //! low_power: auto         # slower sampling and animations: auto (on battery), on, off
+//! agents:
+//!   worktree: true        # each new agent works in its own git worktree + branch
+//!   approvals:            # answer agents' permission prompts for you: auto | ask
+//!     test: auto          # read edit test lint install network push delete command
 //! keys:                   # change or turn off shortcuts (see `F1` for all actions)
 //!   new_tab: alt+n        # one key…
 //!   next_layout: [f7]     # …or a list
@@ -29,6 +33,7 @@ pub struct Config {
     pub start_view: StartView,
     pub restore: Restore,
     pub low_power: LowPower,
+    pub agents: AgentsConfig,
     pub keys: HashMap<String, KeyList>,
 }
 
@@ -49,6 +54,42 @@ pub enum LowPower {
     Auto,
     On,
     Off,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct AgentsConfig {
+    pub worktree: bool,
+    /// action kind → "auto" or "ask"
+    pub approvals: HashMap<String, String>,
+}
+
+impl Default for AgentsConfig {
+    fn default() -> Self {
+        AgentsConfig {
+            worktree: true,
+            approvals: HashMap::new(),
+        }
+    }
+}
+
+impl AgentsConfig {
+    /// Action kinds answered automatically, plus warnings for typos.
+    pub fn auto_actions(&self) -> (Vec<crate::agents::Action>, Vec<String>) {
+        let mut auto = Vec::new();
+        let mut warn = Vec::new();
+        for (k, v) in &self.approvals {
+            match (crate::agents::Action::parse(k), v.as_str()) {
+                (Some(a), "auto") => auto.push(a),
+                (Some(_), "ask") => {}
+                (Some(_), other) => warn.push(format!("agents.approvals.{k}: `{other}` — use auto or ask")),
+                (None, _) => warn.push(format!(
+                    "agents.approvals: unknown action `{k}` (read edit test lint install network push delete command)"
+                )),
+            }
+        }
+        (auto, warn)
+    }
 }
 
 /// `alt+n` or `[alt+n, f10]`
@@ -86,6 +127,7 @@ impl Default for Config {
             start_view: StartView::Full,
             restore: Restore::Ask,
             low_power: LowPower::Auto,
+            agents: AgentsConfig::default(),
             keys: HashMap::new(),
         }
     }
@@ -180,6 +222,16 @@ mod tests {
             LowPower::On
         );
         assert_eq!(Config::default().low_power, LowPower::Auto);
+    }
+
+    #[test]
+    fn agent_settings() {
+        let c = Config::parse("agents:\n  worktree: false\n  approvals:\n    test: auto\n    lint: ask\n    rm: auto\n").unwrap();
+        assert!(!c.agents.worktree);
+        let (auto, warn) = c.agents.auto_actions();
+        assert_eq!(auto, vec![crate::agents::Action::Test]);
+        assert_eq!(warn.len(), 1);
+        assert!(Config::default().agents.worktree);
     }
 
     #[test]

@@ -4,7 +4,8 @@
 //! Terminal.app, which has no true colour.
 
 use crate::activity::Activity;
-use crate::app::{App, MENU, Modal, PaneState, Tool, View};
+use crate::agents;
+use crate::app::{App, MENU, Modal, NewAgentForm, PaneState, Tool, View};
 use crate::keys;
 use crate::term::TermView;
 use ratatui::Frame;
@@ -89,7 +90,60 @@ pub fn draw(f: &mut Frame, app: &App) {
         let Some(p) = app.panes.get(&id) else {
             continue;
         };
-        if full {
+        if let (true, Some(a)) = (full, p.agent.as_ref()) {
+            let mut title = format!(" ● {} · {} ", a.name, a.cli.name());
+            if let Some(b) = &a.branch {
+                title.push_str(&format!("· {b} "));
+            }
+            let status = match &a.status {
+                agents::Status::Working => format!("{} working", spinner(app)),
+                s => s.label(),
+            };
+            title.push_str(&format!("· {status} "));
+            let files = a.files_summary();
+            if !files.is_empty() {
+                title.push_str(&format!("· {files} "));
+            }
+            let mins = a.started.elapsed().as_secs() / 60;
+            if mins > 0 {
+                title.push_str(&format!("· {mins}m "));
+            }
+            let wants = a.approval().is_some();
+            let color = Color::Indexed(a.color);
+            let border = Style::default().fg(if wants {
+                AMBER
+            } else if is_focus {
+                color
+            } else {
+                FAINT
+            });
+            let block = Block::bordered()
+                .border_type(if wants {
+                    BorderType::Double
+                } else {
+                    BorderType::Rounded
+                })
+                .border_style(border)
+                .title(Span::styled(
+                    title,
+                    Style::default().fg(color).add_modifier(if is_focus {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+                ));
+            let block = match a.approval() {
+                Some(ap) => block.title_bottom(Span::styled(
+                    format!(
+                        " ⚑ {} · alt+a: y allow · n deny · a always ",
+                        ap.what.chars().take(50).collect::<String>()
+                    ),
+                    Style::default().fg(INK).bg(AMBER),
+                )),
+                None => block,
+            };
+            f.render_widget(block, outer);
+        } else if full {
             let mut title = format!(" {} · {} ", p.shell, short_path(&p.cwd));
             if let Some(a) = &p.activity {
                 title.push_str(&format!("· {} ", activity_text(app, a)));
@@ -132,6 +186,14 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
 
     match &app.modal {
+        Modal::NewAgent(form) => {
+            draw_new_agent(f, app, form);
+            return;
+        }
+        Modal::Approvals(sel) => {
+            draw_approvals(f, app, *sel);
+            return;
+        }
         Modal::Bar(line) => {
             let row = status.unwrap_or(Rect::new(
                 0,
@@ -303,6 +365,24 @@ fn tab_label(app: &App, i: usize) -> (String, Option<(String, Color)>) {
     } else {
         String::new()
     };
+    let agents_here: Vec<&agents::Agent> = panes.iter().filter_map(|p| p.agent.as_ref()).collect();
+    if !agents_here.is_empty() {
+        let n = agents_here.len();
+        let icon = if agents_here.iter().any(|a| a.approval().is_some()) {
+            Some(("⚑".to_string(), AMBER))
+        } else if agents_here
+            .iter()
+            .any(|a| matches!(a.status, agents::Status::Working | agents::Status::Starting))
+        {
+            Some((spinner(app).to_string(), Color::Indexed(176)))
+        } else {
+            Some(("◆".to_string(), Color::Indexed(176)))
+        };
+        return (
+            format!("{} ◆ {n} agent{}", i + 1, if n == 1 { "" } else { "s" }),
+            icon,
+        );
+    }
     let icon = if panes.iter().any(|p| p.activity.is_some()) {
         Some((circle(app).to_string(), AMBER))
     } else if panes.iter().any(|p| p.running) {
@@ -391,6 +471,28 @@ fn draw_status(f: &mut Frame, app: &App, r: Rect) {
             format!(" {} ", t.kind()),
             Style::default().fg(INK).bg(CYAN),
         ));
+    }
+    // Agents anywhere: count and approvals.
+    let ids = app.agent_ids();
+    if !ids.is_empty() {
+        let waiting = app.pending_approvals().len();
+        left.push(Span::styled(
+            format!(
+                " ◆ {} agent{} ",
+                ids.len(),
+                if ids.len() == 1 { "" } else { "s" }
+            ),
+            Style::default().fg(Color::Indexed(176)).bg(BAR),
+        ));
+        if waiting > 0 {
+            left.push(Span::styled(
+                format!(" ⚑ {waiting} · alt+a "),
+                Style::default()
+                    .fg(INK)
+                    .bg(AMBER)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
     }
     // Downloads anywhere (other tabs too) show here.
     let acts: Vec<&Activity> = app
@@ -653,6 +755,170 @@ fn draw_help(f: &mut Frame, app: &App) {
         all.extend(right);
         f.render_widget(Paragraph::new(clip(all, inner.height)), inner);
     }
+}
+
+fn draw_new_agent(f: &mut Frame, app: &App, form: &NewAgentForm) {
+    let area = centered(app.screen, 84, 17);
+    f.render_widget(Clear, area);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(AMBER))
+        .title(Span::styled(
+            " New agent ",
+            Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Span::styled(
+            " tab next field · ←→ choose · ⏎ start · esc cancel ",
+            Style::default().fg(DIM),
+        ));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let label = |i: usize, t: &str| {
+        Span::styled(
+            format!(" {t:<12}"),
+            if form.field == i {
+                Style::default()
+                    .fg(INK)
+                    .bg(AMBER)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(DIM)
+            },
+        )
+    };
+    let mut lines = vec![Line::raw("")];
+    let mut clis = vec![label(0, "agent CLI"), Span::raw("  ")];
+    for (i, c) in form.clis.iter().enumerate() {
+        let on = i == form.cli;
+        clis.push(Span::styled(
+            format!(" {} ", c.label()),
+            if on {
+                Style::default()
+                    .fg(INK)
+                    .bg(CYAN)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(DIM)
+            },
+        ));
+        clis.push(Span::raw(" "));
+    }
+    lines.push(Line::from(clis));
+    lines.push(Line::raw(""));
+    let cursor = |i: usize| if form.field == i { "▏" } else { "" };
+    lines.push(Line::from(vec![
+        label(1, "name"),
+        Span::raw(format!("  {}{}", form.name, cursor(1))),
+    ]));
+    lines.push(Line::raw(""));
+    let generic = form.cli() == agents::Cli::Generic;
+    let (t, v) = if generic {
+        ("command", &form.custom)
+    } else {
+        ("first task", &form.prompt)
+    };
+    let room = inner.width.saturating_sub(18) as usize;
+    let shown: String = {
+        let n = v.chars().count();
+        if n > room {
+            v.chars().skip(n - room).collect()
+        } else {
+            v.clone()
+        }
+    };
+    lines.push(Line::from(vec![
+        label(2, t),
+        Span::raw(format!("  {shown}{}", cursor(2))),
+    ]));
+    if v.is_empty() {
+        lines.push(Line::styled(
+            if generic {
+                "               e.g. ./my-agent.sh --task tests"
+            } else {
+                "               optional — you can also type to the agent once it starts"
+            },
+            Style::default().fg(FAINT),
+        ));
+    } else {
+        lines.push(Line::raw(""));
+    }
+    lines.push(Line::from(vec![
+        label(3, "worktree"),
+        Span::raw(format!(
+            "  [{}] own git worktree on branch agent/{}",
+            if form.worktree { "x" } else { " " },
+            if form.name.is_empty() {
+                "<name>"
+            } else {
+                &form.name
+            }
+        )),
+    ]));
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        format!(
+            "  runs in a new shell in {} · type to it in its column",
+            form.folder
+        ),
+        Style::default().fg(DIM),
+    ));
+    if let Some(e) = &form.error {
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(format!("  {e}"), Style::default().fg(RED)));
+    }
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+fn draw_approvals(f: &mut Frame, app: &App, sel: usize) {
+    let ids = app.pending_approvals();
+    let area = centered(app.screen, 96, ids.len() as u16 * 2 + 5);
+    f.render_widget(Clear, area);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(AMBER))
+        .title(Span::styled(
+            format!(" ⚑ {} waiting for approval ", ids.len()),
+            Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Span::styled(
+            " y allow · a always (this kind, this agent) · n deny · ⏎ go to agent · esc ",
+            Style::default().fg(DIM),
+        ));
+    let mut lines = vec![Line::raw("")];
+    for (i, id) in ids.iter().enumerate() {
+        let Some(a) = app.panes.get(id).and_then(|p| p.agent.as_ref()) else {
+            continue;
+        };
+        let Some(ap) = a.approval() else { continue };
+        let on = i == sel.min(ids.len().saturating_sub(1));
+        let base = if on {
+            Style::default().bg(Color::Indexed(237))
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(if on { " ▸ " } else { "   " }, base.fg(AMBER)),
+            Span::styled(
+                format!("{:<12}", a.name),
+                base.fg(Color::Indexed(a.color))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("{:<9}", ap.action.name()), base.fg(AMBER)),
+            Span::styled(
+                format!("{:<70}", ap.what.chars().take(70).collect::<String>()),
+                base,
+            ),
+        ]));
+        lines.push(Line::styled(
+            format!(
+                "               {} · waiting {}s",
+                a.cli.label(),
+                ap.since.elapsed().as_secs()
+            ),
+            Style::default().fg(FAINT),
+        ));
+    }
+    f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 fn draw_menu(f: &mut Frame, app: &App, sel: usize) {
