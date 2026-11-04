@@ -29,7 +29,16 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y zsh vim
       - run: cargo fmt -p shellvisor -p sv-proto --check
       - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test --all
+      - name: Test
+        shell: bash
+        run: |
+          set -o pipefail
+          if ! cargo test --all 2>&1 | tee test.log; then
+            # show what failed as an annotation (readable without signing in)
+            grep -E "^---- |panicked at|timed out waiting|^failures:|^    [a-z_:]+$" -A25 test.log | head -200 > fail.txt || true
+            echo "::error title=cargo test failed::$(awk '{gsub(/%/,"%25"); gsub(/\r/,""); printf "%s%%0A", $0}' fail.txt)"
+            exit 1
+          fi
       - run: cargo build --release
       - name: Performance budget
         run: cargo run --release --example bench -- --check
