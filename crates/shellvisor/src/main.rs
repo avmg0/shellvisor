@@ -13,6 +13,7 @@ mod activity;
 mod app;
 mod cli;
 mod config;
+mod data;
 mod files;
 mod gitstat;
 mod highlight;

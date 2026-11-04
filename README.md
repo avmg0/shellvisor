@@ -79,6 +79,22 @@ CPU (history and per core), memory, swap, disks, network, disk I/O, load, temper
 
 **Selecting text:** Shellvisor uses the mouse wheel for scrollback. To select text with the mouse, hold **Option** (iTerm2) or turn off *View → Allow Mouse Reporting* (Terminal.app). Or set `mouse: false` in the config.
 
+## Data commands
+
+`sv` also turns command output into tables you can filter and sort — nushell-style, from inside bash or zsh:
+
+```sh
+sv ls | sv where size gt 1mb | sv sort-by size -r     # stage by stage…
+sv 'ps | where cpu gt 5 | sort-by cpu -r | first 10'  # …or one quoted pipeline
+sv open package.json | sv get dependencies
+sv open sales.csv | sv group-by country
+ps aux | sv from ssv | sv where user eq root | sv to csv
+```
+
+Sources: `ls ps host df ports env history open git-log git-status`. Filters: `where select reject sort-by reverse first last skip uniq get group-by count sum avg min max columns describe`. Formats: `from json|csv|tsv|yaml|toml|ssv|lines`, `to json|jsonl|csv|tsv|md|yaml|text`. `sv data` lists them all.
+
+On the terminal you get an aligned table; between `sv` stages rows travel as JSON lines, so `jq` works on them too.
+
 ## Configuration
 
 `~/.config/shellvisor/config.yaml` — every key is optional:

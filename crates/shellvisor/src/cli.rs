@@ -18,6 +18,7 @@ usage:
   sv sys       open the system pane (CPU, memory, disk, network, temperatures)
   sv layout dev|monitor|files     lay this tab out as a preset
   sv power on|off|auto            low-power mode (auto = on battery)
+  sv data      list the data commands (ls, ps, open, where, sort-by, to csv…)
   sv status    is Shellvisor running in this terminal?
   sv version   print the version
   sv help      this help
@@ -117,9 +118,20 @@ pub fn run(args: &[String]) -> i32 {
             println!("sv {}", env!("CARGO_PKG_VERSION"));
             0
         }
+        "help" | "--help" | "-h" if args.get(1).map(String::as_str) == Some("data") => {
+            print!("{}", crate::data::help());
+            0
+        }
         "help" | "--help" | "-h" => {
             print!("{HELP}");
             0
+        }
+        "data" => {
+            print!("{}", crate::data::help());
+            0
+        }
+        other if crate::data::is_command(other) || other.contains('|') || other.contains(' ') => {
+            crate::data::run(args)
         }
         other => {
             eprintln!("sv: unknown command `{other}`\n\n{HELP}");

@@ -779,3 +779,22 @@ fn downloads_show_a_loading_circle_and_a_toast() {
     });
     s.wait_for("✔ curl finished");
 }
+
+// ------------------------------------------------------------------ P3 data
+
+#[test]
+fn sv_data_pipelines_in_bash() {
+    let mut s = Session::start_full("svdata");
+    s.wait_for("PROMPT>");
+    let work = s.dir.join("work");
+    std::fs::write(work.join("big.bin"), vec![0u8; 3_000_000]).unwrap();
+    std::fs::write(work.join("small.txt"), "hi").unwrap();
+    std::fs::write(work.join("people.csv"), "name,age\nAda,36\nLin,29\nBo,41\n").unwrap();
+    s.run("sv ls | sv where size gt 1mb | sv select name size");
+    s.wait_for("big.bin  3.0 MB");
+    assert!(!s.text().contains("small.txt"), "{}", s.text());
+    s.run("sv 'open people.csv | where age ge 30 | sort-by age -r | get name | to csv'");
+    s.wait_for("Bo");
+    s.run("sv open people.csv | sv avg age | cat");
+    s.wait_for("35.33");
+}
