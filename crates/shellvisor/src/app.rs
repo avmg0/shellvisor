@@ -255,6 +255,8 @@ pub enum PaletteAct {
     Session(String, String),
     Layout(String),
     Tab(usize),
+    /// Type a recent command into the focused shell and run it.
+    Run(String),
 }
 
 /// The command palette: query, selected row, every entry (label, detail, act).
@@ -263,6 +265,8 @@ pub struct Palette {
     pub query: String,
     pub sel: usize,
     pub items: Vec<(String, String, PaletteAct)>,
+    /// Ranking bonus per entry, from how often and how recently it was used.
+    pub boost: Vec<i64>,
 }
 
 impl Palette {
@@ -273,10 +277,11 @@ impl Palette {
             .iter()
             .enumerate()
             .filter_map(|(i, (label, detail, _))| {
+                let b = self.boost.get(i).copied().unwrap_or(0);
                 fuzzy(&self.query, label)
                     .map(|s| s + 50)
                     .or_else(|| fuzzy(&self.query, detail))
-                    .map(|s| (s, i))
+                    .map(|s| (s + b, i))
             })
             .collect();
         scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
@@ -308,6 +313,19 @@ pub fn fuzzy(query: &str, text: &str) -> Option<i64> {
         score += 30;
     }
     Some(score)
+}
+
+/// Is `cmd` a program on PATH?
+fn on_path(cmd: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|p| {
+        std::env::split_paths(&p).any(|d| {
+            let f = d.join(cmd);
+            std::fs::metadata(&f).is_ok_and(|m| {
+                use std::os::unix::fs::PermissionsExt;
+                m.is_file() && m.permissions().mode() & 0o111 != 0
+            })
+        })
+    })
 }
 
 /// A command that failed: its pane, text, exit code, time and last lines.
@@ -370,6 +388,43 @@ pub struct Find {
     /// (line in all_lines(), first column, length in characters)
     pub matches: Vec<(usize, u16, u16)>,
     pub cur: usize,
+    /// The query is a regular expression (ctrl+r).
+    pub regex: bool,
+    /// Still typing the query; after ⏎, n / N step through matches.
+    pub typing: bool,
+    /// The regex doesn't compile.
+    pub error: Option<String>,
+}
+
+/// Regex matches of `query` in `lines` (smart case as in `find_in`).
+pub fn find_regex(lines: &[String], query: &str) -> Result<Vec<(usize, u16, u16)>, String> {
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+    let exact = query.chars().any(char::is_uppercase);
+    let re = regex_lite::RegexBuilder::new(query)
+        .case_insensitive(!exact)
+        .build()
+        .map_err(|e| {
+            e.to_string()
+                .lines()
+                .last()
+                .unwrap_or("bad pattern")
+                .trim()
+                .to_string()
+        })?;
+    let mut out = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        for m in re.find_iter(line) {
+            if m.start() == m.end() {
+                continue;
+            }
+            let col = line[..m.start()].chars().count() as u16;
+            let len = line[m.start()..m.end()].chars().count() as u16;
+            out.push((i, col, len));
+        }
+    }
+    Ok(out)
 }
 
 /// Matches of `query` in `lines` (smart case: case-insensitive unless the
@@ -493,6 +548,58 @@ pub struct Finished {
     pub pane: PaneId,
 }
 
+/// Bump to show the tour again after an update with new things in it.
+pub const TOUR_VERSION: &str = "1";
+
+/// The first-run tour: (title, lines of text, keys to try).
+pub const TOUR: [(&str, &[&str], &str); 4] = [
+    (
+        "Welcome to Shellvisor",
+        &[
+            "This is your own shell, with panes around it. Everything your",
+            "terminal does still works: copy, paste, scrollback, vim, ssh.",
+            "",
+            "ctrl+] is the leader key: press it, then one letter.",
+        ],
+        "F1 shows every key · alt+` plain view ⇄ full view",
+    ),
+    (
+        "Find anything: the command palette",
+        &[
+            "ctrl+] space opens it. Type a few letters to find an action,",
+            "a setting, a saved ssh session, a layout or a recent command.",
+            "",
+            "What you use often comes first next time.",
+        ],
+        "ctrl+] space",
+    ),
+    (
+        "Mouse: select, right-click",
+        &[
+            "Drag to select (copies when you let go), double-click a word,",
+            "triple-click a line. Right-click for copy, paste, split, find,",
+            "log to a file, reconnect ssh and more.",
+            "",
+            "Prefer the terminal's own mouse? Settings → Mouse: terminal.",
+        ],
+        "right-click in a pane",
+    ),
+    (
+        "Agents, MCP servers, downloads",
+        &[
+            "F9 runs coding agents side by side, each in its own branch.",
+            "ctrl+] M shows the MCP servers they use: health, tools, traffic.",
+            "ctrl+] j lists downloads and installs: pause, cancel, run again.",
+            "",
+            "sv tour shows this again.",
+        ],
+        "F9 · ctrl+] M · ctrl+] j",
+    ),
+];
+
+/// Earlier downloads listed in the activity list.
+pub const PAST_SHOWN: usize = 30;
+
 /// How long a finished download's actions stay on offer.
 pub const TOAST_ACT: Duration = Duration::from_secs(12);
 
@@ -523,6 +630,10 @@ pub struct PaneState {
     pub agent_act: Option<Activity>,
     /// Everything this pane prints goes to a text file (sv log start).
     pub log: Option<crate::sessionlog::Log>,
+    /// The running job was paused from the activity list (its process group).
+    pub job_paused: Option<i32>,
+    /// `fg` was typed to resume it: keep the command and its progress.
+    pub resuming: bool,
     /// The ssh command that just dropped (ctrl+] R reconnects).
     pub reconnect: Option<String>,
     /// Rows of the last table `sv` printed here (for F4).
@@ -655,16 +766,22 @@ pub struct App {
     mcp_scan_at: Instant,
     /// The command palette (ctrl+] space).
     pub palette: Option<Palette>,
+    /// The first-run tour: which card is showing.
+    pub tour: Option<usize>,
     /// Shells that get what you type (broadcast, per tab).
     pub broadcast: std::collections::HashSet<PaneId>,
     /// The last failed command, while its card shows.
     pub fail: Option<(FailCard, Instant)>,
     /// The saved-sessions picker: selected row, (name, address, command).
     pub sessions: Option<(usize, Vec<crate::sessions::Entry>)>,
+    /// Sessions marked with space in the picker (opened together).
+    pub session_marks: std::collections::BTreeSet<usize>,
     /// The activity list (ctrl+] j, `sv activity`), with the selected row.
     pub acts_list: Option<usize>,
     /// Downloads and installs that finished, newest first.
     pub done: std::collections::VecDeque<Finished>,
+    /// Downloads from earlier sessions (newest first), for the activity list.
+    pub past: Vec<activity::Past>,
     /// The last finished download's actions (ctrl+] c cd · o open), while its toast shows.
     pub toast_act: Option<(Finished, Instant)>,
     /// Current settings (folder colours …).
@@ -767,11 +884,14 @@ pub fn run(opts: Options) -> io::Result<i32> {
         find: None,
         sessions: None,
         palette: None,
+        tour: None,
         mcp: None,
         mcp_scan_at: Instant::now(),
         broadcast: std::collections::HashSet::new(),
+        session_marks: std::collections::BTreeSet::new(),
         fail: None,
         done: std::collections::VecDeque::new(),
+        past: activity::history(&crate::paths::state_dir()),
         toast_act: None,
         ui: crate::settings::Settings::load(),
         bus_log: std::collections::VecDeque::new(),
@@ -816,6 +936,16 @@ pub fn run(opts: Options) -> io::Result<i32> {
                 app.notice(format!("start layout: {e}"));
             }
         }
+    }
+    // the first-run tour, once (sv tour shows it again)
+    if app.view == View::Full
+        && !matches!(app.modal, Modal::Confirm(..))
+        && std::env::var("SHELLVISOR_TOUR").as_deref() != Ok("0")
+        && std::fs::read_to_string(crate::paths::state_dir().join("tour.done"))
+            .map(|v| v.trim() != TOUR_VERSION)
+            .unwrap_or(true)
+    {
+        app.tour = Some(0);
     }
     if let Some(w) = app.opts.warnings.first().cloned() {
         let more = app.opts.warnings.len() - 1;
@@ -1100,6 +1230,8 @@ impl App {
                 activity: None,
                 agent_act: None,
                 log: None,
+                job_paused: None,
+                resuming: false,
                 reconnect: None,
                 table: None,
                 flow: None,
@@ -1581,6 +1713,91 @@ impl App {
         Ok(())
     }
 
+    /// Pause or resume a pane's running job (activity list `p`).
+    fn pause_job(&mut self, id: PaneId) {
+        let Some(p) = self.panes.get_mut(&id) else {
+            return;
+        };
+        if p.agent.is_some() {
+            self.notice("agents pause with sv agent pause NAME");
+            return;
+        }
+        match p.job_paused.take() {
+            Some(pg) => {
+                unsafe { libc::kill(-pg, libc::SIGCONT) };
+                // the shell took the terminal back at the stop: `fg` hands it over
+                if p.pane.foreground_job().is_none() {
+                    p.resuming = true;
+                    let _ = p.pane.write(b"fg\r");
+                }
+                if let Some(a) = p.activity.as_mut() {
+                    a.paused = false;
+                }
+                self.notice("resumed");
+            }
+            None => {
+                let Some(pg) = p.pane.foreground_job() else {
+                    self.notice("nothing running to pause");
+                    return;
+                };
+                unsafe { libc::kill(-pg, libc::SIGSTOP) };
+                p.job_paused = Some(pg);
+                if let Some(a) = p.activity.as_mut() {
+                    a.paused = true;
+                }
+                self.notice("paused · p resumes · x cancels");
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// Cancel a pane's running job, like ctrl+C (activity list `x`).
+    fn cancel_job(&mut self, id: PaneId) {
+        let Some(p) = self.panes.get_mut(&id) else {
+            return;
+        };
+        if p.agent.is_some() {
+            self.notice("agents stop with sv agent stop NAME");
+            return;
+        }
+        match p.job_paused.take() {
+            Some(pg) => unsafe {
+                libc::kill(-pg, libc::SIGCONT);
+                libc::kill(-pg, libc::SIGTERM);
+                // the shell already printed its prompt at the stop
+                p.running = false;
+                p.activity = None;
+            },
+            None => match p.pane.foreground_job() {
+                Some(pg) => unsafe {
+                    libc::kill(-pg, libc::SIGINT);
+                },
+                None => {
+                    let _ = p.pane.write(b"\x03");
+                }
+            },
+        }
+        self.notice("cancelled");
+        self.dirty = true;
+    }
+
+    fn tour_key(&mut self, key: &[u8]) {
+        self.dirty = true;
+        let Some(i) = self.tour else { return };
+        let done = |app: &mut App| {
+            app.tour = None;
+            let st = crate::paths::state_dir();
+            let _ = std::fs::create_dir_all(&st);
+            let _ = std::fs::write(st.join("tour.done"), TOUR_VERSION);
+        };
+        match key {
+            b"\x1b" | b"q" | [0x03] => done(self),
+            b"\x1b[D" | b"\x1bOD" | b"h" => self.tour = Some(i.saturating_sub(1)),
+            _ if i + 1 >= TOUR.len() => done(self),
+            _ => self.tour = Some(i + 1),
+        }
+    }
+
     /// Keys in the activity list.
     fn acts_key(&mut self, key: &[u8]) -> io::Result<()> {
         self.dirty = true;
@@ -1588,7 +1805,7 @@ impl App {
             return Ok(());
         };
         let running: Vec<PaneId> = self.activities().iter().map(|(id, _, _)| *id).collect();
-        let n = running.len() + self.done.len();
+        let n = running.len() + self.done.len() + self.past.len().min(PAST_SHOWN);
         match key {
             b"\x1b[A" | b"\x1bOA" | b"k" => self.acts_list = Some(sel.saturating_sub(1)),
             b"\x1b[B" | b"\x1bOB" | b"j" => {
@@ -1620,6 +1837,26 @@ impl App {
                 }
             }
             b"c" | b"o" => self.notice("still running — c and o work once it has finished"),
+            b"p" | b" " if sel < running.len() => self.pause_job(running[sel]),
+            b"r" if sel >= running.len() => {
+                let i = sel - running.len();
+                let cmd = match self.done.get(i) {
+                    Some(d) => Some(d.cmd.clone()),
+                    None => self.past.get(i - self.done.len()).map(|p| p.cmd.clone()),
+                };
+                let id = self.focused();
+                match (cmd, self.panes.get_mut(&id)) {
+                    (Some(c), Some(p)) if !p.running => {
+                        let _ = p.pane.write(format!("{c}\r").as_bytes());
+                        self.acts_list = None;
+                    }
+                    (Some(_), Some(_)) => {
+                        self.notice("the shell is busy · try when it's at a prompt")
+                    }
+                    _ => {}
+                }
+            }
+            b"x" if sel < running.len() => self.cancel_job(running[sel]),
             b"x" => {
                 self.done.clear();
                 self.acts_list = Some(sel.min(running.len().saturating_sub(1)));
@@ -1932,6 +2169,16 @@ impl App {
                 self.dirty = true;
                 self.session_dirty = true;
             }
+            ShellEvent::CommandText(_) if p.resuming => {}
+            ShellEvent::CommandStarted if p.resuming => {
+                p.resuming = false;
+                p.running = true;
+                self.dirty = true;
+            }
+            ShellEvent::CommandFinished(_) if p.job_paused.is_some() => {
+                // the shell saw the paused job stop; it hasn't ended
+                p.running = false;
+            }
             ShellEvent::CommandText(t) => {
                 p.command = t;
                 if p.running {
@@ -2057,6 +2304,24 @@ impl App {
                     };
                     self.done.push_front(d.clone());
                     self.done.truncate(20);
+                    let cwd = self
+                        .panes
+                        .get(&id)
+                        .map(|p| p.cwd.clone())
+                        .unwrap_or_default();
+                    activity::remember(
+                        &crate::paths::state_dir(),
+                        &activity::Past {
+                            at: History::now(),
+                            cmd: d.cmd.clone(),
+                            src: d.src.clone(),
+                            ok,
+                            code,
+                            amount: d.amount.clone(),
+                            took,
+                            cwd,
+                        },
+                    );
                     // the finish toast (ui draws it; ctrl+] c / o while it shows)
                     self.toast_act = Some((d, Instant::now()));
                     self.dirty = true;
@@ -2170,6 +2435,11 @@ impl App {
                     .unwrap_or_default();
                 self.mcp_acts(acts);
                 self.dirty = true;
+                continue;
+            }
+            if self.tour.is_some() && self.modal == Modal::None {
+                self.flush_forward(&mut forward)?;
+                self.tour_key(key);
                 continue;
             }
             if self.palette.is_some() && self.modal == Modal::None {
@@ -2349,9 +2619,11 @@ impl App {
                     } else if let (Some(d), b"o") = (&offer, key) {
                         self.flush_forward(&mut forward)?;
                         self.done_open(d)?;
-                    } else if let (Some((card, _)), b"c" | b"r") = (self.fail.clone(), key) {
+                    } else if let (Some((card, _)), b"c" | b"r" | b"?") = (self.fail.clone(), key) {
                         self.flush_forward(&mut forward)?;
-                        if key == b"c" {
+                        if key == b"?" {
+                            self.ask_why(&card);
+                        } else if key == b"c" {
                             let mut text = format!("$ {}\n", card.cmd);
                             text.push_str(&card.lines.join("\n"));
                             self.copy(&text);
@@ -2610,10 +2882,17 @@ impl App {
                 Act::Traffic => {
                     let Some(m) = self.mcp.as_ref() else { continue };
                     let keys = m.log_keys();
+                    let dirs = m.log_dirs();
+                    let tools = m.tool_servers();
                     let home = m.home.clone();
                     let _ = spawn_thread("mcp-traffic".into(), move || {
                         let since = std::time::SystemTime::now() - Duration::from_secs(24 * 3600);
-                        let calls = crate::mcp::traffic(&home, &keys, since);
+                        // Claude Code, Codex and Gemini CLI logs
+                        let mut calls = crate::mcp::traffic(&home, &keys, since);
+                        calls.extend(crate::mcp::codex_traffic(&home, &dirs, &tools, since));
+                        calls.extend(crate::mcp::gemini_traffic(&home, &dirs, &tools, since));
+                        calls.sort_by_key(|c| std::cmp::Reverse(c.at));
+                        calls.truncate(500);
                         let _ = tx.send(Ev::Mcp(Box::new(McpEv::Traffic(calls))));
                     });
                 }
@@ -2805,10 +3084,46 @@ impl App {
                 ),
             ));
         }
+        let state = crate::paths::state_dir();
+        for (cmd, cwd, exit) in crate::history::recent(&state, 30) {
+            let mark = match exit {
+                Some(0) | None => "",
+                Some(_) => "✖ ",
+            };
+            items.push((
+                format!("Run: {cmd}"),
+                format!("{mark}recent · {}", crate::ui::short_path(&cwd)),
+                PaletteAct::Run(cmd),
+            ));
+        }
+        let used = crate::history::palette_use(&state);
+        let now = crate::history::History::now();
+        let n_recent = items
+            .iter()
+            .filter(|i| matches!(i.2, PaletteAct::Run(_)))
+            .count();
+        let mut seen_run = 0usize;
+        let boost = items
+            .iter()
+            .map(|(label, _, act)| {
+                let mut b = used
+                    .get(label)
+                    .map(|(c, t)| crate::history::frecency(*c, *t, now))
+                    .unwrap_or(0);
+                if matches!(act, PaletteAct::Run(_)) {
+                    // newer commands first among the recent ones; below actions
+                    // until they're used from the palette
+                    b += (n_recent - seen_run) as i64 / 3 - 12;
+                    seen_run += 1;
+                }
+                b
+            })
+            .collect();
         self.palette = Some(Palette {
             query: String::new(),
             sel: 0,
             items,
+            boost,
         });
         self.dirty = true;
     }
@@ -2837,8 +3152,19 @@ impl App {
                     return Ok(());
                 };
                 let act = pal.items[i].2.clone();
+                crate::history::palette_used(&crate::paths::state_dir(), &pal.items[i].0);
                 self.palette = None;
                 match act {
+                    PaletteAct::Run(cmd) => {
+                        let id = self.focused();
+                        match self.panes.get_mut(&id) {
+                            Some(p) if !p.running => {
+                                let _ = p.pane.write(format!("{cmd}\r").as_bytes());
+                            }
+                            Some(_) => self.notice("the shell is busy · try when it's at a prompt"),
+                            None => self.notice("focus a shell first"),
+                        }
+                    }
                     PaletteAct::Cmd(c) => self.run_cmd(c)?,
                     PaletteAct::Setting(row) => {
                         let mut sc = crate::settings::Screen::new();
@@ -2904,6 +3230,61 @@ impl App {
             Err(e) => self.notice(format!("log: {}: {e}", path.display())),
         }
         self.dirty = true;
+    }
+
+    /// Failed-command card, `ctrl+] ?`: an agent explains why it failed
+    /// (told not to change files), in the folder the command ran in.
+    fn ask_why(&mut self, card: &FailCard) {
+        let cli = Cli::KNOWN.into_iter().find(|c| on_path(c.name()));
+        let Some(cli) = cli else {
+            self.notice(
+                "no agent CLI found (claude, codex, gemini or aider) · sv agent new --cmd …",
+            );
+            return;
+        };
+        let cwd = self
+            .panes
+            .get(&card.pane)
+            .map(|p| PathBuf::from(&p.cwd))
+            .or_else(|| self.focused_cwd());
+        let mut prompt = format!(
+            "This command failed (exit {}) in {}:\n\n    {}\n\nIts last lines:\n\n",
+            card.code,
+            cwd.as_ref()
+                .map(|c| c.display().to_string())
+                .unwrap_or_default(),
+            card.cmd
+        );
+        for l in &card.lines {
+            prompt.push_str("    ");
+            prompt.push_str(l);
+            prompt.push('\n');
+        }
+        prompt
+            .push_str("\nExplain briefly why it failed and how to fix it. Don't change any files.");
+        let mut name = "why".to_string();
+        let mut n = 2;
+        while self
+            .panes
+            .values()
+            .any(|p| p.agent.as_ref().is_some_and(|a| a.name == name))
+        {
+            name = format!("why{n}");
+            n += 1;
+        }
+        match self.start_agent(None, cli, &name, &prompt, "", false, cwd) {
+            Ok(n) => {
+                self.fail = None;
+                self.notice(format!("asked {n} ({}) why it failed", cli.label()));
+            }
+            Err(e) => self.notice(format!("couldn't start an agent: {e}")),
+        }
+    }
+
+    fn log_plain(&mut self, pane: PaneId) {
+        if let Some(l) = self.panes.get_mut(&pane).and_then(|p| p.log.as_mut()) {
+            l.stamps = false;
+        }
     }
 
     /// A new tab in the same folder; an ssh/mosh session in it runs again.
@@ -2977,6 +3358,47 @@ impl App {
         Ok(())
     }
 
+    /// Several sessions in one tab, a split each, with broadcast on: what you
+    /// type goes to every host (like cluster ssh).
+    fn open_cluster(&mut self, list: &[(String, String)]) -> io::Result<()> {
+        let mut ids = Vec::new();
+        for (_, cmd) in list {
+            let id = self.new_pane(self.focused_cwd())?;
+            if let Some(p) = self.panes.get_mut(&id) {
+                p.pending_input = Some((format!("{cmd}\r"), Instant::now()));
+            }
+            ids.push(id);
+        }
+        let Some(&first) = ids.first() else {
+            return Ok(());
+        };
+        let mut t = Tab::new(first);
+        t.root = arrange(
+            &ids,
+            if ids.len() <= 3 {
+                Arrangement::Columns
+            } else {
+                Arrangement::Grid
+            },
+        );
+        t.name = Some(format!("{} hosts", ids.len()));
+        let tab = self.active;
+        self.tabs.insert(tab + 1, t);
+        self.switch_tab(tab + 1);
+        if self.view == View::Basic {
+            self.view = View::Full;
+        }
+        self.broadcast.extend(ids.iter().copied());
+        let names: Vec<&str> = list.iter().map(|(n, _)| n.as_str()).collect();
+        self.notice(format!(
+            "typing goes to {} · ctrl+] B stops broadcast",
+            names.join(", ")
+        ));
+        self.session_dirty = true;
+        self.relayout();
+        Ok(())
+    }
+
     fn sessions_key(&mut self, key: &[u8]) -> io::Result<()> {
         self.dirty = true;
         let Some((sel, list)) = self.sessions.as_mut() else {
@@ -2986,12 +3408,42 @@ impl App {
         match key {
             b"\x1b[A" | b"\x1bOA" | b"k" => *sel = (*sel + n - 1) % n,
             b"\x1b[B" | b"\x1bOB" | b"j" => *sel = (*sel + 1) % n,
+            b" " => {
+                let i = *sel;
+                if !self.session_marks.remove(&i) {
+                    self.session_marks.insert(i);
+                }
+                *sel = (*sel + 1) % n;
+            }
+            b"a" => {
+                if self.session_marks.len() == n {
+                    self.session_marks.clear();
+                } else {
+                    self.session_marks = (0..n).collect();
+                }
+            }
             b"\r" => {
+                let marked: Vec<(String, String)> = self
+                    .session_marks
+                    .iter()
+                    .filter_map(|i| list.get(*i))
+                    .map(|(n, _, c)| (n.clone(), c.clone()))
+                    .collect();
                 let (name, _, cmd) = list[*sel].clone();
                 self.sessions = None;
-                self.open_session_tab(&name, &cmd)?;
+                self.session_marks.clear();
+                if marked.len() >= 2 {
+                    self.open_cluster(&marked)?;
+                } else if let Some((n, c)) = marked.first() {
+                    self.open_session_tab(n, c)?;
+                } else {
+                    self.open_session_tab(&name, &cmd)?;
+                }
             }
-            b"\x1b" | b"q" => self.sessions = None,
+            b"\x1b" | b"q" => {
+                self.sessions = None;
+                self.session_marks.clear();
+            }
             _ => {}
         }
         Ok(())
@@ -3004,11 +3456,19 @@ impl App {
             .filter(|f| f.pane == pane)
             .map(|f| f.query.clone())
             .unwrap_or_default();
+        let regex = self
+            .find
+            .as_ref()
+            .filter(|f| f.pane == pane)
+            .is_some_and(|f| f.regex);
         self.find = Some(Find {
             pane,
             query,
             matches: Vec::new(),
             cur: 0,
+            regex,
+            typing: true,
+            error: None,
         });
         self.refind();
         self.dirty = true;
@@ -3022,7 +3482,21 @@ impl App {
             return;
         };
         let lines = p.pane.screen().all_lines();
-        f.matches = find_in(&lines, &f.query);
+        if f.regex {
+            match find_regex(&lines, &f.query) {
+                Ok(m) => {
+                    f.matches = m;
+                    f.error = None;
+                }
+                Err(e) => {
+                    f.matches.clear();
+                    f.error = Some(e);
+                }
+            }
+        } else {
+            f.matches = find_in(&lines, &f.query);
+            f.error = None;
+        }
         f.cur = f.matches.len().saturating_sub(1);
         self.show_match();
     }
@@ -3052,10 +3526,46 @@ impl App {
         self.dirty = true;
         let Some(f) = self.find.as_mut() else { return };
         let n = f.matches.len();
+        // after ⏎: n / N step like less; / types again
+        if !f.typing {
+            match key {
+                b"n" => {
+                    if n > 0 {
+                        f.cur = (f.cur + n - 1) % n;
+                    }
+                    self.show_match();
+                    return;
+                }
+                b"N" => {
+                    if n > 0 {
+                        f.cur = (f.cur + 1) % n;
+                    }
+                    self.show_match();
+                    return;
+                }
+                b"/" => {
+                    f.typing = true;
+                    return;
+                }
+                _ => {}
+            }
+        }
         match key {
             b"\x1b" => {
                 self.find = None;
                 return;
+            }
+            [0x12] => {
+                // ctrl+r: plain text ⇄ regular expression
+                f.regex = !f.regex;
+                self.refind();
+                return;
+            }
+            b"\r" if f.typing => {
+                f.typing = false;
+                if n > 0 {
+                    f.cur = (f.cur + n - 1) % n;
+                }
             }
             b"\r" | b"\x1b[B" | b"\x1bOB" => {
                 if n > 0 {
@@ -3077,7 +3587,7 @@ impl App {
                 self.refind();
                 return;
             }
-            k if k.first().is_some_and(|b| *b >= 0x20) && !k.starts_with(b"\x1b") => {
+            k if f.typing && k.first().is_some_and(|b| *b >= 0x20) && !k.starts_with(b"\x1b") => {
                 f.query.push_str(&String::from_utf8_lossy(k));
                 self.refind();
                 return;
@@ -5623,11 +6133,43 @@ impl App {
                 Ok(())
             }
             ["ssh", name, cmd] => self.open_session_tab(name, cmd),
+            ["ssh-all", rest @ ..] => {
+                let list: Vec<(String, String)> = rest
+                    .chunks(2)
+                    .filter(|c| c.len() == 2)
+                    .map(|c| (c[0].to_string(), c[1].to_string()))
+                    .collect();
+                self.open_cluster(&list)
+            }
             ["log", rest @ ..] => {
                 let id = self.focused();
                 match rest {
                     ["start"] => self.set_log(id, true, None),
                     ["start", path] => self.set_log(id, true, Some(PathBuf::from(path))),
+                    ["start-plain"] => {
+                        self.set_log(id, true, None);
+                        self.log_plain(id);
+                    }
+                    ["start-plain", path] => {
+                        self.set_log(id, true, Some(PathBuf::from(path)));
+                        self.log_plain(id);
+                    }
+                    ["view", path] => {
+                        match std::fs::read_to_string(path) {
+                            Ok(t) => {
+                                let name = std::path::Path::new(path)
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_default();
+                                self.table = Some(TableView::new(
+                                    format!("log · {name}"),
+                                    crate::data::value::Data::Table(crate::sessionlog::rows(&t)),
+                                ));
+                            }
+                            Err(e) => self.notice(format!("log: {path}: {e}")),
+                        }
+                        self.dirty = true;
+                    }
                     ["stop"] => self.set_log(id, false, None),
                     _ => {
                         let msg = match self.panes.get(&id).and_then(|p| p.log.as_ref()) {
@@ -5637,6 +6179,14 @@ impl App {
                         self.notice(msg);
                     }
                 }
+                Ok(())
+            }
+            ["tour"] => {
+                if self.view == View::Basic {
+                    self.set_view(View::Full);
+                }
+                self.tour = Some(0);
+                self.dirty = true;
                 Ok(())
             }
             ["activity"] => {

@@ -1,0 +1,44 @@
+ ▍shellvisor  MCP · traffic · permissions · add a server                                                                                 5 calls today   ##:##
+ ╭ LIVE TRAFFIC · every tool call agents make ─────────────────────────────────────────╮ ╭────────────────────────────────────────────────────────────────────╮
+ │  all agents ▾   all servers ▾   errors only                                         │ │ Permissions           ←→↑↓ move · space cycles allow / ask / never │
+ │                                                                                     │ │ server · tool                                      you      api    │
+ │ time     agent     server · tool      arguments                   result     ms     │ │ filesystem                                          —        —     │
+ │ ##:## ● api     github · search_re query shellvisor user:avm     2.1K 640 ms ✔   │ │   read_file                                         —        —     │
+ │ ##:## ● you     github · list_issu state open, labels bug        8.7K 864 ms ✔   │ │   write_file                                        —        —     │
+ │ ##:## ● api     filesystem · read_ path src/main.rs              2.6K  12 ms ✔   │ │ github                                              —        —     │
+ │ ##:## ● you     linear · list_issu team SHV                    failed 604 ms ✖   │ │   search_repositories                               —        —     │
+ │ ##:## ● api     github · get_file_ path README.md                3.7K 280 ms ✔   │ │   get_file_contents                                 —        —     │
+ │                                                                                     │ │   list_issues                                       —        —     │
+ │                                                                                     │ │   create_issue                                      —        —     │
+ │                                                                                     │ │   create_pull_request                               —        —     │
+ │                                                                                     │ │   push_files                                        —        —     │
+ │                                                                                     │ │ written to each agent's own settings · ⚑ asks show in alt+a        │
+ │                                                                                     │ ╰────────────────────────────────────────────────────────────────────╯
+ │                                                                                     │ ╭────────────────────────────────────────────────────────────────────╮
+ │                                                                                     │ │ Add a server                                 once, for every agent │
+ │                                                                                     │ │ ready-made:  filesystem   github   postgres   playwright   fetch   │
+ │                                                                                     │ │              sentry                                                │
+ │                                                                                     │ │                                                                    │
+ │                                                                                     │ │ name       ▕ sentry                                              ▏ │
+ │                                                                                     │ │ transport   http   stdio                                           │
+ │                                                                                     │ │ command    ▕ npx -y @scope/server-name                           ▏ │
+ │                                                                                     │ │ secrets    ▕ env var names, e.g. SENTRY_TOKEN (values stay in you▏ │
+ │                                                                                     │ │ add to     ☑ Claude Code  ☑ Codex  ☐ Gemini  ☐ this project        │
+ │                                                                                     │ │                                                                    │
+ │                                                                                     │ │ ╭──────────────────────────────╮ ╭──────────────────────────────╮  │
+ │                                                                                     │ │ │ ~/.claude.json               │ │ ~/.codex/config.toml         │  │
+ │                                                                                     │ │ │ pick a ready-made server     │ │ or fill in the form          │  │
+ │                                                                                     │ │ │                              │ │                              │  │
+ │                                                                                     │ │ │                              │ │                              │  │
+ │                                                                                     │ │ ╰──────────────────────────────╯ ╰──────────────────────────────╯  │
+ │                                                                                     │ │                                                                    │
+ ╰─────────────────────────────────────────────────────────────────────────────────────╯ │                                                                    │
+ ╭─────────────────────────────────────────────────────────────────────────────────────╮ │                                                                    │
+ │ Calls per minute              last hour  │ Context sent back to agents    by server │ │                                                                    │
+ │                                          │                                          │ │                                                                    │
+ │                                          │ github       ━━━━━━━━━━━━━━━━━━     3.7k │ │                                                                    │
+ │ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁  │ filesystem   ━━━━━━━━━━━━━━━━━━      675 │ │                                                                    │
+ │                                          │ linear       ━━━━━━━━━━━━━━━━━━        0 │ │ runs the handshake first · nothing is written if it fails          │
+ │ 5 calls · 1 failed                       │                                          │ │  ⏎ Add & check                                                     │
+ ╰─────────────────────────────────────────────────────────────────────────────────────╯ ╰────────────────────────────────────────────────────────────────────╯
+ space Pause traffic   ⏎ Call details   p Permissions   a Add server   alt+a Approvals   esc Back to servers   · traffic is read from the agents' logs · secrets

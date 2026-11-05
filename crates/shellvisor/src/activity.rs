@@ -33,12 +33,15 @@ pub struct Activity {
     pub started: Instant,
     /// Where the progress was first seen (for working out the time left).
     base: Option<(Instant, u8)>,
+    /// Paused from the activity list (SIGSTOP).
+    pub paused: bool,
 }
 
 impl Activity {
     fn new(label: String) -> Activity {
         Activity {
             label,
+            paused: false,
             cmd: String::new(),
             progress: None,
             speed: None,
@@ -921,5 +924,88 @@ mod tests {
             Some("git clone https://x/y.git")
         );
         assert_eq!(agent_command(["⏺ Bash(ls -la)"].iter().copied()), None);
+    }
+}
+
+/// A download or install from an earlier session (`<state>/downloads.jsonl`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Past {
+    /// Unix seconds it finished.
+    pub at: u64,
+    pub cmd: String,
+    pub src: String,
+    pub ok: bool,
+    pub code: Option<i32>,
+    pub amount: Option<String>,
+    pub took: u64,
+    pub cwd: String,
+}
+
+/// Remember a finished download (keeps the newest 200).
+pub fn remember(state: &std::path::Path, p: &Past) {
+    let line = serde_json::json!({
+        "at": p.at, "cmd": p.cmd, "src": p.src, "ok": p.ok, "code": p.code,
+        "amount": p.amount, "took": p.took, "cwd": p.cwd,
+    })
+    .to_string();
+    let path = state.join("downloads.jsonl");
+    let mut lines: Vec<String> = std::fs::read_to_string(&path)
+        .map(|t| t.lines().map(String::from).collect())
+        .unwrap_or_default();
+    lines.push(line);
+    let skip = lines.len().saturating_sub(200);
+    let _ = std::fs::create_dir_all(state);
+    let _ = std::fs::write(&path, lines[skip..].join("\n") + "\n");
+}
+
+/// Earlier downloads, newest first.
+pub fn history(state: &std::path::Path) -> Vec<Past> {
+    let Ok(t) = std::fs::read_to_string(state.join("downloads.jsonl")) else {
+        return Vec::new();
+    };
+    t.lines()
+        .rev()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .map(|v| Past {
+            at: v["at"].as_u64().unwrap_or(0),
+            cmd: v["cmd"].as_str().unwrap_or("").to_string(),
+            src: v["src"].as_str().unwrap_or("").to_string(),
+            ok: v["ok"].as_bool().unwrap_or(true),
+            code: v["code"].as_i64().map(|c| c as i32),
+            amount: v["amount"].as_str().map(String::from),
+            took: v["took"].as_u64().unwrap_or(0),
+            cwd: v["cwd"].as_str().unwrap_or("").to_string(),
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+
+    #[test]
+    fn downloads_are_remembered() {
+        let d = std::env::temp_dir().join(format!("sv-dl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        for (i, c) in ["git clone a", "npm install"].iter().enumerate() {
+            remember(
+                &d,
+                &Past {
+                    at: i as u64,
+                    cmd: c.to_string(),
+                    src: "x".into(),
+                    ok: i == 0,
+                    code: Some(i as i32),
+                    amount: None,
+                    took: 3,
+                    cwd: "/w".into(),
+                },
+            );
+        }
+        let h = history(&d);
+        assert_eq!(h.len(), 2);
+        assert_eq!(h[0].cmd, "npm install");
+        assert!(!h[0].ok && h[1].ok);
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

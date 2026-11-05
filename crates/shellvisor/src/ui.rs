@@ -588,6 +588,9 @@ fn draw_all(f: &mut Frame, app: &App) {
             draw_fail_card(f, app, card);
         }
     }
+    if let Some(i) = app.tour {
+        draw_tour(f, app, i);
+    }
     if let Some(pal) = &app.palette {
         draw_palette(f, app, pal);
     }
@@ -608,6 +611,8 @@ fn draw_all(f: &mut Frame, app: &App) {
         f.render_widget(Clear, row);
         let count = if fd.query.is_empty() {
             "type to search this pane's scrollback".to_string()
+        } else if let Some(e) = &fd.error {
+            format!("✖ {e}")
         } else if fd.matches.is_empty() {
             "no matches".to_string()
         } else {
@@ -622,18 +627,35 @@ fn draw_all(f: &mut Frame, app: &App) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!(" {}▏ ", fd.query),
+                if fd.regex { " .* " } else { "" },
+                Style::default()
+                    .fg(INK)
+                    .bg(CYAN)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" {}{} ", fd.query, if fd.typing { "▏" } else { "" }),
                 Style::default().fg(TEXT).bg(BAR),
             ),
-            Span::styled(format!(" {count} "), Style::default().fg(AMBER).bg(BAR)),
             Span::styled(
-                " ⏎/↓ older · ↑ newer · esc close ",
+                format!(" {count} "),
+                Style::default()
+                    .fg(if fd.error.is_some() { RED } else { AMBER })
+                    .bg(BAR),
+            ),
+            Span::styled(
+                if fd.typing {
+                    " ⏎ done · ↓↑ older / newer · ctrl+r regex · esc close "
+                } else {
+                    " n older · N newer · / edit · ctrl+r regex · esc close "
+                },
                 Style::default().fg(DIM).bg(BAR),
             ),
         ]);
         f.render_widget(Paragraph::new(line).style(Style::default().bg(BAR)), row);
     }
     let overlay = app.ctx.is_some()
+        || app.tour.is_some()
         || app.mcp.is_some()
         || app.sessions.is_some()
         || app.palette.is_some()
@@ -676,6 +698,64 @@ fn badge(f: &mut Frame, area: Rect, row: u16, text: &str) {
             Style::default().add_modifier(Modifier::REVERSED),
         );
     }
+}
+
+/// One card of the first-run tour.
+fn draw_tour(f: &mut Frame, app: &App, i: usize) {
+    use crate::palette::{Role, role};
+    let Some((title, text, keys)) = crate::app::TOUR.get(i) else {
+        return;
+    };
+    let (_, content, _) = app.regions();
+    let h = text.len() as u16 + 7;
+    let w = 72u16.min(content.width.saturating_sub(2));
+    if w < 40 || content.height < h {
+        return;
+    }
+    let r = centered(content, w, h);
+    f.render_widget(Clear, r);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(AMBER))
+        .style(Style::default().bg(role(Role::Card)))
+        .title(Span::styled(
+            format!(" {title} "),
+            Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(
+            Line::from(Span::styled(
+                format!(" {} of {} ", i + 1, crate::app::TOUR.len()),
+                Style::default().fg(DIM),
+            ))
+            .right_aligned(),
+        );
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    let mut lines: Vec<Line> = vec![Line::raw("")];
+    for t in text.iter() {
+        lines.push(Line::styled(format!("  {t}"), Style::default().fg(TEXT)));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled("  try  ", Style::default().fg(DIM)),
+        Span::styled(*keys, Style::default().fg(CYAN)),
+    ]));
+    let dots: String = (0..crate::app::TOUR.len())
+        .map(|j| if j == i { "● " } else { "○ " })
+        .collect();
+    let last = i + 1 == crate::app::TOUR.len();
+    lines.push(Line::from(vec![
+        Span::styled(format!("  {dots}  "), Style::default().fg(AMBER)),
+        Span::styled(
+            if last {
+                "any key: start · ← back"
+            } else {
+                "any key: next · ← back · esc skip"
+            },
+            Style::default().fg(DIM),
+        ),
+    ]));
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 fn centered(r: Rect, w: u16, h: u16) -> Rect {
@@ -1509,8 +1589,11 @@ fn draw_activity(f: &mut Frame, app: &App, sel: usize) {
         if let Some(n) = agent {
             phase = format!("agent {n} · {phase}");
         }
+        if a.paused {
+            phase = format!("▮▮ paused · p resumes · x cancels · {phase}");
+        }
         cards.push(Card {
-            state: 0,
+            state: if a.paused { 3 } else { 0 },
             cmd: tidy(&a.cmd),
             src: a.src.clone(),
             progress: a.progress,
@@ -1553,6 +1636,29 @@ fn draw_activity(f: &mut Frame, app: &App, sel: usize) {
             eta: String::new(),
         });
     }
+    let now = crate::history::History::now();
+    for p in app.past.iter().take(crate::app::PAST_SHOWN) {
+        let when = ago(now.saturating_sub(p.at));
+        let phase = if p.ok {
+            format!("earlier · {when} · took {} · r run again", fmt_secs(p.took))
+        } else {
+            format!(
+                "earlier · {when} · failed, exit {} · r run again",
+                p.code.unwrap_or(1)
+            )
+        };
+        cards.push(Card {
+            state: if p.ok { 4 } else { 5 },
+            cmd: tidy(&p.cmd),
+            src: p.src.clone(),
+            progress: Some(100),
+            color: role(Role::Track),
+            phase,
+            amount: p.amount.clone().unwrap_or_default(),
+            rate: String::new(),
+            eta: String::new(),
+        });
+    }
     let top = inner.y + 2;
     let footer = inner.bottom().saturating_sub(1);
     let fits = ((footer.saturating_sub(top)) / 5).max(1) as usize;
@@ -1582,6 +1688,8 @@ fn draw_activity(f: &mut Frame, app: &App, sel: usize) {
         let (icon, ist) = match c.state {
             0 => (circle(app).to_string(), Style::default().fg(AMBER)),
             1 => ("✔".to_string(), Style::default().fg(GREEN)),
+            3 => ("▮▮".to_string(), Style::default().fg(AMBER)),
+            4 => ("✔".to_string(), dim),
             _ => ("✖".to_string(), Style::default().fg(RED)),
         };
         put(buf, ci.x + 2, ci.y + 1, &icon, ist, 4);
@@ -1625,10 +1733,23 @@ fn draw_activity(f: &mut Frame, app: &App, sel: usize) {
         buf,
         inner.x + 1,
         footer,
-        "↑↓ select · ⏎ go to its shell · c cd into it · o open in files · x clear finished · esc close",
+        "↑↓ select · p pause / resume · x cancel (finished: clear) · r run again · c cd · o open · esc close",
         Style::default().fg(FAINT),
         inner.width - 2,
     );
+}
+
+/// "5 min ago", "3 h ago", "2 days ago".
+fn ago(secs: u64) -> String {
+    match secs {
+        0..=59 => "just now".into(),
+        60..=3599 => format!("{} min ago", secs / 60),
+        3600..=86_399 => format!("{} h ago", secs / 3600),
+        _ => {
+            let d = secs / 86_400;
+            format!("{d} day{} ago", if d == 1 { "" } else { "s" })
+        }
+    }
 }
 
 /// A hint for a shell that is waiting on something you may not know how
@@ -1731,13 +1852,22 @@ fn draw_sessions(f: &mut Frame, app: &App, sel: usize, list: &[(String, String, 
                 Style::default().fg(TEXT)
             };
             let w = inner.width as usize;
-            let text = format!(" {name:<22} {addr}");
+            let mark = if app.session_marks.contains(&i) {
+                "☑"
+            } else {
+                " "
+            };
+            let text = format!("{mark} {name:<22} {addr}");
             Line::styled(format!("{text:<w$}"), st)
         })
         .collect();
     lines.push(Line::raw(""));
     lines.push(Line::styled(
-        " ⏎ open in a new tab · esc close · save one: sv ssh save NAME user@host",
+        if app.session_marks.is_empty() {
+            " ⏎ open · space mark several (typing goes to all) · a all · esc close"
+        } else {
+            " ⏎ open the marked ones in one tab, typing to all · space mark · esc close"
+        },
         Style::default().fg(FAINT),
     ));
     f.render_widget(Paragraph::new(lines), inner);
@@ -1780,9 +1910,9 @@ fn draw_fail_card(f: &mut Frame, app: &App, c: &crate::app::FailCard) {
     }
     lines.push(Line::styled(
         if iw >= 50 {
-            " ctrl+] c copy the error · ctrl+] r run it again"
+            " ctrl+] c copy the error · r run it again · ? ask an agent why"
         } else {
-            " ctrl+] c copy · r run again"
+            " ctrl+] c copy · r run again · ? why"
         },
         Style::default().fg(AMBER),
     ));

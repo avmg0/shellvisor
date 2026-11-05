@@ -274,9 +274,92 @@ pub fn summary(s: &FlowStats) -> String {
     out
 }
 
+/// Saved pipelines: `~/.config/shellvisor/flows.yaml` (name → pipeline).
+fn flows_path() -> std::path::PathBuf {
+    crate::paths::config_file()
+        .parent()
+        .map(|d| d.join("flows.yaml"))
+        .unwrap_or_else(|| std::path::PathBuf::from("flows.yaml"))
+}
+
+pub fn saved() -> std::collections::BTreeMap<String, String> {
+    std::fs::read_to_string(flows_path())
+        .ok()
+        .and_then(|t| serde_yaml_ng::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+fn save_all(m: &std::collections::BTreeMap<String, String>) -> std::io::Result<()> {
+    let p = flows_path();
+    if let Some(d) = p.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    std::fs::write(p, serde_yaml_ng::to_string(m).unwrap_or_default())
+}
+
+/// `sv flow save NAME '<pipeline>'`, `sv flow list`, `sv flow rm NAME`, or
+/// `sv flow NAME` to run a saved one. Returns None for a plain pipeline.
+fn saved_cmd(args: &[String]) -> Option<Result<String, i32>> {
+    match args.first().map(String::as_str) {
+        Some("save") => {
+            let (Some(name), true) = (args.get(1), args.len() > 2) else {
+                eprintln!("usage: sv flow save NAME 'cmd1 | cmd2'");
+                return Some(Err(2));
+            };
+            let line = args[2..].join(" ");
+            if let Err(e) = split_stages(&line) {
+                eprintln!("sv flow: {e}");
+                return Some(Err(2));
+            }
+            let mut m = saved();
+            m.insert(name.clone(), line.clone());
+            match save_all(&m) {
+                Ok(()) => {
+                    println!("saved {name}: {line} · sv flow {name} runs it");
+                    Some(Err(0))
+                }
+                Err(e) => {
+                    eprintln!("sv flow: {e}");
+                    Some(Err(1))
+                }
+            }
+        }
+        Some("list" | "ls") if args.len() == 1 => {
+            let m = saved();
+            if m.is_empty() {
+                println!("no saved pipelines · sv flow save NAME 'cmd1 | cmd2'");
+            }
+            for (n, l) in &m {
+                println!("{n:<16} {l}");
+            }
+            Some(Err(0))
+        }
+        Some("rm" | "remove") => {
+            let Some(name) = args.get(1) else {
+                eprintln!("usage: sv flow rm NAME");
+                return Some(Err(2));
+            };
+            let mut m = saved();
+            if m.remove(name).is_none() {
+                eprintln!("sv flow: no saved pipeline `{name}`");
+                return Some(Err(1));
+            }
+            let _ = save_all(&m);
+            println!("removed {name}");
+            Some(Err(0))
+        }
+        Some(name) if args.len() == 1 && !name.contains(' ') => saved().get(name).cloned().map(Ok),
+        _ => None,
+    }
+}
+
 /// `sv flow '<pipeline>'`.
 pub fn run(args: &[String]) -> i32 {
-    let line = args.join(" ");
+    let line = match saved_cmd(args) {
+        Some(Ok(l)) => l,
+        Some(Err(code)) => return code,
+        None => args.join(" "),
+    };
     if line.trim().is_empty() {
         eprintln!("usage: sv flow 'cmd1 | cmd2 | cmd3'   (quote the pipeline)");
         return 2;

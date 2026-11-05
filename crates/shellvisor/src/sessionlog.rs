@@ -28,6 +28,8 @@ pub struct Log {
     state: State,
     /// The line being built (a lone \r starts it over, like the screen does).
     line: Vec<u8>,
+    /// Start each line with the local time, `[22:14:03] `.
+    pub stamps: bool,
 }
 
 impl Log {
@@ -44,6 +46,7 @@ impl Log {
             file,
             state: State::Text,
             line: Vec::new(),
+            stamps: true,
         })
     }
 
@@ -61,6 +64,9 @@ impl Log {
                         0x1b => State::Esc,
                         b'\r' => State::Cr,
                         b'\n' => {
+                            if self.stamps {
+                                out.extend_from_slice(stamp_now().as_bytes());
+                            }
                             out.append(&mut self.line);
                             out.push(b'\n');
                             State::Text
@@ -116,7 +122,12 @@ impl Log {
     /// Write out a last unfinished line.
     pub fn finish(&mut self) {
         if !self.line.is_empty() {
-            let mut l = std::mem::take(&mut self.line);
+            let mut l = if self.stamps {
+                stamp_now().into_bytes()
+            } else {
+                Vec::new()
+            };
+            l.append(&mut self.line);
             l.push(b'\n');
             let _ = self.file.write_all(&l);
         }
@@ -148,6 +159,67 @@ pub fn default_path(name: &str) -> PathBuf {
         .join(format!("{stamp}-{safe}.log"))
 }
 
+/// `[HH:MM:SS] ` in local time.
+fn stamp_now() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as libc::time_t)
+        .unwrap_or(0);
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&secs, &mut tm) };
+    format!("[{:02}:{:02}:{:02}] ", tm.tm_hour, tm.tm_min, tm.tm_sec)
+}
+
+/// The folder logs go to by default.
+pub fn log_dir() -> PathBuf {
+    PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("shellvisor-logs")
+}
+
+/// Logs in the default folder, newest first: (path, bytes, modified).
+pub fn list() -> Vec<(PathBuf, u64, std::time::SystemTime)> {
+    let mut v: Vec<_> = std::fs::read_dir(log_dir())
+        .map(|d| {
+            d.flatten()
+                .filter(|e| e.path().extension().is_some_and(|x| x == "log"))
+                .filter_map(|e| {
+                    let m = e.metadata().ok()?;
+                    Some((e.path(), m.len(), m.modified().ok()?))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    v.sort_by_key(|(_, _, t)| std::cmp::Reverse(*t));
+    v
+}
+
+/// A log as rows for the table viewer: line number, time (if stamped), text.
+pub fn rows(text: &str) -> Vec<crate::data::value::Record> {
+    use crate::data::value::Value;
+    text.lines()
+        .enumerate()
+        .map(|(i, l)| {
+            let (time, rest) = match l.strip_prefix('[') {
+                Some(r)
+                    if r.len() >= 10
+                        && r.as_bytes()[8] == b']'
+                        && r[..8].bytes().all(|b| b.is_ascii_digit() || b == b':') =>
+                {
+                    (
+                        r[..8].to_string(),
+                        r[9..].strip_prefix(' ').unwrap_or(&r[9..]),
+                    )
+                }
+                _ => (String::new(), l),
+            };
+            vec![
+                ("line".to_string(), Value::Int(i as i64 + 1)),
+                ("time".to_string(), Value::Str(time)),
+                ("text".to_string(), Value::Str(rest.to_string())),
+            ]
+        })
+        .collect()
+}
+
 /// Local time as YYYY-MM-DD_HHMMSS (via `date`, which knows the time zone).
 fn chrono_like_stamp() -> String {
     std::process::Command::new("date")
@@ -174,6 +246,7 @@ mod tests {
         let p = std::env::temp_dir().join(format!("sv-log-{}.log", std::process::id()));
         let _ = std::fs::remove_file(&p);
         let mut l = Log::open(&p).unwrap();
+        l.stamps = false;
         l.feed(b"\x1b]7770;prompt\x07\x1b[1;32mhello\x1b[0m world\r\n");
         l.feed(b"Receiving 10%\rReceiving 50%\rReceiving 100%\r\n");
         l.feed(b"tab\there\x1b(B ok\r\nab\x08c\r\nlast");
@@ -181,6 +254,22 @@ mod tests {
         let t = std::fs::read_to_string(&p).unwrap();
         assert_eq!(t, "hello world\nReceiving 100%\ntab\there ok\nac\nlast\n");
         let _ = std::fs::remove_file(&p);
+        // with times
+        let mut l = Log::open(&p).unwrap();
+        l.feed(b"one\r\ntwo\r\n");
+        drop(l);
+        let t = std::fs::read_to_string(&p).unwrap();
+        let last: Vec<&str> = t.lines().rev().take(2).collect();
+        assert!(
+            last[0].starts_with('[') && last[0].ends_with("] two"),
+            "{t}"
+        );
+        let r = rows(last[0]);
+        assert_eq!(r[0][2].1, crate::data::value::Value::Str("two".into()));
+        assert_eq!(
+            rows("plain")[0][1].1,
+            crate::data::value::Value::Str(String::new())
+        );
         let d = default_path("zsh · work");
         assert!(
             d.to_string_lossy().ends_with("-zsh---work.log"),

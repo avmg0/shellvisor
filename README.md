@@ -91,22 +91,23 @@ CPU (history and per core), memory, swap, disks, network, disk I/O, load, temper
 **Selecting text and right-click:** drag in a pane to select its text (only that pane's, even with splits) — it's copied to the clipboard when you let go; double-click selects a word, triple-click a line. Right-click opens a menu: Copy, Paste, Select all, Open link (on a URL), Split side by side, Split stacked. When the program in a pane uses the mouse itself (vim with `mouse=a`, htop…), hold **shift** to select. Your terminal's own selection still works too: hold **fn** while dragging (Terminal.app) or **Option** (iTerm2), or set `mouse: false` in the config.
 
 **More of what a terminal does, per pane:**
-- **Find** (`ctrl+]` `/`, or right-click → Find…): searches the pane's whole scrollback, highlights the matches, `⏎`/`↓` older, `↑` newer, `esc` closes. Lower-case searches ignore case.
+- **Find** (`ctrl+]` `/`, or right-click → Find…): searches the pane's whole scrollback, highlights the matches, `⏎`/`↓` older, `↑` newer, `esc` closes. Lower-case searches ignore case. `ctrl+r` switches to a regular expression (`^error.*timeout`); after `⏎`, `n` / `N` step to the older / newer match like `less`, and `/` edits the search again.
 - **Clear** (`ctrl+]` `k`, or right-click → Clear): clears the pane and its scrollback; the shell redraws its prompt. `clear` itself now empties the scrollback too, like Terminal.
 - **Option-click** on the line you're typing moves the cursor there; **ctrl-click** a link opens it (terminals don't pass ⌘ with clicks).
 - **Hints when you might be stuck**, on the pane's border: an unclosed quote (`quote>`), an unfinished command, vim (`Esc then :q!`), less / man (`q`), nano, top, a Python or Node prompt, ssh.
 
-**Command palette** (`ctrl+]` `space`): type a few letters to find any action, setting, saved session, layout, tab or serial port, and ⏎ runs it — no shortcuts to remember.
+**Command palette** (`ctrl+]` `space`): type a few letters to find any action, setting, saved session, layout, tab or serial port, and ⏎ runs it — no shortcuts to remember. It also lists your recent commands (`Run: …`, ⏎ runs one again in the focused shell), and what you use often and lately comes first.
 
 **Broadcast typing** (`ctrl+]` `B`, or the palette): what you type goes to every shell in the tab at once (several servers, one command); panes show `⇶ broadcast`, `ctrl+]` `B` again stops it.
 
-**Failed command card:** when a command exits with an error, a card over its pane shows the exit code, the command, how long it ran and its last lines; `ctrl+]` `c` copies the command and error (for an issue or a chat), `ctrl+]` `r` runs it again. Programs whose exit code isn't an error (vim, less, grep, diff…) and ctrl+C don't get one; turn it off in settings.
+**Failed command card:** when a command exits with an error, a card over its pane shows the exit code, the command, how long it ran and its last lines; `ctrl+]` `c` copies the command and error (for an issue or a chat), `ctrl+]` `r` runs it again, and `ctrl+]` `?` asks an agent (Claude Code, Codex, Gemini or Aider, whichever is installed) why it failed — it gets the command, exit code and last lines, and is told not to change any files. Programs whose exit code isn't an error (vim, less, grep, diff…) and ctrl+C don't get one; turn it off in settings.
 
 **Saved sessions, logging and more (like PuTTY):**
 - `sv ssh save prod deploy@10.0.0.5 -p 2222 -i ~/.ssh/prod -L 8080:localhost:80` saves a connection (keepalive every 30 s unless `-k 0`; `-- cmd` runs a command instead of a shell); `sv ssh prod` opens it in a new tab named after it; `sv ssh` (or `ctrl+]` `S`, or the tab menu) lists your saved sessions and the hosts in `~/.ssh/config`; `sv ssh rm prod`. Your own `ssh`, keys and config are used.
+- **Every host at once:** mark sessions with `space` in the picker (`a` marks all) and ⏎, or `sv ssh all [NAME…]`: they open in one tab, a split each, with broadcast on, so what you type goes to every server.
 - When an ssh session drops, `ctrl+]` `R` (or right-click → Reconnect) runs it again.
 - **Duplicate session** (right-click, tab menu): a new tab in the same folder, reconnecting to the same server.
-- **Log to file** (`sv log start [file]`, `sv log stop`, right-click): everything the pane shows, as plain text (colours and progress-bar redraws taken out), in `~/shellvisor-logs/` by default. The pane title shows `⏺ logging`.
+- **Log to file** (`sv log start [file]`, `sv log stop`, right-click): everything the pane shows, as plain text (colours and progress-bar redraws taken out), in `~/shellvisor-logs/` by default, each line starting with the time (`[22:14:03] `; `--plain` leaves it out). The pane title shows `⏺ logging`. `sv log list` lists the logs; `sv log view [N|file]` opens one in the table viewer (time and text columns: filter, sort, copy), or in your pager outside Shellvisor.
 - **Serial consoles**: `sv serial` lists the ports (USB adapters, boards); `sv serial /dev/tty.usbserial-1410 115200` opens one in its own tab (default 115200 baud). Keys go straight to the device; `~.` at the start of a line quits, like `cu`.
 - **Remote files** (`ctrl+]` `F`, or the palette) over the tab's ssh session: a pane listing the server's folders; ⏎ opens, ⌫ goes up, `d` downloads into your local folder, and dropping files from Finder on the pane uploads them. It reuses the session's options (port, key, user, jump host) with one shared connection; it needs a key or ssh-agent login (a password prompt can't be answered in the background).
 - **Right-click pastes** like PuTTY if you set *Right-click: paste* in settings (ctrl+right-click still opens the menu); middle-click always pastes.
@@ -126,7 +127,7 @@ bash · ~/work · ◴ git clone ━━━━━━╸━━━ 62% · ETA 6s
 - The **files pane** puts the spinner and % on the folder or file being filled (the clone, `node_modules`, the downloaded file).
 - **Coding agents** that run an install show it on their column too (spotted on screen: Claude Code's `Bash(npm install)`, `$ …` lines).
 - When it's done the tab shows ✔ / ✖ for 5 s and a toast says so (`✔ git clone finished · 412 MB in 38s`); for a clone or a download Shellvisor can find, **`ctrl+]` `c`** cds into it and **`ctrl+]` `o`** opens it in the files pane (for about 12 s, while the toast shows).
-- **`ctrl+]` `j`** (or `sv activity`, or a click on the badge or the status bar) opens the activity list: a card per download with the command and where it comes from, the bar, the tool's own progress line, and amount / speed / time left; the last 20 finished below. `⏎` goes to its shell, `c` / `o` as above, `x` clears the finished list.
+- **`ctrl+]` `j`** (or `sv activity`, or a click on the badge or the status bar) opens the activity list: a card per download with the command and where it comes from, the bar, the tool's own progress line, and amount / speed / time left; the last 20 finished below. `⏎` goes to its shell, `p` pauses a running one (and resumes it), `x` cancels it like ctrl+C, `c` / `o` as above, `x` on a finished one clears the list. Downloads from earlier sessions are listed below (*earlier · 2 h ago*), and `r` runs any finished one again in the focused shell.
 - Settings: spinner style (ring ◴, braille ⠋, bar ▰▱▱▱) and bar or percent only.
 
 ### Settings
@@ -170,7 +171,7 @@ Inside Shellvisor, **`F4`** opens the last table full-screen: `←→` pick a co
 sv flow 'cat access.log | grep " 500 " | cut -d" " -f7 | sort | uniq -c | sort -rn'
 ```
 
-runs the pipeline with a meter between every stage — lines and bytes in and out, % kept, rate, the stage holding everything up (◀ slowest), each stage's errors and the last lines of output — and prints a summary at the end. The **Flow pane** (`F8`, or `sv layout data`; `F5` to zoom) shows it live as on the design board: a card per stage (status, in / out / rate / kept, a sparkline, its latest line) with arrows showing what each keeps, a throughput chart between stages over the last 30 s, the slowest stage and why, the output, and stderr from every stage, tagged; narrow panes get a compact table; when nothing is metered it shows the job your shell is running right now: its processes, CPU, memory, read/write rates and pipes (rates and pipes on Linux).
+runs the pipeline with a meter between every stage (`sv flow save errors '…'` saves it, `sv flow errors` runs it again, `sv flow list`, `sv flow rm errors`) — lines and bytes in and out, % kept, rate, the stage holding everything up (◀ slowest), each stage's errors and the last lines of output — and prints a summary at the end. The **Flow pane** (`F8`, or `sv layout data`; `F5` to zoom) shows it live as on the design board: a card per stage (status, in / out / rate / kept, a sparkline, its latest line) with arrows showing what each keeps, a throughput chart between stages over the last 30 s, the slowest stage and why, the output, and stderr from every stage, tagged; narrow panes get a compact table; when nothing is metered it shows the job your shell is running right now: its processes, CPU, memory, read/write rates and pipes (rates and pipes on Linux).
 
 ## Agents
 
@@ -185,7 +186,7 @@ Each agent gets a column in the agents tab (`F9`; `shift+F9` opens the New agent
 
 ### MCP servers (ctrl+] M)
 
-`sv mcp` lists the MCP servers your agents can use — from Claude Code, Codex, Gemini and the project's `.mcp.json` — and, inside Shellvisor, opens two screens. The first shows each server's state from a real handshake, its tools, resources and prompts, which secrets are set (never their values) and who uses it; `t` tries a tool with a form built from its input schema. Press `2` for live traffic (every MCP call in your agents' logs, with size and time), a permissions grid (allow / ask / never per server or tool, per agent) and *Add a server*, which checks the server before it writes it to each agent's config.
+`sv mcp` lists the MCP servers your agents can use — from Claude Code, Codex, Gemini and the project's `.mcp.json` — and, inside Shellvisor, opens two screens. The first shows each server's state from a real handshake, its tools, resources and prompts, which secrets are set (never their values) and who uses it; `t` tries a tool with a form built from its input schema. A ⚠ marks a tool whose description changed since it was last seen (a changed description can quietly change what an agent does with it); `d` shows the old and new text. The tabs show how many tokens each server's tool list takes in every agent's context. Press `2` for live traffic (every MCP call in Claude Code, Codex and Gemini CLI logs, with size and time), a permissions grid (allow / ask / never per server or tool, per agent) and *Add a server*, which checks the server before it writes it to each agent's config.
 
 ### Agents that start agents
 

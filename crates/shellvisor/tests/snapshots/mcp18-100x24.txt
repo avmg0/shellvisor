@@ -1,0 +1,24 @@
+ ▍shellvisor  MCP · traffic · permissions · add a server                     5 calls today   ##:##
+ ╭ LIVE TRAFFIC · every tool call agents make ───────╮ ╭──────────────────────────────────────────╮
+ │  all agents ▾   all servers ▾   errors only       │ │ Permissions   space: allow / ask / never │
+ │                                                   │ │ server · tool            you      api    │
+ │ agent    server · tool  arguments                 │ │ filesystem                —        —     │
+ │ ● api    github · searc query shellvisor user ✔   │ │   read_file               —        —     │
+ │ ● you    github · list_ state open, labels bu ✔   │ │   write_file              —        —     │
+ │ ● api    filesystem · r path src/main.rs      ✔   │ │ github                    —        —     │
+ │ ● you    linear · list_ team SHV              ✖   │ │   search_repositories     —        —     │
+ │ ● api    github · get_f path README.md        ✔   │ │   get_file_contents       —        —     │
+ │                                                   │ │   list_issues             —        —     │
+ │                                                   │ │ written to each agent's own settings     │
+ │                                                   │ ╰──────────────────────────────────────────╯
+ │                                                   │ ╭──────────────────────────────────────────╮
+ ╰───────────────────────────────────────────────────╯ │ Add a server       once, for every agent │
+ ╭───────────────────────────────────────────────────╮ │ ready-made:  filesystem   github         │
+ │ Calls per minute        │ Context sent back       │ │              postgres   playwright       │
+ │                         │                         │ │              fetch   sentry              │
+ │                         │ github       ━     3.7k │ │                                          │
+ │ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁  │ filesystem   ━      675 │ │ name       ▕ sentry                    ▏ │
+ │                         │ linear       ━        0 │ │ transport   http   stdio                 │
+ │ 5 calls · 1 failed      │                         │ │ command    ▕ npx -y @scope/server-name ▏ ▼
+ ╰───────────────────────────────────────────────────╯ ╰──────────────────────────────────────────╯
+ space Pause traffic   ⏎ Call details   p Permissions   a Add server   alt+a Approvals   esc Back to

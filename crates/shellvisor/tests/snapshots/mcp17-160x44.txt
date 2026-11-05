@@ -1,0 +1,44 @@
+ ▍shellvisor  MCP · servers your agents can use                                                                ● 2 running · ○ 1 stopped · ✖ 1 failing   ##:##
+ ╭───────────────────────────────────────────────────╮ ╭ github ──────────────────────────────────────────────────────────────────────────────────────────────╮
+ │ SERVERS  from Claude · Codex · Gemini · .mcp.json │ │ command        npx -y @modelcontextprotocol/server-github   │ Health ✔ handshake 312 ms              │
+ │ ╭───────────────────────────────────────────────╮ │ │ transport      stdio · protocol 2025-06-18                  │ 7 tools · 0 resources · 2 prompts      │
+ │ │ / filter servers and tools                    │ │ │ configured in  ~/.claude.json (Claude Code)                 │ 3 calls today · 0 failed · avg 594 ms  │
+ │ ╰───────────────────────────────────────────────╯ │ │ secrets        SV_SNAPSHOT_TOKEN ✖ not set · value never sh │ context sent back ≈ 3.7k tokens        │
+ │ ╭───────────────────────────────────────────────╮ │ │ used by        ● you  ● api                                 │ running · pid 48211                    │
+ │ │ ● filesystem · stdio                  running │ │ ╰──────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ │ │ Claude Code                                   │ │ ╭──────────────────────────────────────────────────────────────────────────────────────────────────────╮
+ │ │ 2 tools                       1 calls · 12 ms │ │ │ Tools (7)   Resources   Prompts (2)   Traffic   Permissions   Log                                    │
+ │ ╰───────────────────────────────────────────────╯ │ │ tool                      what it does                                 calls      avg you · api      │
+ │ ╭───────────────────────────────────────────────╮ │ │ search_repositories       Search for GitHub repositories                   1   640 ms — · —          │
+ │ │ ● github · stdio                      running │ │ │ get_file_contents         Get the contents of a file or directory          1   280 ms — · —          │
+ │ │ Claude Code                                   │ │ │ list_issues               List issues in a repository, with filters        1   864 ms — · —          │
+ │ │ 7 tools · 2 prompts          3 calls · 594 ms │ │ │ create_issue              Create a new issue in a repository               0        — — · —          │
+ │ ╰───────────────────────────────────────────────╯ │ │ create_pull_request       Create a new pull request                        0        — — · —          │
+ │ ╭───────────────────────────────────────────────╮ │ │ push_files                Push several files in a single commit            0        — — · —          │
+ │ │ ✖ linear · http                       failing │ │ │ merge_pull_request        Merge a pull request                             0        — — · —          │
+ │ │ Claude Code · mcp.linear.app                  │ │ │                                                                                                      │
+ │ │ 401 on handshake             1 calls · 604 ms │ │ │                                                                                                      │
+ │ ╰───────────────────────────────────────────────╯ │ │                                                                                                      │
+ │ ╭───────────────────────────────────────────────╮ │ │                                                                                                      │
+ │ │ ○ playwright · stdio                  stopped │ │ │                                                                                                      │
+ │ │ Claude Code · starts when an agent calls it   │ │ │                                                                                                      │
+ │ │ 1 tool                         not used today │ │ │                                                                                                      │
+ │ ╰───────────────────────────────────────────────╯ │ │                                                                                                      │
+ │                                                   │ │                                                                                                      │
+ │                                                   │ │                                                                                                      │
+ │                                                   │ │                                                                                                      │
+ │                                                   │ │                                                                                                      │
+ │                                                   │ │                                                                                                      │
+ │                                                   │ ╰──────────────────────────────────────────────────────────────────── tool list ≈ 185 tokens per agent ╯
+ │                                                   │ ╭──────────────────────────────────────────────────────────────────────────────────────────────────────╮
+ │                                                   │ │ Try a tool      t · runs as you, not as an agent  │ Result                                           │
+ │                                                   │ │                                                   │ the answer shows here, with its size and token co│
+ │                                                   │ │ t fills in search_repositories's inputs here and  │                                                  │
+ │                                                   │ │                                                   │                                                  │
+ │                                                   │ │                                                   │                                                  │
+ │                                                   │ │                                                   │                                                  │
+ │                                                   │ │                                                   │                                                  │
+ │                                                   │ │                                                   │                                                  │
+ │                                                   │ │                                                   │                                                  │
+ ╰───────────────────────────────────────────────────╯ ╰──────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ ⏎ Details   t Try a tool   s Start / stop   r Restart   a Add server   p Permissions   l Server log   / Filter   · sv mcp · ctrl+] M

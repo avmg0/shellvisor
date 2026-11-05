@@ -190,6 +190,12 @@ pub struct McpScreen {
     pub note: Option<String>,
     pub home: PathBuf,
     pub cwd: PathBuf,
+    /// Where tool descriptions are remembered (state dir).
+    pub seen_path: PathBuf,
+    /// Per server: tools whose description changed since last seen.
+    pub changes: HashMap<String, Vec<mcp::DescChange>>,
+    /// The change shown in the Result box (`d`).
+    pub show_change: Option<(String, mcp::DescChange)>,
 }
 
 pub const TABS: [&str; 6] = [
@@ -235,6 +241,9 @@ impl McpScreen {
             note: None,
             home,
             cwd,
+            seen_path: crate::paths::state_dir().join("mcp-tools.json"),
+            changes: HashMap::new(),
+            show_change: None,
         };
         sc.load_perms();
         (sc, acts)
@@ -246,6 +255,27 @@ impl McpScreen {
             .iter()
             .map(|w| (mcp::claude_key(&w.dir), w.name.clone()))
             .collect()
+    }
+
+    /// (folder, who) for reading Codex and Gemini logs.
+    pub fn log_dirs(&self) -> Vec<(PathBuf, String)> {
+        self.who
+            .iter()
+            .map(|w| (w.dir.clone(), w.name.clone()))
+            .collect()
+    }
+
+    /// Tool name → server, from the servers checked so far.
+    pub fn tool_servers(&self) -> BTreeMap<String, String> {
+        let mut m = BTreeMap::new();
+        for (name, c) in &self.checks {
+            if let Check::Ok(h) = c {
+                for t in &h.tools {
+                    m.entry(t.name.clone()).or_insert_with(|| name.clone());
+                }
+            }
+        }
+        m
     }
 
     pub fn load_perms(&mut self) {
@@ -314,6 +344,10 @@ impl McpScreen {
     // ------------------------------------------------------------ results
 
     pub fn checked(&mut self, name: String, r: Result<Health, (String, Vec<String>)>) {
+        if let Ok(h) = &r {
+            let c = mcp::desc_changes(&self.seen_path, &name, &h.tools);
+            self.changes.insert(name.clone(), c);
+        }
         self.checks.insert(
             name,
             match r {
@@ -429,6 +463,35 @@ impl McpScreen {
             .and_then(|s| self.health(&s.name))
             .map(|h| h.tools.len())
             .unwrap_or(0);
+        if self.show_change.is_some() && matches!(key, b"\x1b" | b"d" | b"\r") {
+            if let Some((server, c)) = self.show_change.take() {
+                mcp::seen_change(&self.seen_path, &server, &c.tool);
+                if let Some(v) = self.changes.get_mut(&server) {
+                    v.retain(|x| x.tool != c.tool);
+                }
+            }
+            return Vec::new();
+        }
+        if key == b"d" {
+            if let Some(s) = self.current() {
+                let name = s.name.clone();
+                let tool = self
+                    .health(&name)
+                    .and_then(|h| h.tools.get(self.tool_sel))
+                    .map(|t| t.name.clone());
+                let list = self.changes.get(&name).cloned().unwrap_or_default();
+                let pick = list
+                    .iter()
+                    .find(|c| self.in_tools && Some(&c.tool) == tool.as_ref())
+                    .or(list.first())
+                    .cloned();
+                match pick {
+                    Some(c) => self.show_change = Some((name, c)),
+                    None => self.note = Some("no tool descriptions changed".into()),
+                }
+            }
+            return Vec::new();
+        }
         match key {
             b"\x1b" | b"q" => {
                 if self.try_form.is_some() {
@@ -1246,9 +1309,40 @@ impl McpScreen {
             };
             x = put_w(buf, ti, x, ti.y, &label, s2) + 3;
         }
-        let hint = "tab: next · ⏎ into the list";
-        if x + hint.chars().count() as u16 + 2 <= ti.x + ti.width {
-            put_right(buf, ti, ti.y, hint, st(DIM).bg(PANEL));
+        let n_changed = self.changes.get(&s.name).map(|v| v.len()).unwrap_or(0);
+        let (hint, hc) = if n_changed > 0 {
+            (
+                format!(
+                    "⚠ {n_changed} description{} changed · d show",
+                    if n_changed == 1 { "" } else { "s" }
+                ),
+                AMBER,
+            )
+        } else if let Some(h) = health.filter(|h| !h.tools.is_empty()) {
+            (
+                format!(
+                    "tool list ≈ {} tokens per agent",
+                    tokens(mcp::list_tokens(&h.tools) * 4)
+                ),
+                DIM,
+            )
+        } else {
+            ("tab: next · ⏎ into the list".to_string(), DIM)
+        };
+        let hl = hint.chars().count() as u16;
+        if x + hl + 2 <= ti.x + ti.width {
+            put_right(buf, ti, ti.y, &hint, st(hc).bg(PANEL));
+        } else if hl + 4 <= ti.width {
+            // no room beside the tabs: on the box's bottom border
+            let hx = ti.right().saturating_sub(hl + 2);
+            put_n(
+                buf,
+                hx,
+                ti.bottom(),
+                &format!(" {hint} "),
+                st(hc).bg(PANEL),
+                hl + 2,
+            );
         }
         let lr = Rect::new(ti.x, ti.y + 2, ti.width, ti.height.saturating_sub(2));
         match self.tab {
@@ -1547,7 +1641,52 @@ impl McpScreen {
             "Result",
             st(TEXT).bg(PANEL).add_modifier(Modifier::BOLD),
         );
-        if let Some(r) = self.try_form.as_ref().and_then(|t| t.result.as_ref()) {
+        if let Some((_, c)) = &self.show_change {
+            put_right(
+                buf,
+                rgt,
+                rgt.y,
+                fit(
+                    &[
+                        &format!("⚠ {}'s description changed", c.tool),
+                        "⚠ description changed",
+                        "⚠",
+                    ],
+                    rgt.width.saturating_sub(9),
+                ),
+                st(AMBER).bg(PANEL),
+            );
+            let w = rgt.width.saturating_sub(4) as usize;
+            let mut y = rgt.y + 1;
+            let last = rgt.bottom().saturating_sub(1);
+            for (label, text, col) in [("before", &c.before, RED), ("now", &c.now, GREEN)] {
+                if y < last {
+                    put(buf, rgt, rgt.x + 1, y, label, st(DIM).bg(PANEL));
+                    y += 1;
+                }
+                for line in wrap(text, w) {
+                    if y >= last {
+                        break;
+                    }
+                    put(buf, rgt, rgt.x + 3, y, &line, st(col).bg(PANEL));
+                    y += 1;
+                }
+            }
+            put(
+                buf,
+                rgt,
+                rgt.x + 1,
+                last,
+                fit(
+                    &[
+                        "agents now get the new text · d / esc: got it",
+                        "d / esc: got it",
+                    ],
+                    rgt.width.saturating_sub(2),
+                ),
+                st(DIM).bg(PANEL),
+            );
+        } else if let Some(r) = self.try_form.as_ref().and_then(|t| t.result.as_ref()) {
             let (mark, c) = if r.ok { ("✔", GREEN) } else { ("✖", RED) };
             let meta = format!(" · {} · ≈ {} tokens", size(r.bytes), tokens(r.bytes));
             let w = meta.chars().count() as u16;
@@ -1692,13 +1831,21 @@ impl McpScreen {
                 || (!self.in_tools && i == self.tool_sel && self.try_form.is_some());
             let bg = if selected { SELECT } else { PANEL };
             buf.set_style(Rect::new(lr.x, y, lr.width, 1), Style::default().bg(bg));
+            let changed = self
+                .changes
+                .get(&s.name)
+                .is_some_and(|v| v.iter().any(|c| c.tool == t.name));
+            if changed {
+                put_n(buf, xs[0], y, "⚠ ", st(AMBER).bg(bg), 2);
+            }
+            let nx = if changed { xs[0] + 2 } else { xs[0] };
             put_n(
                 buf,
-                xs[0],
+                nx,
                 y,
                 &t.name,
                 st(TEXT).bg(bg).add_modifier(Modifier::BOLD),
-                cols[0],
+                cols[0].saturating_sub(nx - xs[0]),
             );
             put_n(buf, xs[1], y, &t.desc, st(DIM).bg(bg), cols[1]);
             let u = by_tool.get(&(s.name.clone(), t.name.clone()));
@@ -2251,7 +2398,9 @@ impl McpScreen {
                     cw[4],
                 );
             }
-            let m = c.ms.map(ms).unwrap_or_else(|| "…".into());
+            let m =
+                c.ms.map(ms)
+                    .unwrap_or_else(|| if c.ok.is_some() { "—" } else { "…" }.into());
             if cw[5] > 0 {
                 let mw = cw[5] as usize;
                 put_n(buf, xs[5], y, &format!("{m:>mw$}"), st(DIM).bg(bg), cw[5]);
@@ -2638,6 +2787,43 @@ fn put_right(buf: &mut Buffer, area: Rect, y: u16, t: &str, s: Style) {
     put(buf, area, x, y, t, s);
 }
 
+/// The first text that fits in `w` columns (else the last one).
+fn fit<'a>(choices: &[&'a str], w: u16) -> &'a str {
+    choices
+        .iter()
+        .find(|t| t.chars().count() as u16 <= w)
+        .or(choices.last())
+        .copied()
+        .unwrap_or("")
+}
+
+/// Break text into lines of at most `w` characters, at spaces where possible.
+fn wrap(t: &str, w: usize) -> Vec<String> {
+    let w = w.max(8);
+    let mut out = Vec::new();
+    let mut line = String::new();
+    for word in t.split_whitespace() {
+        let wl = word.chars().count();
+        let ll = line.chars().count();
+        if ll > 0 && ll + 1 + wl > w {
+            out.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+        while line.chars().count() > w {
+            let head: String = line.chars().take(w).collect();
+            line = line.chars().skip(w).collect();
+            out.push(head);
+        }
+    }
+    if !line.is_empty() {
+        out.push(line);
+    }
+    out
+}
+
 fn center(t: &str, w: usize) -> String {
     let n = t.chars().count();
     if n >= w {
@@ -2662,8 +2848,10 @@ fn size(b: usize) -> String {
 /// Rough tokens for a result (≈ 4 bytes a token): "540", "61k".
 fn tokens(bytes: usize) -> String {
     let t = bytes / 4;
-    if t >= 1000 {
+    if t >= 10_000 {
         format!("{}k", t / 1000)
+    } else if t >= 1000 {
+        format!("{:.1}k", t as f64 / 1000.0)
     } else {
         t.to_string()
     }
@@ -2751,5 +2939,221 @@ mod tests {
         assert_eq!(s.secrets, vec!["GITHUB_PERSONAL_ACCESS_TOKEN"]);
         f.use_template(5);
         assert!(f.http && f.server().is_ok());
+    }
+
+    /// Boards 17 and 18 drawn from fixed data, compared with the text in
+    /// tests/snapshots (clock and times masked). A layout change shows up
+    /// as a diff; `UPDATE_SNAPSHOTS=1 cargo test` rewrites them after a
+    /// deliberate change — check the new files against the boards first.
+    #[test]
+    fn boards_17_and_18_snapshots() {
+        let home = std::env::temp_dir().join(format!("sv-snap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join("work")).unwrap();
+        std::fs::write(
+            home.join(".claude.json"),
+            r#"{"mcpServers":{
+                "github":{"command":"npx","args":["-y","@modelcontextprotocol/server-github"],"env":{"SV_SNAPSHOT_TOKEN":"${SV_SNAPSHOT_TOKEN}"}},
+                "filesystem":{"command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","."]},
+                "linear":{"type":"http","url":"https://mcp.linear.app/mcp"},
+                "playwright":{"command":"npx","args":["@playwright/mcp"]}}}"#,
+        )
+        .unwrap();
+        let who = vec![
+            Who {
+                name: "you".into(),
+                dir: home.join("work"),
+                color: TEXT,
+            },
+            Who {
+                name: "api".into(),
+                dir: home.join("wt-api"),
+                color: CYAN,
+            },
+        ];
+        let (mut sc, _) = McpScreen::new(home.clone(), home.join("work"), who);
+        sc.seen_path = home.join("seen.json");
+        sc.running.clear();
+        sc.running.insert("github".into(), 48211);
+        sc.running.insert("filesystem".into(), 48190);
+        let tool = |n: &str, d: &str| mcp::Tool {
+            name: n.into(),
+            desc: d.into(),
+            schema: serde_json::json!({"type":"object","properties":{"query":{"type":"string"}}}),
+        };
+        let health = |tools: Vec<mcp::Tool>, prompts: usize| mcp::Health {
+            protocol: "2025-06-18".into(),
+            server_name: "x".into(),
+            tools,
+            prompts: (0..prompts).map(|i| format!("prompt{i}")).collect(),
+            resources: vec![],
+            ms: 312,
+            stderr: vec![],
+        };
+        sc.checked(
+            "github".into(),
+            Ok(health(
+                vec![
+                    tool("search_repositories", "Search for GitHub repositories"),
+                    tool(
+                        "get_file_contents",
+                        "Get the contents of a file or directory",
+                    ),
+                    tool("list_issues", "List issues in a repository, with filters"),
+                    tool("create_issue", "Create a new issue in a repository"),
+                    tool("create_pull_request", "Create a new pull request"),
+                    tool("push_files", "Push several files in a single commit"),
+                    tool("merge_pull_request", "Merge a pull request"),
+                ],
+                2,
+            )),
+        );
+        sc.checked(
+            "filesystem".into(),
+            Ok(health(
+                vec![
+                    tool("read_file", "Read a file"),
+                    tool("write_file", "Write a file"),
+                ],
+                0,
+            )),
+        );
+        sc.checked("linear".into(), Err(("401 on handshake".into(), vec![])));
+        sc.checked(
+            "playwright".into(),
+            Ok(health(vec![tool("browser_navigate", "Open a URL")], 0)),
+        );
+        let call = |agent: &str,
+                    server: &str,
+                    tool: &str,
+                    args: &str,
+                    ok: Option<bool>,
+                    bytes: usize,
+                    ms: u64| Call {
+            at: 1_700_000_000,
+            agent: agent.into(),
+            server: server.into(),
+            tool: tool.into(),
+            args: args.into(),
+            bytes: Some(bytes),
+            ms: Some(ms),
+            ok,
+        };
+        let calls = vec![
+            call(
+                "api",
+                "github",
+                "search_repositories",
+                "query shellvisor user:avmg0",
+                Some(true),
+                2100,
+                640,
+            ),
+            call(
+                "you",
+                "github",
+                "list_issues",
+                "state open, labels bug",
+                Some(true),
+                8900,
+                864,
+            ),
+            call(
+                "api",
+                "filesystem",
+                "read_file",
+                "path src/main.rs",
+                Some(true),
+                2700,
+                12,
+            ),
+            call(
+                "you",
+                "linear",
+                "list_issues",
+                "team SHV",
+                Some(false),
+                0,
+                604,
+            ),
+            call(
+                "api",
+                "github",
+                "get_file_contents",
+                "path README.md",
+                Some(true),
+                3800,
+                280,
+            ),
+        ];
+        sc.calls = calls;
+        sc.sel = sc
+            .servers
+            .iter()
+            .position(|s| s.name == "github")
+            .unwrap_or(0);
+
+        let mask = |t: String| -> String {
+            // clock and times of day change from run to run
+            let re = regex_lite::Regex::new(r"\b\d\d:\d\d(:\d\d)?\b").unwrap();
+            re.replace_all(&t, "##:##").into_owned()
+        };
+        let draw = |sc: &McpScreen, w: u16, h: u16| -> String {
+            let area = Rect::new(0, 0, w, h);
+            let mut buf = Buffer::empty(area);
+            sc.render(area, &mut buf, None);
+            let mut out = String::new();
+            for y in 0..h {
+                let mut line = String::new();
+                for x in 0..w {
+                    line.push_str(buf[(x, y)].symbol());
+                }
+                out.push_str(line.trim_end());
+                out.push('\n');
+            }
+            mask(out)
+        };
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots");
+        let update = std::env::var_os("UPDATE_SNAPSHOTS").is_some();
+        let mut failed = Vec::new();
+        for page in [0u8, 1] {
+            sc.page = page;
+            for (w, h) in [(160u16, 44u16), (100, 24)] {
+                let name = format!("mcp{}-{w}x{h}.txt", 17 + page);
+                let got = draw(&sc, w, h);
+                let path = dir.join(&name);
+                if update || !path.exists() {
+                    std::fs::create_dir_all(&dir).unwrap();
+                    std::fs::write(&path, &got).unwrap();
+                    continue;
+                }
+                let want = std::fs::read_to_string(&path).unwrap();
+                if want != got {
+                    let first = want
+                        .lines()
+                        .zip(got.lines())
+                        .position(|(a, b)| a != b)
+                        .unwrap_or(0);
+                    failed.push(format!(
+                        "{name}: first difference on line {}\n  want: {}\n  got:  {}",
+                        first + 1,
+                        want.lines().nth(first).unwrap_or(""),
+                        got.lines().nth(first).unwrap_or("")
+                    ));
+                }
+            }
+        }
+        // the colours that make it read like the boards
+        sc.page = 0;
+        let area = Rect::new(0, 0, 160, 44);
+        let mut buf = Buffer::empty(area);
+        sc.render(area, &mut buf, None);
+        assert_eq!(buf[(1, 0)].fg, AMBER, "▍shellvisor in amber");
+        let _ = std::fs::remove_dir_all(&home);
+        assert!(
+            failed.is_empty(),
+            "screens drifted from the snapshots:\n{}",
+            failed.join("\n")
+        );
     }
 }

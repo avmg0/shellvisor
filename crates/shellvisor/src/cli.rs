@@ -52,6 +52,66 @@ fn send(mode: Mode) -> i32 {
     send_seq(mode.sequence())
 }
 
+/// `sv log list`: the saved logs, newest first.
+fn log_list() -> i32 {
+    use crate::data::value::Value;
+    let logs = crate::sessionlog::list();
+    if logs.is_empty() {
+        println!(
+            "no logs in {} yet · sv log start",
+            crate::sessionlog::log_dir().display()
+        );
+        return 0;
+    }
+    let rows: Vec<crate::data::value::Record> = logs
+        .iter()
+        .enumerate()
+        .map(|(i, (p, size, _))| {
+            vec![
+                ("#".to_string(), Value::Int(i as i64 + 1)),
+                (
+                    "name".to_string(),
+                    Value::Str(
+                        p.file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default(),
+                    ),
+                ),
+                ("size".to_string(), Value::Size(*size)),
+            ]
+        })
+        .collect();
+    let mut st = crate::data::format::Style::text();
+    st.width = crate::data::term_width();
+    print!("{}", crate::data::format::render_table(&rows, &st));
+    println!("sv log view N opens one");
+    0
+}
+
+/// A log by number from `sv log list`, a file, or (none) the newest.
+fn log_pick(arg: Option<&str>) -> Option<std::path::PathBuf> {
+    let logs = crate::sessionlog::list();
+    let p = match arg {
+        None => logs.first().map(|(p, _, _)| p.clone()),
+        Some(n) if n.parse::<usize>().is_ok_and(|n| n >= 1) => logs
+            .get(n.parse::<usize>().unwrap() - 1)
+            .map(|(p, _, _)| p.clone()),
+        Some(f) => {
+            let p = std::path::Path::new(f);
+            let p = if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                std::env::current_dir().unwrap_or_default().join(p)
+            };
+            p.exists().then_some(p)
+        }
+    };
+    if p.is_none() {
+        eprintln!("sv log view: no such log · sv log list");
+    }
+    p
+}
+
 fn send_seq(seq: String) -> i32 {
     // Write to the controlling terminal so it works even with stdout redirected.
     let written = std::fs::OpenOptions::new()
@@ -203,6 +263,42 @@ pub fn run(args: &[String]) -> i32 {
             if rest.is_empty() && inside() {
                 return send_seq(request_sequence(&["ssh"]));
             }
+            // sv ssh all [NAME…]: every (or the named) saved session in one
+            // tab, typing going to all of them
+            if rest.first().map(String::as_str) == Some("all") {
+                let entries = crate::sessions::entries();
+                let pick: Vec<(String, String)> = if rest.len() > 1 {
+                    let mut v = Vec::new();
+                    for want in &rest[1..] {
+                        match entries.iter().find(|(n, _, _)| n == want) {
+                            Some((n, _, c)) => v.push((n.clone(), c.clone())),
+                            None => {
+                                eprintln!("sv ssh all: no session `{want}` (sv ssh lists them)");
+                                return 1;
+                            }
+                        }
+                    }
+                    v
+                } else {
+                    entries
+                        .iter()
+                        .map(|(n, _, c)| (n.clone(), c.clone()))
+                        .collect()
+                };
+                if pick.len() < 2 {
+                    eprintln!("sv ssh all: needs two or more saved sessions");
+                    return 2;
+                }
+                if !inside() {
+                    return not_running("ssh all");
+                }
+                let mut req: Vec<&str> = vec!["ssh-all"];
+                for (n, c) in &pick {
+                    req.push(n);
+                    req.push(c);
+                }
+                return send_seq(request_sequence(&req));
+            }
             match crate::sessions::cli(rest) {
                 Err(code) => code,
                 Ok(Some((name, cmd))) => {
@@ -222,12 +318,50 @@ pub fn run(args: &[String]) -> i32 {
             }
         }
         "log" => {
+            match args.get(1).map(String::as_str) {
+                Some("list" | "ls") => return log_list(),
+                Some("view" | "show") => {
+                    let Some(path) = log_pick(args.get(2).map(String::as_str)) else {
+                        return 1;
+                    };
+                    if !inside() {
+                        // outside Shellvisor: the pager, at the end
+                        let pager = std::env::var("PAGER").unwrap_or_else(|_| "less".into());
+                        return std::process::Command::new(&pager)
+                            .args(if pager == "less" { vec!["+G"] } else { vec![] })
+                            .arg(&path)
+                            .status()
+                            .map(|s| s.code().unwrap_or(1))
+                            .unwrap_or(1);
+                    }
+                    return send_seq(request_sequence(&[
+                        "log",
+                        "view",
+                        &path.display().to_string(),
+                    ]));
+                }
+                _ => {}
+            }
             if !inside() {
                 return not_running("log");
             }
+            let plain = args.iter().any(|a| a == "--plain");
+            let args: Vec<String> = args.iter().filter(|a| *a != "--plain").cloned().collect();
             let rest: Vec<String> = match args.get(1).map(String::as_str) {
                 None | Some("status") => vec![],
                 Some("stop") => vec!["stop".into()],
+                Some("start") if plain => match args.get(2) {
+                    Some(f) => {
+                        let p = std::path::Path::new(f);
+                        let abs = if p.is_absolute() {
+                            p.to_path_buf()
+                        } else {
+                            std::env::current_dir().unwrap_or_default().join(p)
+                        };
+                        vec!["start-plain".into(), abs.display().to_string()]
+                    }
+                    None => vec!["start-plain".into()],
+                },
                 Some("start") => match args.get(2) {
                     Some(f) => {
                         let p = std::path::Path::new(f);
@@ -241,7 +375,9 @@ pub fn run(args: &[String]) -> i32 {
                     None => vec!["start".into()],
                 },
                 Some(other) => {
-                    eprintln!("sv log: `{other}` — start [file], stop or status");
+                    eprintln!(
+                        "sv log: `{other}` — start [file] [--plain], stop, status, list or view [file|N]"
+                    );
                     return 2;
                 }
             };
@@ -250,6 +386,12 @@ pub fn run(args: &[String]) -> i32 {
             send_seq(request_sequence(&req))
         }
         "terminal-colors" | "terminal-colours" => crate::termcolors::run(&args[1..]),
+        "tour" => {
+            if !inside() {
+                return not_running("tour");
+            }
+            send_seq(request_sequence(&["tour"]))
+        }
         "activity" | "downloads" => {
             if !inside() {
                 return not_running("activity");

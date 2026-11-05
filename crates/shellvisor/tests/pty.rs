@@ -86,6 +86,15 @@ impl Session {
         cmd.env("TERM", "xterm-256color");
         cmd.env("SHELL", "/bin/sh");
         cmd.env("SHELLVISOR_STATE_DIR", dir.join("state"));
+        // the first-run tour only where a test asks for it
+        if !dir.join("tour").exists() {
+            cmd.env("SHELLVISOR_TOUR", "0");
+        }
+        // stand-in programs (ssh, agent CLIs) in home/bin come first
+        if dir.join("home/bin").is_dir() {
+            let path = std::env::var("PATH").unwrap_or_default();
+            cmd.env("PATH", format!("{}:{path}", dir.join("home/bin").display()));
+        }
         let fake_ssh = dir.join("home/bin/ssh");
         if fake_ssh.exists() {
             cmd.env("SHELLVISOR_SSH", &fake_ssh);
@@ -838,6 +847,125 @@ fn activity_list_speed_files_mark_and_toast_actions() {
     s.wait_until("files pane shows the clone", |t| t.contains("inside.txt"));
 }
 
+#[test]
+fn downloads_pause_cancel_and_history() {
+    let dir = scratch("dlpause");
+    std::fs::write(
+        dir.join("config.yaml"),
+        "start_view: full\nrestore: never\n",
+    )
+    .unwrap();
+    // a stand-in wget that prints its progress slowly
+    std::fs::create_dir_all(dir.join("home/bin")).unwrap();
+    let fake = dir.join("home/bin/wget");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\ni=1\nwhile [ $i -le 200 ]; do echo \"big.iso  $i%  1.0M/s\"; i=$((i+1)); sleep 0.25; done\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut s = Session::launch("bash", dir.clone());
+    s.wait_for("PROMPT>");
+    s.send("wget https://example.invalid/big.iso\r");
+    s.wait_until("downloading", |t| {
+        t.lines().next().unwrap_or("").contains("1 download")
+    });
+    s.send("\x1d");
+    s.send("j");
+    s.wait_for("ACTIVITY · downloads & installs");
+    // p pauses: the output stops
+    s.send("p");
+    s.wait_for("paused · p resumes · x cancels");
+    s.pump(Duration::from_millis(600));
+    s.send("\x1b");
+    s.pump(Duration::from_millis(300));
+    let before = s.text();
+    s.pump(Duration::from_millis(1200));
+    let pct = |t: &str| {
+        t.lines()
+            .filter_map(|l| l.split("big.iso  ").nth(1))
+            .filter_map(|r| r.split('%').next()?.trim().parse::<u32>().ok())
+            .max()
+            .unwrap_or(0)
+    };
+    assert_eq!(pct(&before), pct(&s.text()), "nothing printed while paused");
+    // p again resumes it
+    s.send("\x1d");
+    s.send("j");
+    s.wait_for("ACTIVITY · downloads & installs");
+    s.send("p");
+    s.wait_for("resumed");
+    s.send("\x1b");
+    let at = pct(&s.text());
+    s.wait_until("printing again", |t| pct(t) > at + 2);
+    // x cancels it
+    s.send("\x1d");
+    s.send("j");
+    s.wait_for("ACTIVITY · downloads & installs");
+    s.send("x");
+    s.wait_for("cancelled");
+    s.send("\x1b");
+    s.wait_until("cancelled with ctrl+C's code", |t| t.contains("✖ 130"));
+    let hist = std::fs::read_to_string(dir.join("state/downloads.jsonl")).unwrap_or_default();
+    assert!(hist.contains("wget"), "remembered: {hist}");
+    s.keep = true;
+    drop(s);
+    // a new session lists it under "earlier"
+    let mut s = Session::launch("bash", dir.clone());
+    s.wait_for("PROMPT>");
+    s.send("\x1d");
+    s.send("j");
+    s.wait_until("earlier downloads", |t| {
+        t.contains("earlier ·") && t.contains("wget example.invalid/big.iso")
+    });
+}
+
+#[test]
+fn first_run_tour_once() {
+    let dir = scratch("tour");
+    std::fs::write(
+        dir.join("config.yaml"),
+        "start_view: full\nrestore: never\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("tour"), "").unwrap();
+    let mut s = Session::launch("bash", dir.clone());
+    s.wait_until("tour card 1", |t| {
+        t.contains("Welcome to Shellvisor") && t.contains("1 of 4")
+    });
+    s.send("x");
+    s.wait_until("card 2", |t| {
+        t.contains("command palette") && t.contains("2 of 4")
+    });
+    s.send("\x1b[D");
+    s.wait_for("1 of 4");
+    s.send("\x1b");
+    s.wait_until("tour closed", |t| {
+        !t.contains("1 of 4") && t.contains("PROMPT>")
+    });
+    assert_eq!(
+        std::fs::read_to_string(dir.join("state/tour.done"))
+            .unwrap()
+            .trim(),
+        "1"
+    );
+    s.keep = true;
+    drop(s);
+    // not again on the next start; sv tour brings it back
+    let mut s = Session::launch("bash", dir.clone());
+    s.wait_for("PROMPT>");
+    s.pump(Duration::from_millis(400));
+    assert!(!s.text().contains("Welcome to Shellvisor"));
+    s.send("sv tour\r");
+    s.wait_for("Welcome to Shellvisor");
+    for _ in 0..4 {
+        s.send(" ");
+        s.pump(Duration::from_millis(150));
+    }
+    s.wait_until("tour done", |t| !t.contains("of 4"));
+}
+
 // ------------------------------------------------------------------ P3 data
 
 #[test]
@@ -923,6 +1051,13 @@ fn sv_flow_meters_a_pipeline_and_the_flow_pane_shows_it() {
     s.wait_until("stage meters in the pane", |t| {
         t.contains("finished") && t.contains("20.0k → 6878 lines · 34% kept")
     });
+    // a saved pipeline runs by name
+    s.run("sv flow save sevens 'seq 1 2000 | grep 7 | wc -l'");
+    s.wait_for("saved sevens");
+    s.run("sv flow list");
+    s.wait_for("sevens           seq 1 2000");
+    s.send("sv flow sevens\r");
+    s.wait_until("ran by name", |t| t.contains("2000 → 542 lines"));
 }
 
 // ------------------------------------------------------------------ P4 agents
@@ -1563,8 +1698,24 @@ fn find_clear_hints_and_option_click() {
     s.wait_until("found and scrolled to", |t| {
         t.contains("1 of 2") && t.contains("needle-old")
     });
+    // ctrl+r: a regular expression; ⏎ then n / N step through the matches
+    s.send("\x12");
+    s.send("\x15");
+    s.send("^1[0-2]0$");
+    s.wait_until("regex matches", |t| {
+        t.contains(".*") && t.contains("1 of 3")
+    });
+    s.send("\r");
+    s.wait_for("2 of 3");
+    s.send("n");
+    s.wait_for("3 of 3");
+    s.send("N");
+    s.wait_for("2 of 3");
+    s.send("/");
+    s.send("(");
+    s.wait_for("✖");
     s.send("\x1b");
-    s.wait_until("find closed", |t| !t.contains("1 of 2"));
+    s.wait_until("find closed", |t| !t.contains("of 3") && !t.contains("✖"));
     // ctrl+] k : clear the pane and its scrollback
     s.send("\x1d");
     s.send("k");
@@ -1657,6 +1808,21 @@ fn saved_sessions_reconnect_and_logging() {
         log.contains("green-text") && !log.contains('\x1b'),
         "{log:?}"
     );
+    let line = log
+        .lines()
+        .find(|l| l.ends_with("] green-text"))
+        .unwrap_or_default();
+    assert!(
+        line.starts_with('[') && line.contains("] green-text"),
+        "each line has its time: {line:?}"
+    );
+    // the log viewer: a table with time and text
+    s.send("sv log view session.log\r");
+    s.wait_until("log viewer", |t| {
+        t.contains("log · session.log") && t.contains("green-text")
+    });
+    s.send("q");
+    s.wait_until("viewer closed", |t| !t.contains("log · session.log"));
     // the saved-sessions picker
     s.run("sv ssh");
     s.wait_until("picker", |t| {
@@ -1664,11 +1830,38 @@ fn saved_sessions_reconnect_and_logging() {
     });
     s.send("\x1b");
     s.wait_until("picker closed", |t| !t.contains("saved sessions"));
+    // every host at once: one tab, a split each, typing goes to all
+    s.run("sv ssh save stage deploy@10.0.0.6");
+    s.wait_for("saved stage");
+    s.send("sv ssh all prod stage\r");
+    s.wait_until("two hosts", |t| {
+        t.contains("2 hosts")
+            && t.lines().nth(1).unwrap_or("").matches("⇶ broad").count() == 2
+            && t.contains("-p 2222 de")
+            && t.contains("ServerAliveInterval=30 deploy@10.")
+    });
+    s.pump(Duration::from_millis(500));
+    s.send("echo to-every-host\r");
+    s.wait_until("typed into both", |t| {
+        t.matches("to-every-host").count() >= 4
+    });
 }
 
 #[test]
 fn palette_broadcast_and_failed_command_card() {
-    let mut s = Session::start_full("palette");
+    let dir = scratch("palette");
+    std::fs::write(dir.join("config.yaml"), "start_view: full\n").unwrap();
+    // a stand-in for Claude Code, for "ask an agent why"
+    std::fs::create_dir_all(dir.join("home/bin")).unwrap();
+    let fake = dir.join("home/bin/claude");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\necho \"fake claude: $*\" | head -c 300\necho\nsleep 30\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut s = Session::launch("bash", dir);
     s.wait_for("PROMPT>");
     // the command palette runs an action by name
     s.send("\x1d");
@@ -1705,6 +1898,23 @@ fn palette_broadcast_and_failed_command_card() {
     s.wait_until("ran again", |t| {
         t.matches("No such file").count() >= 2 || t.matches("cannot access").count() >= 2
     });
+    // ctrl+] ? : an agent is asked why it failed
+    s.pump(Duration::from_millis(800));
+    s.wait_until("card again", |t| {
+        t.contains("✖ exit") && t.contains("run again")
+    });
+    s.send("\x1d");
+    s.send("?");
+    s.wait_until("agent asked", |t| {
+        t.contains("● why") && t.contains("This command failed")
+    });
+    // the palette now lists the recent command
+    s.send("\x1d");
+    s.send(" ");
+    s.wait_for("command palette");
+    s.send("no-such-dir");
+    s.wait_for("Run: ls /no-such-dir-here");
+    s.send("\x1b");
 }
 
 #[test]
@@ -1865,6 +2075,25 @@ fn mcp_screens_check_try_traffic_permissions_and_add() {
          {\"type\":\"user\",\"timestamp\":\"2026-11-05T10:00:00.250Z\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"FROM-THE-LOG\"}]}}\n",
     )
     .unwrap();
+    // and one in a Codex log started in the same folder
+    let cdx = dir.join("home/.codex/sessions/2026/11/05");
+    std::fs::create_dir_all(&cdx).unwrap();
+    std::fs::write(
+        cdx.join("rollout-1.jsonl"),
+        format!(
+            "{{\"timestamp\":\"2026-11-05T09:00:00.000Z\",\"type\":\"session_meta\",\"payload\":{{\"cwd\":\"{}\"}}}}\n\
+             {{\"timestamp\":\"2026-11-05T09:00:01.000Z\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"mcp_tool_call_begin\",\"call_id\":\"c1\",\"invocation\":{{\"server\":\"fake\",\"tool\":\"echo\",\"arguments\":{{\"text\":\"from-codex\"}}}}}}}}\n",
+            work.display()
+        ),
+    )
+    .unwrap();
+    // the echo tool's description was different last time
+    std::fs::create_dir_all(dir.join("state")).unwrap();
+    std::fs::write(
+        dir.join("state/mcp-tools.json"),
+        r#"{"fake":{"echo":{"desc":"Say it back"}}}"#,
+    )
+    .unwrap();
     let mut s = Session::launch("bash", dir.clone());
     s.wait_for("PROMPT>");
     s.send("sv mcp\r");
@@ -1878,6 +2107,15 @@ fn mcp_screens_check_try_traffic_permissions_and_add() {
     s.wait_until("fake checked", |t| {
         t.contains("✔ handshake") && t.contains("echo") && t.contains("Say it back")
     });
+    s.wait_for("1 description changed");
+    s.send("d");
+    s.wait_until("the change", |t| {
+        t.contains("before") && t.contains("got it")
+    });
+    s.send("d");
+    s.wait_until("change seen", |t| t.contains("tool list ≈"));
+    let seen = std::fs::read_to_string(dir.join("state/mcp-tools.json")).unwrap();
+    assert!(!seen.contains("before"), "{seen}");
     s.send("\r");
     s.send("t");
     s.wait_for("Try a tool");
@@ -1890,7 +2128,10 @@ fn mcp_screens_check_try_traffic_permissions_and_add() {
     s.pump(Duration::from_millis(200));
     s.send("2");
     s.wait_until("board 18", |t| {
-        t.contains("LIVE TRAFFIC") && t.contains("fake · echo") && t.contains("from-the-log")
+        t.contains("LIVE TRAFFIC")
+            && t.contains("fake · echo")
+            && t.contains("from-the-log")
+            && t.contains("from-codex")
     });
     // permissions: allow the whole fake server for you (Claude Code's settings)
     s.send("\t");

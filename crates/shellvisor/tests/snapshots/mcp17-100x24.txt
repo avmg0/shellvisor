@@ -1,0 +1,24 @@
+ ▍shellvisor  MCP · servers your agents can use    ● 2 running · ○ 1 stopped · ✖ 1 failing   ##:##
+ ╭────────────────────────────────╮ ╭ github ─────────────────────────────────────────────────────╮
+ │ SERVERS                        │ │ command        npx -y @model │ Health ✔ handshake 312 ms    │
+ │ ╭────────────────────────────╮ │ │ transport      stdio · proto │ 7 tools · 0 resources · 2 pro│
+ │ │ / filter servers and tools │ │ │ configured in  ~/.claude.jso │ 3 calls today · 0 failed · av│
+ │ ╰────────────────────────────╯ │ │ secrets        SV_SNAPSHOT_T │ context sent back ≈ 3.7k toke│
+ │ ╭────────────────────────────╮ │ │ used by        ● you  ● api  │ running · pid 48211          │
+ │ │ ● filesystem       running │ │ ╰─────────────────────────────────────────────────────────────╯
+ │ │ Claude Code                │ │ ╭─────────────────────────────────────────────────────────────╮
+ │ │ 2 tools    1 calls · 12 ms │ │ │ Tools (7)   Resources   Prompts (2)   Traffic   Permissions │
+ │ ╰────────────────────────────╯ │ │ tool           what it does           calls    avg you · ap │
+ │ ╭────────────────────────────╮ │ │ search_reposit Search for GitHub rep      1 640 ms — · —    │
+ │ │ ● github · stdio   running │ │ ╰─────────────────────────── tool list ≈ 185 tokens per agent ╯
+ │ │ Claude Code                │ │ ╭─────────────────────────────────────────────────────────────╮
+ │ │ 7 tools · 3 calls · 594 ms │ │ │ Try a tool                   │ Result                       │
+ │ ╰────────────────────────────╯ │ │                              │ the answer shows here, with i│
+ │ ╭────────────────────────────╮ │ │ t fills in search_repositori │                              │
+ │ │ ✖ linear · http    failing │ │ │                              │                              │
+ │ │ Claude Code · mcp.linear.ap│ │ │                              │                              │
+ │ │ 401 on ha 1 calls · 604 ms │ │ │                              │                              │
+ │ ╰────────────────────────────╯ │ │                              │                              │
+ │                                │ │                              │                              │
+ ╰────────────────────────────────╯ ╰─────────────────────────────────────────────────────────────╯
+ ⏎ Details   t Try a tool   s Start / stop   r Restart   a Add server   p Permissions   l Server log

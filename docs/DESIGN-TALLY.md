@@ -212,7 +212,7 @@ Totals: **17 boards · 111 items · 79 ✅ built · 11 ◐ partly or differently
 | Detail box: command, transport, configured in, secrets, used by | ✅ | secret values never shown |
 | Health: handshake ms, tools / resources / prompts, calls, context, pid | ✅ | real MCP handshake |
 | Tabs: Tools, Resources, Prompts, Traffic, Permissions, Log | ✅ | |
-| Tools table with calls, avg and per-agent permission | ✅ | columns scale with width |
+| Tools table with calls, avg and per-agent permission | ✅ | columns scale with width; ⚠ changed descriptions; tool-list tokens |
 | Try a tool (fields from the input schema) and Result | ✅ | `c` copy, `s` save |
 | Key strip | ✅ | |
 
@@ -220,11 +220,19 @@ Totals: **17 boards · 111 items · 79 ✅ built · 11 ◐ partly or differently
 
 | Item | | Notes |
 |---|---|---|
-| Live traffic table, chips, pause, errors only | ✅ | from the agents' Claude Code logs |
+| Live traffic table, chips, pause, errors only | ✅ | from Claude Code, Codex and Gemini CLI logs |
 | Approval banner `y` / `n` / `a` | ✅ | |
 | Calls per minute, context sent back by server | ✅ | |
 | Permissions grid allow / ask / never | ✅ | `.claude/settings.local.json` per agent |
 | Add a server: templates, form, JSON / TOML previews, Add & check | ✅ | scrolls when the window is short |
+
+## 19 – 21 · proposed (drawn, not built yet)
+
+| Board | | Notes |
+|---|---|---|
+| 19 · MCP call in full, server start / stop / restart, server log | ✗ | description-change warning already built (board 17, `d`) |
+| 20 · ssh port forwards per session | ✗ | `-L` / `-R` / `-D` already saved with `sv ssh save` |
+| 21 · Agent review: diff before merge, approve for a while | ✗ | merge from the agent tree already built (`m`) |
 
 ## Not on any board, built anyway
 
