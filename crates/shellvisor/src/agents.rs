@@ -392,6 +392,9 @@ pub struct Agent {
     pub reported: &'static str,
     /// Every status change, for the timeline.
     pub history: Vec<(Instant, &'static str)>,
+    /// Approvals answered by themselves for a while (review board): until
+    /// when (None: until its task is done), and which kinds.
+    pub approve_for: Option<(Option<Instant>, Vec<Action>)>,
 }
 
 /// How big an agent tree may grow (config `agents.limits`, or team.yaml).
@@ -531,6 +534,7 @@ impl Agent {
             depth: 1,
             paused: false,
             paused_pg: None,
+            approve_for: None,
             worked: false,
             task: String::new(),
             internal: Vec::new(),

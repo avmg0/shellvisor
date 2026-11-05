@@ -966,6 +966,149 @@ fn first_run_tour_once() {
     s.wait_until("tour done", |t| !t.contains("of 4"));
 }
 
+const FAKE_SSH_TUNNEL: &str = r#"#!/usr/bin/env python3
+import sys, socket, threading, time
+a = sys.argv[1:]
+def pipe(x, y):
+    try:
+        while True:
+            d = x.recv(65536)
+            if not d:
+                break
+            y.sendall(d)
+    except Exception:
+        pass
+    try:
+        y.shutdown(socket.SHUT_WR)
+    except Exception:
+        pass
+if '-N' in a:
+    spec = None
+    for i, x in enumerate(a):
+        if x in ('-L', '-D', '-R'):
+            spec = (x, a[i + 1])
+    if spec and spec[0] == '-L':
+        bind, p2, h, p = spec[1].split(':')
+        s = socket.socket()
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind((bind, int(p2)))
+        s.listen(5)
+        while True:
+            c, _ = s.accept()
+            f = socket.create_connection((h, int(p)))
+            threading.Thread(target=pipe, args=(c, f), daemon=True).start()
+            threading.Thread(target=pipe, args=(f, c), daemon=True).start()
+    time.sleep(3600)
+else:
+    print('fake-ssh ' + ' '.join(a), flush=True)
+    time.sleep(3600)
+"#;
+
+#[test]
+fn port_forwards_board_20() {
+    use std::io::{Read, Write};
+    let dir = scratch("fwd");
+    std::fs::write(
+        dir.join("config.yaml"),
+        "start_view: full\nrestore: never\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.join("home/bin")).unwrap();
+    let fake = dir.join("home/bin/ssh");
+    std::fs::write(&fake, FAKE_SSH_TUNNEL).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // the service on the far side: echoes what it gets
+    let echo = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let ep = echo.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for c in echo.incoming().flatten() {
+            std::thread::spawn(move || {
+                let mut c = c;
+                let mut b = [0u8; 64];
+                while let Ok(n) = c.read(&mut b) {
+                    if n == 0 || c.write_all(&b[..n]).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    let free = || {
+        std::net::TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    };
+    let up = free();
+    let mut s = Session::launch("bash", dir.clone());
+    s.wait_for("PROMPT>");
+    s.run(&format!(
+        "sv ssh save lab me@lab.example -L {up}:127.0.0.1:{ep}"
+    ));
+    s.wait_for("saved lab");
+    // opening the session starts its forward (Shellvisor's own ssh -N)
+    s.send("sv ssh lab\r");
+    s.wait_for("fake-ssh -o ServerAliveInterval=30 me@lab.example");
+    s.send("\x1d");
+    s.send("P");
+    s.wait_until("board 20", |t| {
+        t.contains("ssh · port forwards")
+            && t.contains("lab · FORWARDS")
+            && t.contains(&format!("localhost:{up}"))
+            && t.contains("● listening")
+            && t.contains("connected")
+    });
+    // a connection through it: relayed and counted
+    let mut c = None;
+    for _ in 0..50 {
+        if let Ok(mut x) = std::net::TcpStream::connect(("127.0.0.1", up)) {
+            x.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            if x.write_all(b"ping").is_ok() {
+                let mut b = [0u8; 4];
+                if x.read_exact(&mut b).is_ok() && &b == b"ping" {
+                    c = Some(x);
+                    break;
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(c.is_some(), "the forward relays to the far side");
+    s.wait_until("counted", |t| t.contains("4B / 4B"));
+    drop(c);
+    // a busy port: shown, and moved to the next free one
+    let held = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let busy = held.local_addr().unwrap().port();
+    s.send("a");
+    s.wait_for("Add a forward");
+    s.send("\r"); // type: Local
+    s.send(&format!("localhost:{busy}"));
+    s.send("\r");
+    s.send(&format!("127.0.0.1:{ep}"));
+    s.send("\r");
+    s.send("\x1b[B");
+    s.send("\x1b[B");
+    s.send("\r");
+    s.wait_until("port busy", |t| {
+        t.contains("✖ port busy") && t.contains(&format!("{busy} is used by"))
+    });
+    s.send("j");
+    s.send("p");
+    s.wait_until("moved", |t| t.contains("moved to port"));
+    let saved = std::fs::read_to_string(dir.join("home/.config/shellvisor/sessions.yaml"))
+        .or_else(|_| std::fs::read_to_string(dir.join("sessions.yaml")))
+        .unwrap_or_default();
+    assert!(
+        saved.contains(&format!("-L {up}:127.0.0.1:{ep}")),
+        "{saved}"
+    );
+    drop(held);
+    s.send("\x1b");
+    s.wait_until("closed", |t| !t.contains("lab · FORWARDS"));
+}
+
 // ------------------------------------------------------------------ P3 data
 
 #[test]
@@ -1138,6 +1281,33 @@ fn agent_runs_in_a_worktree_asks_for_approval_and_takes_messages() {
     });
     s.send("sv connect | sv get kind | sv uniq\r");
     s.wait_for("agent cli");
+    // board 21: review its work before merging
+    s.send("clear\r");
+    s.pump(Duration::from_millis(200));
+    s.send("sv agent diff api\r");
+    s.wait_until("review board", |t| {
+        t.contains("review · ● api · agent/api → main")
+            && t.contains("FILES")
+            && t.contains("app.py")
+            && t.contains("README.md")
+            && t.contains("not committed yet")
+            && t.contains("Approve for api")
+            && t.contains("m Merge into main")
+    });
+    // the diff of the selected file, then the next file
+    s.wait_until("a diff", |t| t.contains("+x = 1") || t.contains("+more"));
+    s.send("v");
+    s.wait_until("side by side", |t| t.contains("side by side"));
+    // approve for a while: on, then off
+    s.send("A");
+    s.send("\r");
+    s.wait_until("approving", |t| t.contains("● on") && t.contains("ends"));
+    s.send("A");
+    s.send("\r");
+    s.wait_until("asks again", |t| t.contains("to turn on"));
+    s.send("\x1b");
+    s.send("\x1b");
+    s.wait_until("review closed", |t| !t.contains("Approve for api"));
 }
 
 #[test]
@@ -2132,6 +2302,22 @@ fn mcp_screens_check_try_traffic_permissions_and_add() {
             && t.contains("fake · echo")
             && t.contains("from-the-log")
             && t.contains("from-codex")
+    });
+    // ⏎ on a call: board 19, the call in full, the server and its log
+    s.send("\r");
+    s.wait_until("board 19", |t| {
+        t.contains("CALL · you → fake · echo")
+            && t.contains("Request")
+            && t.contains("from-the-log\"")
+            && t.contains("FROM-THE-LOG")
+            && t.contains("Server log")
+            && t.contains("on a crash")
+    });
+    s.send("\x1b[D"); // the older call (from Codex)
+    s.wait_for("from-codex");
+    s.send("\x1b");
+    s.wait_until("back to board 18", |t| {
+        t.contains("LIVE TRAFFIC") && !t.contains("Server log")
     });
     // permissions: allow the whole fake server for you (Claude Code's settings)
     s.send("\t");

@@ -1,0 +1,24 @@
+ ▍shellvisor  review · ● api · agent/api → main ✔ done · 4 files · +86 −12 · 41k tokens   ##:##
+ ╭────────────────────────────╮ ╭ src/routes/alerts.rs ───────────────────────────────────────────╮
+ │ FILES            2 commits │ │  unified   side by side   whole file                 n / N · ]f │
+ │ M …routes/alerts.rs +48 −6 │ │╭───────────────────────────────────────────────────────────────╮│
+ │ Commits                    │ ││ @@ -14,9 +14,20 @@ use crate::models::Alert;                  ││
+ │ a41c9e2 add POST /alerts   │ ││  14  pub fn routes() -> Router {                              ││
+ │ 7be0d13 tests for alert val│ ││  15      Router::new()                                        ││
+ │ Checks                     │ ││  16          .route("/alerts", get(list_alerts))              ││
+ │ ✔ cargo test · 48 passed   │ ││  17 -        .route("/alerts/:id", get(get_alert))            ││
+ │ ✔ no overlap with ● review │ ││  17 +        .route("/alerts", post(create_alert))            ││
+ │ ⚑ touches src/main.rs ·    │ ││  18 +        .route("/alerts/:id", get(get_alert))            ││
+ │ you edited it 1h ago       │ ││  19  }                                                        ││
+ │                            │ ││  20                                                           ││
+ ╰────────────────────────────╯ ││  21 +/// POST /alerts: validate, store, return 201 with the n ││
+ ╭────────────────────────────╮ ││  22 +async fn create_alert(                                   ││
+ │ Approve for api            │ ││  23 +    State(db): State<Db>,                                ││
+ │ answer its approvals by its│ ││  24 +    Json(new): Json<NewAlert>,                           ││
+ │  15 min   1 hour   this tas│ ││  25 +) -> Result<(StatusCode, Json<Alert>), ApiError> {       ││
+ │ ☑  read, edit, test, lint  │ ││  26 +    new.validate()?;                                     ││
+ │ ☑  install                 │ │╰───────────────────────────────────────────────────────────────╯│
+ │ ☐  network · push · delete │ │                                                                 │
+ │ ends ##:## · A to turn on  │ │  m Merge into main   S Squash   t Message api   o · e · x       │
+ ╰────────────────────────────╯ ╰─────────────────────────────────────────────────────────────────╯
+ ↑↓ Files   n Next change   v Side by side   m Merge   t Message   A Approve for a while   esc Back

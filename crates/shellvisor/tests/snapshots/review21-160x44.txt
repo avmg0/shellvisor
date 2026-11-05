@@ -1,0 +1,44 @@
+ ▍shellvisor  review · ● api · agent/api → main                                                             ✔ done · 4 files · +86 −12 · 41k tokens   ##:##
+ ╭───────────────────────────────────╮ ╭ src/routes/alerts.rs ────────────────────────────────────────────────────────────────────────────────────────────────╮
+ │ FILES                   2 commits │ │  unified   side by side   whole file                                                n / N next change · ]f next file │
+ │ M src/routes/alerts.rs     +48 −6 │ │╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮│
+ │ A src/models/alert.rs         +27 │ ││ @@ -14,9 +14,20 @@ use crate::models::Alert;                                                                       ││
+ │ M src/main.rs               +3 −1 │ ││  14  pub fn routes() -> Router {                                                                                   ││
+ │ M tests/alerts.rs           +8 −5 │ ││  15      Router::new()                                                                                             ││
+ │                                   │ ││  16          .route("/alerts", get(list_alerts))                                                                   ││
+ │ ───────────────────────────────── │ ││  17 -        .route("/alerts/:id", get(get_alert))                                                                 ││
+ │ Commits                           │ ││  17 +        .route("/alerts", post(create_alert))                                                                 ││
+ │ a41c9e2 add POST /alerts          │ ││  18 +        .route("/alerts/:id", get(get_alert))                                                                 ││
+ │ 7be0d13 tests for alert validation│ ││  19  }                                                                                                             ││
+ │                                   │ ││  20                                                                                                                ││
+ │ ───────────────────────────────── │ ││  21 +/// POST /alerts: validate, store, return 201 with the new alert.                                             ││
+ │ Checks                            │ ││  22 +async fn create_alert(                                                                                        ││
+ │ ✔ cargo test · 48 passed          │ ││  23 +    State(db): State<Db>,                                                                                     ││
+ │ ✔ no overlap with ● review        │ ││  24 +    Json(new): Json<NewAlert>,                                                                                ││
+ │ ⚑ touches src/main.rs · you       │ ││  25 +) -> Result<(StatusCode, Json<Alert>), ApiError> {                                                            ││
+ │ edited it 1h ago                  │ ││  26 +    new.validate()?;                                                                                          ││
+ │                                   │ ││  27 +    let alert = db.insert_alert(&new).await?;                                                                 ││
+ │                                   │ ││  28 +    Ok((StatusCode::CREATED, Json(alert)))                                                                    ││
+ │                                   │ ││  29 +}                                                                                                             ││
+ │                                   │ ││                                                                                                                    ││
+ │                                   │ ││                                                                                                                    ││
+ │                                   │ ││                                                                                                                    ││
+ │                                   │ ││                                                                                                                    ││
+ │                                   │ ││                                                                                                                    ││
+ │                                   │ ││                                                                                                                    ││
+ │                                   │ ││                                                                                                                    ││
+ │                                   │ ││                                                                                                                    ││
+ │                                   │ ││                                                                                                                    ││
+ │                                   │ ││                                                                                                                    ││
+ │                                   │ ││                                                                                                                    ││
+ ╰───────────────────────────────────╯ ││                                                                                                                    ││
+ ╭───────────────────────────────────╮ ││                                                                                                                    ││
+ │ Approve for api                   │ ││                                                                                                                    ││
+ │ answer its approvals by itself for│ ││                                                                                                                    ││
+ │  15 min   1 hour   this task      │ ││                                                                                                                    ││
+ │ ☑  read, edit, test, lint         │ ││                                                                                                                    ││
+ │ ☑  install                        │ │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯│
+ │ ☐  network · push · delete        │ │                                                                                                                      │
+ │ ends ##:## · A to turn on         │ │  m Merge into main   S Squash   t Message api   o files · e $EDITOR · x throw away                                   │
+ ╰───────────────────────────────────╯ ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ ↑↓ Files   n Next change   v Side by side   m Merge   t Message   A Approve for a while   esc Back   · ctrl+] D on an agent column · sv agent diff NAME

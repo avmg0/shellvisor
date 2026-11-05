@@ -1,0 +1,24 @@
+ ▍shellvisor  MCP · github · a call, the server, its log             ● running · pid 48211   ##:##
+ ╭ CALL · api → github · search_repositories ───────╮ ╭───────────────────────────────────────────╮
+ │                                                  │ │ Server                        runs as you │
+ │ when        ##:## · # ago             │ │ state       ● running · 0 restarts        │
+ │ agent       ● api · claude                       │ │ process     pid 48211                     │
+ │ time        640 ms                               │ │ command     npx -y @modelcontextprotocol/s│
+ │ result      ✔ ok · 2.1K · ≈ 525 tokens           │ │ on a crash   restart   leave stopped   o  │
+ │ permission  asks · no rule                       │ │ tool list   7 tools · ≈ 185 tokens in ever│
+ │ log         session.jsonl · line 412             │ │  s Stop   r Restart   k Kill   agents star│
+ │                                                  │ ╰───────────────────────────────────────────╯
+ │ Request                 tools/call · id toolu_31 │ ╭───────────────────────────────────────────╮
+ │ ╭──────────────────────────────────────────────╮ │ │ Server log                                │
+ │ │ {"query":"shellvisor user:avmg0","perPage":10│ │ │ ##:## → tools/call search_repositories │
+ │ ╰──────────────────────────────────────────────╯ │ │ ##:## → tools/call list_issues state op│
+ │ Result        content[0] · text · pretty printed │ │ ##:## → tools/call get_file_contents pa│
+ │ ╭──────────────────────────────────────────────╮ │ │ ##:## ← ok 3.7K · 280 ms               │
+ │ │ {                                            │ │ │ ##:## ← ok 2.1K · 640 ms               │
+ │ │   "total_count": 1,                          │ │ │ ##:## ← ok 8.7K · 864 ms               │
+ │ │   "items": [                                 │ │ │ ##:## → initialize · protocol 2025-06-1│
+ │ │                ↓ 6 more lines                │ │ │ ##:## ← 7 tools · 2 prompts · 0 resourc│
+ │ ╰──────────────────────────────────────────────╯ │ │                                           │
+ │  t Run again in Try a tool   c / C copy · ←→ call│ │ kept for this session · / search · y copy │
+ ╰──────────────────────────────────────────────────╯ ╰───────────────────────────────────────────╯
+ t Run again   ←→ Calls   s Stop   r Restart   d Description change   f Follow log   esc Back   · ⏎

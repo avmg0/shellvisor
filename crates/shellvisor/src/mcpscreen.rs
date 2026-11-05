@@ -11,19 +11,19 @@ use ratatui::widgets::{Block, BorderType, Widget};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
-const AMBER: Color = Color::Indexed(179);
-const CYAN: Color = Color::Indexed(73);
-const GREEN: Color = Color::Indexed(108);
-const RED: Color = Color::Indexed(167);
-const BLUE: Color = Color::Indexed(110);
-const MAGENTA: Color = Color::Indexed(170);
-const TEXT: Color = Color::Indexed(252);
-const DIM: Color = Color::Indexed(245);
-const BORDER: Color = Color::Indexed(240);
-const PANEL: Color = Color::Indexed(235);
-const BAR: Color = Color::Indexed(236);
-const SELECT: Color = Color::Indexed(238);
-const INK: Color = Color::Indexed(16);
+pub(crate) const AMBER: Color = Color::Indexed(179);
+pub(crate) const CYAN: Color = Color::Indexed(73);
+pub(crate) const GREEN: Color = Color::Indexed(108);
+pub(crate) const RED: Color = Color::Indexed(167);
+pub(crate) const BLUE: Color = Color::Indexed(110);
+pub(crate) const MAGENTA: Color = Color::Indexed(170);
+pub(crate) const TEXT: Color = Color::Indexed(252);
+pub(crate) const DIM: Color = Color::Indexed(245);
+pub(crate) const BORDER: Color = Color::Indexed(240);
+pub(crate) const PANEL: Color = Color::Indexed(235);
+pub(crate) const BAR: Color = Color::Indexed(236);
+pub(crate) const SELECT: Color = Color::Indexed(238);
+pub(crate) const INK: Color = Color::Indexed(16);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Check {
@@ -52,8 +52,12 @@ pub enum Act {
     Add(NewServer, [bool; 4]),
     /// Answer the waiting approval: 'y', 'n' or 'a'.
     Approve(char),
-    Copy(String),
-    Save(String),
+    /// Copy text; what it was (for the note).
+    Copy(String, &'static str),
+    /// Save text to a file in your home folder named after the second.
+    Save(String, String),
+    /// SIGKILL a server process.
+    Kill(String, i32),
     Close,
 }
 
@@ -196,6 +200,35 @@ pub struct McpScreen {
     pub changes: HashMap<String, Vec<mcp::DescChange>>,
     /// The change shown in the Result box (`d`).
     pub show_change: Option<(String, mcp::DescChange)>,
+    // ---- board 19: a call in full, the server, its log
+    /// The call shown (None: the server has no calls yet).
+    pub d_call: Option<Call>,
+    pub d_server: String,
+    /// The page to go back to.
+    pub d_back: u8,
+    /// What Claude Code logged about the server.
+    pub d_log: Vec<mcp::LogLine>,
+    /// The log keeps to its newest line.
+    pub d_follow: bool,
+    /// Lines scrolled up from the newest (when not following).
+    pub d_scroll: usize,
+    /// 0 everything, 1 the server's own output, 2 protocol only.
+    pub d_view: u8,
+    pub d_errors: bool,
+    /// Searching the log (`/`): typing, and the text.
+    pub d_typing: bool,
+    pub d_search: String,
+    /// Lines Shellvisor adds: checks, stops, restarts, crashes (server, line).
+    pub events: Vec<(String, mcp::LogLine)>,
+    /// pid → (parent pid, cpu %, memory bytes, seconds running).
+    pub procs: HashMap<i32, (i32, f32, u64, u64)>,
+    /// Agent CLIs' process groups, to say which agent started a server.
+    pub agent_pgs: Vec<(i32, String)>,
+    pub restarts: HashMap<String, u32>,
+    /// On a crash: true check it starts again, false leave it stopped.
+    pub on_crash: HashMap<String, bool>,
+    /// Stopped from here (not a crash).
+    pub stopped_by_us: std::collections::HashSet<String>,
 }
 
 pub const TABS: [&str; 6] = [
@@ -244,6 +277,22 @@ impl McpScreen {
             seen_path: crate::paths::state_dir().join("mcp-tools.json"),
             changes: HashMap::new(),
             show_change: None,
+            d_call: None,
+            d_server: String::new(),
+            d_back: 0,
+            d_log: Vec::new(),
+            d_follow: true,
+            d_scroll: 0,
+            d_view: 0,
+            d_errors: false,
+            d_typing: false,
+            d_search: String::new(),
+            events: Vec::new(),
+            procs: HashMap::new(),
+            agent_pgs: Vec::new(),
+            restarts: HashMap::new(),
+            on_crash: load_on_crash(),
+            stopped_by_us: std::collections::HashSet::new(),
         };
         sc.load_perms();
         (sc, acts)
@@ -348,6 +397,38 @@ impl McpScreen {
             let c = mcp::desc_changes(&self.seen_path, &name, &h.tools);
             self.changes.insert(name.clone(), c);
         }
+        let now = now_ms();
+        match &r {
+            Ok(h) => {
+                self.event(
+                    &name,
+                    now,
+                    "proto",
+                    format!("→ initialize · protocol {}", h.protocol),
+                );
+                for l in &h.stderr {
+                    self.event(&name, now, "debug", l.clone());
+                }
+                self.event(
+                    &name,
+                    now,
+                    "proto",
+                    format!(
+                        "← {} tools · {} prompts · {} resources · {} ms",
+                        h.tools.len(),
+                        h.prompts.len(),
+                        h.resources.len(),
+                        h.ms
+                    ),
+                );
+            }
+            Err((e, log)) => {
+                for l in log {
+                    self.event(&name, now, "debug", l.clone());
+                }
+                self.event(&name, now, "error", format!("✖ handshake: {e}"));
+            }
+        }
         self.checks.insert(
             name,
             match r {
@@ -365,11 +446,366 @@ impl McpScreen {
         }
     }
 
-    pub fn traffic(&mut self, calls: Vec<Call>) {
+    /// New traffic from the logs (every 2 s): also which servers run, their
+    /// processes, and crashes. Returns checks to run (restart on a crash).
+    pub fn traffic(&mut self, calls: Vec<Call>) -> Vec<Act> {
         if !self.paused {
             self.calls = calls;
         }
+        let before = std::mem::take(&mut self.running);
         self.running = mcp::running(&self.servers);
+        let pids: Vec<i32> = self.running.values().copied().collect();
+        self.procs = mcp::proc_info(&pids);
+        let mut acts = Vec::new();
+        let now = now_ms();
+        for (name, pid) in before {
+            if self.running.contains_key(&name) {
+                continue;
+            }
+            if self.stopped_by_us.remove(&name) {
+                continue;
+            }
+            // gone without being stopped from here: a crash (or its agent quit)
+            self.event(&name, now, "warn", format!("process {pid} ended"));
+            if self.on_crash.get(&name).copied().unwrap_or(true) {
+                if let Some(s) = self.servers.iter().find(|s| s.name == name).cloned() {
+                    self.event(&name, now, "info", "checking it starts again".into());
+                    *self.restarts.entry(name.clone()).or_default() += 1;
+                    acts.push(Act::Check(s));
+                }
+            }
+        }
+        if self.page == 2 {
+            self.d_log = mcp::claude_server_log(&self.home, &self.dirs(), &self.d_server);
+        }
+        acts
+    }
+
+    fn dirs(&self) -> Vec<PathBuf> {
+        self.who.iter().map(|w| w.dir.clone()).collect()
+    }
+
+    fn event(&mut self, server: &str, at: i64, level: &str, text: String) {
+        self.events
+            .push((server.to_string(), (at, level.to_string(), text)));
+        let n = self.events.len();
+        if n > 2000 {
+            self.events.drain(..n - 2000);
+        }
+    }
+
+    /// Board 19 for a call (from the traffic list).
+    pub fn open_call(&mut self, c: Call) {
+        self.d_back = self.page;
+        self.d_server = c.server.clone();
+        self.d_call = Some(c);
+        self.open_detail_page();
+    }
+
+    /// Board 19 for a server (`l`): its newest call, if any.
+    pub fn open_server(&mut self, name: &str) {
+        self.d_back = self.page;
+        self.d_server = name.to_string();
+        self.d_call = self.calls.iter().find(|c| c.server == name).cloned();
+        self.open_detail_page();
+    }
+
+    fn open_detail_page(&mut self) {
+        self.page = 2;
+        self.d_follow = true;
+        self.d_scroll = 0;
+        self.d_typing = false;
+        self.d_search.clear();
+        self.show_change = None;
+        self.d_log = mcp::claude_server_log(&self.home, &self.dirs(), &self.d_server);
+    }
+
+    /// The server log as shown: Claude Code's log, Shellvisor's checks and
+    /// the calls from the traffic, by time.
+    pub fn log_lines(&self) -> Vec<mcp::LogLine> {
+        let name = &self.d_server;
+        let mut v: Vec<mcp::LogLine> = self.d_log.clone();
+        v.extend(
+            self.events
+                .iter()
+                .filter(|(s, _)| s == name)
+                .map(|(_, l)| l.clone()),
+        );
+        for c in self.calls.iter().filter(|c| &c.server == name) {
+            let at = c.at * 1000;
+            v.push((
+                at,
+                "proto".into(),
+                format!("→ tools/call {} {}", c.tool, c.args),
+            ));
+            let ms_t = c.ms.map(ms).unwrap_or_default();
+            match c.ok {
+                Some(true) => v.push((
+                    at + c.ms.unwrap_or(0) as i64,
+                    "proto".into(),
+                    format!("← ok {} · {}", size(c.bytes.unwrap_or(0)), ms_t),
+                )),
+                Some(false) => v.push((
+                    at + c.ms.unwrap_or(0) as i64,
+                    "error".into(),
+                    format!("← isError {ms_t}"),
+                )),
+                None => {}
+            }
+        }
+        v.sort_by_key(|l| l.0);
+        let q = self.d_search.to_lowercase();
+        v.into_iter()
+            .filter(|(_, lv, _)| match self.d_view {
+                1 => lv != "proto",
+                2 => lv == "proto",
+                _ => true,
+            })
+            .filter(|(_, lv, t)| {
+                !self.d_errors || lv == "error" || lv == "warn" || t.contains("isError")
+            })
+            .filter(|(_, _, t)| q.is_empty() || t.to_lowercase().contains(&q))
+            .collect()
+    }
+
+    fn key19(&mut self, key: &[u8]) -> Vec<Act> {
+        if self.d_typing {
+            match key {
+                b"\x1b" => {
+                    self.d_typing = false;
+                    self.d_search.clear();
+                }
+                b"\r" => self.d_typing = false,
+                [0x7f] | [0x08] => {
+                    self.d_search.pop();
+                }
+                k if k.first().is_some_and(|b| *b >= 0x20) && !k.starts_with(b"\x1b") => {
+                    self.d_search.push_str(&String::from_utf8_lossy(k));
+                }
+                _ => {}
+            }
+            return Vec::new();
+        }
+        if self.show_change.is_some() && matches!(key, b"\x1b" | b"d" | b"\r") {
+            if let Some((server, c)) = self.show_change.take() {
+                mcp::seen_change(&self.seen_path, &server, &c.tool);
+                if let Some(v) = self.changes.get_mut(&server) {
+                    v.retain(|x| x.tool != c.tool);
+                }
+            }
+            return Vec::new();
+        }
+        let server = self
+            .servers
+            .iter()
+            .find(|s| s.name == self.d_server)
+            .cloned();
+        match key {
+            b"\x1b" | b"q" => {
+                self.page = self.d_back;
+                if !self.d_search.is_empty() {
+                    self.d_search.clear();
+                    self.page = 2;
+                }
+            }
+            b"\x1b[D" | b"\x1b[C" => {
+                // ← older, → newer (the list is newest first)
+                let list: Vec<&Call> = self.calls.iter().collect();
+                let at = self
+                    .d_call
+                    .as_ref()
+                    .and_then(|c| list.iter().position(|x| *x == c));
+                let next = match (at, key) {
+                    (Some(i), b"\x1b[D") => list.get(i + 1),
+                    (Some(i), _) => i.checked_sub(1).and_then(|j| list.get(j)),
+                    (None, _) => list.first(),
+                };
+                match next {
+                    Some(c) => {
+                        let c = (*c).clone();
+                        if c.server != self.d_server {
+                            self.d_server = c.server.clone();
+                            self.d_log =
+                                mcp::claude_server_log(&self.home, &self.dirs(), &self.d_server);
+                        }
+                        self.d_call = Some(c);
+                    }
+                    None => {
+                        self.note = Some(
+                            if key == b"\x1b[D" {
+                                "no older calls"
+                            } else {
+                                "this is the newest call"
+                            }
+                            .into(),
+                        )
+                    }
+                }
+            }
+            b"t" => return self.run_again(),
+            b"s" => {
+                let Some(s) = server else { return Vec::new() };
+                if let Some(pid) = self.running.get(&s.name).copied() {
+                    self.stopped_by_us.insert(s.name.clone());
+                    self.event(
+                        &s.name,
+                        now_ms(),
+                        "info",
+                        format!("stopped from Shellvisor (pid {pid})"),
+                    );
+                    return vec![Act::Stop(s.name.clone(), pid)];
+                }
+                self.checks.insert(s.name.clone(), Check::Checking);
+                return vec![Act::Check(s)];
+            }
+            b"r" => {
+                let Some(s) = server else { return Vec::new() };
+                let pid = self.running.get(&s.name).copied().unwrap_or(0);
+                if pid > 0 {
+                    self.stopped_by_us.insert(s.name.clone());
+                }
+                *self.restarts.entry(s.name.clone()).or_default() += 1;
+                self.event(
+                    &s.name,
+                    now_ms(),
+                    "info",
+                    "restarted from Shellvisor".into(),
+                );
+                self.checks.insert(s.name.clone(), Check::Checking);
+                return vec![Act::Restart(s, pid)];
+            }
+            b"k" => {
+                let Some(s) = server else { return Vec::new() };
+                if let Some(pid) = self.running.get(&s.name).copied() {
+                    self.stopped_by_us.insert(s.name.clone());
+                    self.event(
+                        &s.name,
+                        now_ms(),
+                        "warn",
+                        format!("killed from Shellvisor (pid {pid})"),
+                    );
+                    return vec![Act::Kill(s.name.clone(), pid)];
+                }
+                self.note = Some("it isn't running".into());
+            }
+            b"o" => {
+                let v = self.on_crash.get(&self.d_server).copied().unwrap_or(true);
+                self.on_crash.insert(self.d_server.clone(), !v);
+                save_on_crash(&self.on_crash);
+            }
+            b"d" => {
+                let list = self
+                    .changes
+                    .get(&self.d_server)
+                    .cloned()
+                    .unwrap_or_default();
+                match list.first() {
+                    Some(c) => self.show_change = Some((self.d_server.clone(), c.clone())),
+                    None => self.note = Some("no tool descriptions changed".into()),
+                }
+            }
+            b"f" => {
+                self.d_follow = !self.d_follow;
+                self.d_scroll = 0;
+            }
+            b"\x1b[A" | b"k\0" => {
+                self.d_follow = false;
+                self.d_scroll += 1;
+            }
+            b"\x1b[B" => {
+                self.d_scroll = self.d_scroll.saturating_sub(1);
+                if self.d_scroll == 0 {
+                    self.d_follow = true;
+                }
+            }
+            b"\x1b[5~" => {
+                self.d_follow = false;
+                self.d_scroll += 10;
+            }
+            b"\x1b[6~" => self.d_scroll = self.d_scroll.saturating_sub(10),
+            b"v" => self.d_view = (self.d_view + 1) % 3,
+            b"e" => self.d_errors = !self.d_errors,
+            b"/" => {
+                self.d_typing = true;
+                self.d_search.clear();
+            }
+            b"c" => {
+                if let Some(c) = &self.d_call {
+                    return vec![Act::Copy(request_json(c), "the request")];
+                }
+            }
+            b"C" => {
+                if let Some(c) = &self.d_call {
+                    return vec![Act::Copy(pretty_output(&c.output), "the result")];
+                }
+            }
+            b"S" => {
+                if let Some(c) = &self.d_call {
+                    return vec![Act::Save(
+                        pretty_output(&c.output),
+                        format!("mcp-{}-{}", c.server, c.tool),
+                    )];
+                }
+            }
+            b"y" | b"w" => {
+                let text: String = self
+                    .log_lines()
+                    .iter()
+                    .map(|(t, _, l)| format!("{} {l}\n", hms(t.div_euclid(1000))))
+                    .collect();
+                return vec![if key == b"y" {
+                    Act::Copy(text, "the log")
+                } else {
+                    Act::Save(text, format!("mcp-{}-log", self.d_server))
+                }];
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    /// `t` on board 19: the call's tool in Try a tool, filled with its arguments.
+    fn run_again(&mut self) -> Vec<Act> {
+        let Some(c) = self.d_call.clone() else {
+            self.note = Some("no call to run again".into());
+            return Vec::new();
+        };
+        self.filter.clear();
+        let Some(i) = self
+            .shown()
+            .iter()
+            .position(|i| self.servers[*i].name == c.server)
+        else {
+            self.note = Some(format!("{} isn't in your configs", c.server));
+            return Vec::new();
+        };
+        self.sel = i;
+        let Some(t) = self
+            .health(&c.server)
+            .and_then(|h| h.tools.iter().position(|t| t.name == c.tool))
+        else {
+            self.note = Some(format!(
+                "{} doesn't list {} (yet) — s checks it",
+                c.server, c.tool
+            ));
+            return Vec::new();
+        };
+        self.page = 0;
+        self.in_tools = true;
+        self.tool_sel = t;
+        self.open_try();
+        let args: serde_json::Value = serde_json::from_str(&c.input).unwrap_or_default();
+        if let Some(f) = self.try_form.as_mut() {
+            for (k, (name, ..)) in f.fields.iter().enumerate() {
+                if let Some(v) = args.get(name) {
+                    f.values[k] = match v {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    };
+                }
+            }
+        }
+        Vec::new()
     }
 
     pub fn added(&mut self, r: Result<Vec<String>, String>) -> Vec<Act> {
@@ -404,10 +840,10 @@ impl McpScreen {
             }
             return acts;
         }
-        if self.page == 0 {
-            self.key17(key)
-        } else {
-            self.key18(key, waiting)
+        match self.page {
+            0 => self.key17(key),
+            2 => self.key19(key),
+            _ => self.key18(key, waiting),
         }
     }
 
@@ -534,7 +970,11 @@ impl McpScreen {
                 self.filtering = true;
                 self.filter.clear();
             }
-            b"l" => self.tab = 5,
+            b"l" => {
+                if let Some(s) = self.current().map(|s| s.name.clone()) {
+                    self.open_server(&s);
+                }
+            }
             b"a" => {
                 self.page = 1;
                 self.area = 2;
@@ -562,12 +1002,12 @@ impl McpScreen {
             }
             b"c" => {
                 if let Some(r) = self.try_form.as_ref().and_then(|t| t.result.as_ref()) {
-                    return vec![Act::Copy(r.text.clone())];
+                    return vec![Act::Copy(r.text.clone(), "the result")];
                 }
             }
             b"S" => {
                 if let Some(r) = self.try_form.as_ref().and_then(|t| t.result.as_ref()) {
-                    return vec![Act::Save(r.text.clone())];
+                    return vec![Act::Save(r.text.clone(), "mcp-result".into())];
                 }
             }
             _ => {}
@@ -673,17 +1113,8 @@ impl McpScreen {
                         }
                         b"\r" => {
                             if let Some(c) = self.shown_calls().get(self.call_sel) {
-                                self.note = Some(format!(
-                                    "{} · {} · {} — {}",
-                                    c.agent,
-                                    c.server,
-                                    c.tool,
-                                    if c.args.is_empty() {
-                                        "(no arguments)"
-                                    } else {
-                                        &c.args
-                                    }
-                                ));
+                                let c = (*c).clone();
+                                self.open_call(c);
                             }
                         }
                         b"p" => self.area = 1,
@@ -802,11 +1233,716 @@ impl McpScreen {
             );
             return;
         }
-        if self.page == 0 {
-            self.render17(area, buf);
-        } else {
-            self.render18(area, buf, waiting);
+        match self.page {
+            0 => self.render17(area, buf),
+            2 => self.render19(area, buf),
+            _ => self.render18(area, buf, waiting),
         }
+    }
+
+    /// Board 19: a call in full (left), the server and its log (right).
+    fn render19(&self, area: Rect, buf: &mut Buffer) {
+        let shell = role(Role::Shell);
+        let name = self.d_server.clone();
+        let server = self.servers.iter().find(|s| s.name == name);
+        let pid = self.running.get(&name).copied();
+        let proc_ = pid.and_then(|p| self.procs.get(&p).copied());
+        let pill = match (pid, server.map(|s| self.state_of(s))) {
+            (Some(p), _) => {
+                let up = proc_
+                    .map(|(_, _, _, secs)| format!(" · up {}", dur(secs)))
+                    .unwrap_or_default();
+                vec![
+                    ("● ".to_string(), st(GREEN)),
+                    (format!("running · pid {p}{up}"), st(TEXT)),
+                ]
+            }
+            (None, Some((icon, c, state))) => {
+                vec![(format!("{icon} "), st(c)), (state.to_string(), st(TEXT))]
+            }
+            _ => vec![("not in your configs".to_string(), st(DIM))],
+        };
+        self.header(
+            area,
+            buf,
+            &format!("MCP · {name} · a call, the server, its log"),
+            pill,
+        );
+        let body = Rect::new(
+            area.x,
+            area.y + 1,
+            area.width,
+            area.height.saturating_sub(2),
+        );
+        let lw = ratio(body.width.saturating_sub(3), 120, 220);
+        let left = Rect::new(body.x + 1, body.y, lw, body.height);
+        let rx = left.right() + 1;
+        let right = Rect::new(rx, body.y, body.right().saturating_sub(rx + 1), body.height);
+
+        // ---- the call
+        let title = match &self.d_call {
+            Some(c) => format!("CALL · {} → {} · {}", c.agent, c.server, c.tool),
+            None => format!("CALL · {name}"),
+        };
+        let li = boxed(
+            buf,
+            left,
+            AMBER,
+            shell,
+            Some((&title, st(AMBER).add_modifier(Modifier::BOLD))),
+        );
+        match &self.d_call {
+            None => {
+                put(
+                    buf,
+                    li,
+                    li.x + 1,
+                    li.y + 1,
+                    &format!("No calls to {name} in the agents' logs today."),
+                    st(DIM).bg(shell),
+                );
+                put(
+                    buf,
+                    li,
+                    li.x + 1,
+                    li.y + 3,
+                    "←→ step through every call · esc back",
+                    st(DIM).bg(shell),
+                );
+            }
+            Some(c) => self.call_box(li, buf, c),
+        }
+
+        // ---- the server
+        let srv_h = 9u16.min(right.height / 2);
+        let sr = Rect::new(right.x, right.y, right.width, srv_h);
+        let si = boxed(buf, sr, BORDER, PANEL, None);
+        put(
+            buf,
+            si,
+            si.x + 1,
+            si.y,
+            "Server",
+            st(TEXT).bg(PANEL).add_modifier(Modifier::BOLD),
+        );
+        let by = pid.and_then(|p| {
+            let pg = unsafe { libc::getpgid(p) };
+            self.agent_pgs
+                .iter()
+                .find(|(g, _)| *g == pg)
+                .map(|(_, n)| n.clone())
+        });
+        let who_txt = match by {
+            Some(a) => format!("started by {a} · runs as you"),
+            None if pid.is_some() => "runs as you".to_string(),
+            None => "agents start it when they call it".to_string(),
+        };
+        put_right(
+            buf,
+            si,
+            si.y,
+            fit(&[&who_txt, "runs as you"], si.width.saturating_sub(8)),
+            st(DIM).bg(PANEL),
+        );
+        let kx = si.x + 1;
+        let vx = si.x + 13;
+        let vw = si.right().saturating_sub(vx + 1);
+        let row = |buf: &mut Buffer, y: u16, k: &str, parts: &[(String, Style)]| {
+            put(buf, si, kx, y, k, st(DIM).bg(PANEL));
+            let mut x = vx;
+            for (t, s2) in parts {
+                if x >= vx + vw {
+                    break;
+                }
+                x = put_w(buf, si, x, y, t, *s2);
+            }
+        };
+        let restarts = self.restarts.get(&name).copied().unwrap_or(0);
+        let state_parts: Vec<(String, Style)> = match (pid, server.map(|s| self.state_of(s))) {
+            (Some(_), _) => {
+                let since_t = proc_
+                    .map(|(_, _, _, secs)| {
+                        format!(" · since {}", short_hm(now_ms() / 1000 - secs as i64))
+                    })
+                    .unwrap_or_default();
+                vec![
+                    ("● running".into(), st(GREEN).bg(PANEL)),
+                    (
+                        format!(
+                            "{since_t} · {restarts} restart{}",
+                            if restarts == 1 { "" } else { "s" }
+                        ),
+                        st(DIM).bg(PANEL),
+                    ),
+                ]
+            }
+            (None, Some((icon, c, state))) => vec![(format!("{icon} {state}"), st(c).bg(PANEL))],
+            _ => vec![("—".into(), st(DIM).bg(PANEL))],
+        };
+        row(buf, si.y + 1, "state", &state_parts);
+        let proc_parts: Vec<(String, Style)> = match (pid, proc_) {
+            (Some(p), Some((_, cpu, rss, _))) => vec![
+                (format!("pid {p} · "), st(TEXT).bg(PANEL)),
+                ("cpu ".into(), st(DIM).bg(PANEL)),
+                (format!("{cpu:.1} % · "), st(TEXT).bg(PANEL)),
+                ("mem ".into(), st(DIM).bg(PANEL)),
+                (size(rss as usize), st(TEXT).bg(PANEL)),
+            ],
+            (Some(p), None) => vec![(format!("pid {p}"), st(TEXT).bg(PANEL))],
+            _ => vec![("not running".into(), st(DIM).bg(PANEL))],
+        };
+        row(buf, si.y + 2, "process", &proc_parts);
+        let target = server.map(|s| s.target()).unwrap_or_default();
+        row(buf, si.y + 3, "command", &[(target, st(TEXT).bg(PANEL))]);
+        let restart_on = self.on_crash.get(&name).copied().unwrap_or(true);
+        let chip = |on: bool| {
+            if on {
+                st(AMBER).bg(role(Role::Card))
+            } else {
+                st(DIM).bg(role(Role::Card))
+            }
+        };
+        row(
+            buf,
+            si.y + 4,
+            "on a crash",
+            &[
+                (" restart ".into(), chip(restart_on)),
+                (" ".into(), st(DIM).bg(PANEL)),
+                (" leave stopped ".into(), chip(!restart_on)),
+                ("  o".into(), st(AMBER).bg(PANEL)),
+            ],
+        );
+        let tl: Vec<(String, Style)> = match self.health(&name) {
+            Some(h) => vec![
+                (
+                    format!(
+                        "{} tool{} ",
+                        h.tools.len(),
+                        if h.tools.len() == 1 { "" } else { "s" }
+                    ),
+                    st(TEXT).bg(PANEL),
+                ),
+                (
+                    format!(
+                        "· ≈ {} tokens in every agent's context",
+                        tokens(mcp::list_tokens(&h.tools) * 4)
+                    ),
+                    st(DIM).bg(PANEL),
+                ),
+            ],
+            None => vec![("not checked yet".into(), st(DIM).bg(PANEL))],
+        };
+        row(buf, si.y + 5, "tool list", &tl);
+        let byy = si.y + 6;
+        let mut x = kx;
+        for (label, c) in [(" s Stop ", RED), (" r Restart ", TEXT), (" k Kill ", TEXT)] {
+            let label = if label == " s Stop " && pid.is_none() {
+                " s Start "
+            } else {
+                label
+            };
+            x = put_w(
+                buf,
+                si,
+                x,
+                byy,
+                label,
+                st(c).bg(role(Role::Card)).add_modifier(Modifier::BOLD),
+            ) + 1;
+        }
+        put(
+            buf,
+            si,
+            x + 1,
+            byy,
+            "agents start it again on their next call",
+            st(DIM).bg(PANEL),
+        );
+
+        // ---- the server log
+        let lr = Rect::new(
+            right.x,
+            sr.bottom(),
+            right.width,
+            right.height.saturating_sub(srv_h),
+        );
+        let gi = boxed(buf, lr, BORDER, PANEL, None);
+        put(
+            buf,
+            gi,
+            gi.x + 1,
+            gi.y,
+            "Server log",
+            st(TEXT).bg(PANEL).add_modifier(Modifier::BOLD),
+        );
+        {
+            let on = |b: bool| {
+                if b {
+                    st(AMBER).bg(role(Role::Card))
+                } else {
+                    st(DIM).bg(role(Role::Card))
+                }
+            };
+            let chips: [(&str, Style); 4] = [
+                (" stderr ", on(self.d_view != 2)),
+                (" protocol ", on(self.d_view != 1)),
+                (" errors only ", on(self.d_errors)),
+                (
+                    " f follow",
+                    if self.d_follow {
+                        st(AMBER).bg(PANEL)
+                    } else {
+                        st(DIM).bg(PANEL)
+                    },
+                ),
+            ];
+            let w: u16 = chips
+                .iter()
+                .map(|(t, _)| t.chars().count() as u16 + 1)
+                .sum();
+            if gi.width > w + 12 {
+                let mut x = gi.right().saturating_sub(w);
+                for (t, s2) in chips {
+                    x = put_w(buf, gi, x, gi.y, t, s2) + 1;
+                }
+            }
+        }
+        let mut ly = gi.y + 1;
+        let changes = self.changes.get(&name).cloned().unwrap_or_default();
+        if let Some((_, c)) = &self.show_change {
+            put(
+                buf,
+                gi,
+                gi.x + 1,
+                ly,
+                &format!("⚠ {}'s description changed {}", c.tool, since(c.at)),
+                st(AMBER).bg(PANEL),
+            );
+            ly += 1;
+            let w = gi.width.saturating_sub(6) as usize;
+            for (label, text, col) in [("before", &c.before, RED), ("now", &c.now, GREEN)] {
+                put(buf, gi, gi.x + 1, ly, label, st(DIM).bg(PANEL));
+                ly += 1;
+                for line in wrap(text, w) {
+                    if ly + 1 >= gi.bottom() {
+                        break;
+                    }
+                    put(buf, gi, gi.x + 3, ly, &line, st(col).bg(PANEL));
+                    ly += 1;
+                }
+            }
+            put(
+                buf,
+                gi,
+                gi.x + 1,
+                gi.bottom().saturating_sub(1),
+                "agents now get the new text · d / esc: got it",
+                st(DIM).bg(PANEL),
+            );
+        } else {
+            if let Some(c) = changes.first() {
+                let br = Rect::new(gi.x, ly, gi.width, 3);
+                let bi = boxed(buf, br, AMBER, role(Role::Warn), None);
+                let wb = role(Role::Warn);
+                let x = put_w(buf, bi, bi.x + 1, bi.y, "⚠ ", st(AMBER).bg(wb));
+                let x = put_w(
+                    buf,
+                    bi,
+                    x,
+                    bi.y,
+                    &c.tool,
+                    st(TEXT).bg(wb).add_modifier(Modifier::BOLD),
+                );
+                let more = if changes.len() > 1 {
+                    format!(" (+{} more)", changes.len() - 1)
+                } else {
+                    String::new()
+                };
+                put(
+                    buf,
+                    bi,
+                    x,
+                    bi.y,
+                    &format!("'s description changed {}{more}", since(c.at)),
+                    st(TEXT).bg(wb),
+                );
+                let hint = "d show the change";
+                let hx = bi.right().saturating_sub(hint.chars().count() as u16 + 1);
+                put_w(buf, bi, hx, bi.y, "d", st(AMBER).bg(wb));
+                put(buf, bi, hx + 1, bi.y, " show the change", st(DIM).bg(wb));
+                ly += 3;
+            }
+            let lines = self.log_lines();
+            let foot = gi.bottom().saturating_sub(1);
+            let room = foot.saturating_sub(ly) as usize;
+            let end = lines
+                .len()
+                .saturating_sub(if self.d_follow { 0 } else { self.d_scroll });
+            let start = end.saturating_sub(room);
+            if lines.is_empty() {
+                let msg = if self.d_search.is_empty() {
+                    "nothing logged yet — Claude Code keeps a log per server; checks and calls show here too"
+                } else {
+                    "no lines match"
+                };
+                put(buf, gi, gi.x + 1, ly, msg, st(DIM).bg(PANEL));
+            }
+            for (i, (at, lv, text)) in lines[start..end].iter().enumerate() {
+                let y = ly + i as u16;
+                let x = put_w(
+                    buf,
+                    gi,
+                    gi.x + 1,
+                    y,
+                    &hms(at.div_euclid(1000)),
+                    st(DIM).bg(PANEL),
+                ) + 1;
+                let (head, rest, hc) = if let Some(r) = text.strip_prefix("→ ") {
+                    let (verb, more) = r.split_once(' ').unwrap_or((r, ""));
+                    (format!("→ {verb}"), format!(" {more}"), CYAN)
+                } else if let Some(r) = text.strip_prefix("← ") {
+                    let bad = r.starts_with("isError");
+                    let (verb, more) = r.split_once(' ').unwrap_or((r, ""));
+                    (
+                        format!("← {verb}"),
+                        format!(" {more}"),
+                        if bad { RED } else { GREEN },
+                    )
+                } else {
+                    match lv.as_str() {
+                        "error" => ("error".to_string(), format!(" {text}"), RED),
+                        "warn" => ("warn".to_string(), format!(" {text}"), AMBER),
+                        _ => (String::new(), text.clone(), TEXT),
+                    }
+                };
+                let x = if head.is_empty() {
+                    x
+                } else {
+                    put_w(buf, gi, x, y, &head, st(hc).bg(PANEL))
+                };
+                put(
+                    buf,
+                    gi,
+                    x,
+                    y,
+                    rest.trim_end(),
+                    st(if head.is_empty() { TEXT } else { DIM }).bg(PANEL),
+                );
+            }
+            let footer = if self.d_typing {
+                format!("/ {}▏ · ⏎ keep · esc clear", self.d_search)
+            } else if !self.d_search.is_empty() {
+                format!("matching “{}” · / search · esc clear", self.d_search)
+            } else {
+                "kept for this session · / search · y copy · w save to a file".to_string()
+            };
+            put(buf, gi, gi.x + 1, foot, &footer, st(DIM).bg(PANEL));
+        }
+
+        self.keys(
+            area,
+            buf,
+            &[
+                ("t", "Run again"),
+                ("←→", "Calls"),
+                ("s", if pid.is_some() { "Stop" } else { "Start" }),
+                ("r", "Restart"),
+                ("d", "Description change"),
+                ("f", "Follow log"),
+                ("esc", "Back"),
+            ],
+            "· ⏎ on a traffic row · l on a server",
+        );
+    }
+
+    /// Board 19's left box: when, who, how long, the request and the result.
+    fn call_box(&self, li: Rect, buf: &mut Buffer, c: &Call) {
+        let shell = role(Role::Shell);
+        // two columns of details when there's room, else one
+        let wide = li.width >= 76;
+        let half = if wide { li.width / 2 } else { li.width };
+        let kv = |buf: &mut Buffer, x: u16, y: u16, k: &str, parts: &[(String, Style)]| {
+            put(buf, li, x, y, k, st(DIM).bg(shell));
+            let mut vx = x + 12;
+            let lim = if x == li.x + 1 {
+                li.x + half
+            } else {
+                li.right()
+            };
+            for (t, s2) in parts {
+                if vx >= lim {
+                    break;
+                }
+                let w = lim.saturating_sub(vx);
+                put_n(buf, vx, y, t, *s2, w);
+                vx += (t.chars().count() as u16).min(w);
+            }
+        };
+        let x1 = li.x + 1;
+        // (x, row) of each detail: when, agent, time, result, permission, log
+        let y = li.y + 1;
+        let at: [(u16, u16); 6] = if wide {
+            let x2 = li.x + half + 1;
+            [
+                (x1, y),
+                (x2, y),
+                (x1, y + 1),
+                (x2, y + 1),
+                (x1, y + 2),
+                (x2, y + 2),
+            ]
+        } else {
+            [
+                (x1, y),
+                (x1, y + 1),
+                (x1, y + 2),
+                (x1, y + 3),
+                (x1, y + 4),
+                (x1, y + 5),
+            ]
+        };
+        let now = now_ms() / 1000;
+        kv(
+            buf,
+            at[0].0,
+            at[0].1,
+            "when",
+            &[
+                (format!("{} · ", hms(c.at)), st(TEXT).bg(shell)),
+                (ago_s(now - c.at), st(TEXT).bg(shell)),
+            ],
+        );
+        let ag = self.who.iter().find(|w| w.name == c.agent);
+        let agc = ag.map(|w| w.color).unwrap_or(TEXT);
+        let cli = if c.log.starts_with("rollout-") {
+            "codex"
+        } else if c.log.starts_with("session-") {
+            "gemini"
+        } else {
+            "claude"
+        };
+        let branch = ag
+            .filter(|w| w.dir.to_string_lossy().contains(".shellvisor/worktrees"))
+            .map(|w| format!(" · agent/{}", w.name))
+            .unwrap_or_default();
+        kv(
+            buf,
+            at[1].0,
+            at[1].1,
+            "agent",
+            &[
+                (format!("● {}", c.agent), st(agc).bg(shell)),
+                (format!(" · {cli}{branch}"), st(DIM).bg(shell)),
+            ],
+        );
+        let tm = match c.ms {
+            Some(m) => ms(m),
+            None if c.ok.is_none() => "waiting…".into(),
+            None => "—".into(),
+        };
+        kv(buf, at[2].0, at[2].1, "time", &[(tm, st(TEXT).bg(shell))]);
+        let res: Vec<(String, Style)> = match c.ok {
+            Some(true) => vec![
+                ("✔ ok".into(), st(GREEN).bg(shell)),
+                (
+                    format!(
+                        " · {} · ≈ {} tokens",
+                        size(c.bytes.unwrap_or(0)),
+                        tokens(c.bytes.unwrap_or(0))
+                    ),
+                    st(DIM).bg(shell),
+                ),
+            ],
+            Some(false) => vec![("✖ failed".into(), st(RED).bg(shell))],
+            None => vec![("⚑ waiting for an answer".into(), st(AMBER).bg(shell))],
+        };
+        kv(buf, at[3].0, at[3].1, "result", &res);
+        // the rule that decided it, in the agent's settings
+        let wi = self.who.iter().position(|w| w.name == c.agent);
+        let tool_rule = mcp::rule(&c.server, Some(&c.tool));
+        let srv_rule = mcp::rule(&c.server, None);
+        let perm: Vec<(String, Style)> = match wi {
+            Some(i) => {
+                let lt = self
+                    .perms
+                    .get(&(i, tool_rule.clone()))
+                    .copied()
+                    .unwrap_or(Level::Default);
+                let ls = self
+                    .perms
+                    .get(&(i, srv_rule.clone()))
+                    .copied()
+                    .unwrap_or(Level::Default);
+                let (lv, r) = if lt != Level::Default {
+                    (lt, tool_rule)
+                } else {
+                    (ls, srv_rule)
+                };
+                if lv == Level::Default {
+                    vec![
+                        ("asks".into(), st(AMBER).bg(shell)),
+                        (" · no rule".into(), st(DIM).bg(shell)),
+                    ]
+                } else {
+                    vec![
+                        (lv.label().to_string(), st(level_color(lv)).bg(shell)),
+                        (format!(" · rule {r}"), st(DIM).bg(shell)),
+                    ]
+                }
+            }
+            None => vec![("—".into(), st(DIM).bg(shell))],
+        };
+        kv(buf, at[4].0, at[4].1, "permission", &perm);
+        let logname = if c.log.len() > 14 {
+            format!("{}…", c.log.chars().take(12).collect::<String>())
+        } else {
+            c.log.clone()
+        };
+        let logtxt = if c.line > 0 {
+            format!("{logname} · line {}", c.line)
+        } else {
+            logname
+        };
+        kv(buf, at[5].0, at[5].1, "log", &[(logtxt, st(DIM).bg(shell))]);
+
+        // request
+        let mut yy = at[5].1 + 2;
+        put(
+            buf,
+            li,
+            x1,
+            yy,
+            "Request",
+            st(TEXT).bg(shell).add_modifier(Modifier::BOLD),
+        );
+        let short_id: String =
+            c.id.chars()
+                .rev()
+                .take(8)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+        put_right(
+            buf,
+            li,
+            yy,
+            &format!("tools/call · id {short_id}"),
+            st(DIM).bg(shell),
+        );
+        yy += 1;
+        let avail = li.bottom().saturating_sub(yy + 2);
+        let mut req = json_lines(&request_json(c));
+        let room = avail.saturating_sub(5);
+        if req.len() as u16 + 2 > room {
+            // short window: just the arguments (the tool is in the title),
+            // pretty if they fit, else on one line
+            let args: serde_json::Value = serde_json::from_str(&c.input).unwrap_or_default();
+            req = json_lines(&serde_json::to_string_pretty(&args).unwrap_or_default());
+            if req.len() as u16 + 2 > room {
+                req = json_lines(&args.to_string());
+            }
+        }
+        let req_h = (req.len() as u16 + 2).min(avail.saturating_sub(5)).max(3);
+        let rq = boxed(
+            buf,
+            Rect::new(x1, yy, li.width.saturating_sub(2), req_h),
+            BORDER,
+            PANEL,
+            None,
+        );
+        for (i, spans) in req.iter().take(rq.height as usize).enumerate() {
+            let mut x = rq.x + 1;
+            for (t, col) in spans {
+                x = put_w(buf, rq, x, rq.y + i as u16, t, st(*col).bg(PANEL));
+            }
+        }
+        yy += req_h;
+        // result
+        put(
+            buf,
+            li,
+            x1,
+            yy,
+            "Result",
+            st(TEXT).bg(shell).add_modifier(Modifier::BOLD),
+        );
+        let pretty = pretty_output(&c.output);
+        let is_json = pretty != c.output
+            || serde_json::from_str::<serde_json::Value>(c.output.trim()).is_ok();
+        put_right(
+            buf,
+            li,
+            yy,
+            if c.output.is_empty() {
+                "no text"
+            } else if is_json {
+                "content[0] · text · pretty printed"
+            } else {
+                "content[0] · text"
+            },
+            st(DIM).bg(shell),
+        );
+        yy += 1;
+        let res_h = li.bottom().saturating_sub(yy + 1);
+        let rs = boxed(
+            buf,
+            Rect::new(x1, yy, li.width.saturating_sub(2), res_h),
+            BORDER,
+            PANEL,
+            None,
+        );
+        let lines: Vec<Vec<(String, Color)>> = if is_json {
+            json_lines(&pretty)
+        } else {
+            pretty
+                .lines()
+                .map(|l| vec![(l.to_string(), TEXT)])
+                .collect()
+        };
+        let room = rs.height as usize;
+        let show = if lines.len() > room {
+            room.saturating_sub(1)
+        } else {
+            lines.len()
+        };
+        for (i, spans) in lines.iter().take(show).enumerate() {
+            let mut x = rs.x + 1;
+            for (t, col) in spans {
+                x = put_w(buf, rs, x, rs.y + i as u16, t, st(*col).bg(PANEL));
+            }
+        }
+        if lines.len() > show {
+            let more = format!("↓ {} more lines", lines.len() - show);
+            let mx = rs.x + rs.width.saturating_sub(more.chars().count() as u16) / 2;
+            put(buf, rs, mx, rs.y + show as u16, &more, st(DIM).bg(PANEL));
+        }
+        // buttons
+        let by = li.bottom().saturating_sub(1);
+        let x = put_w(
+            buf,
+            li,
+            x1,
+            by,
+            " t Run again in Try a tool ",
+            st(INK).bg(AMBER).add_modifier(Modifier::BOLD),
+        );
+        put(
+            buf,
+            li,
+            x + 2,
+            by,
+            fit(
+                &[
+                    "c copy request · C copy result · S save · ←→ previous / next call",
+                    "c copy request · C copy result · ←→ calls",
+                    "c / C copy · ←→ calls",
+                ],
+                li.right().saturating_sub(x + 3),
+            ),
+            st(DIM).bg(shell),
+        );
     }
 
     fn header(&self, area: Rect, buf: &mut Buffer, what: &str, pill: Vec<(String, Style)>) {
@@ -2719,11 +3855,97 @@ impl McpScreen {
 // ------------------------------------------------------------------ drawing helpers
 
 /// `v * num / den` without overflowing u16 (160 * 430 already does).
-fn ratio(v: u16, num: u32, den: u32) -> u16 {
+pub(crate) fn ratio(v: u16, num: u32, den: u32) -> u16 {
     (v as u32 * num / den) as u16
 }
 
-fn st(c: Color) -> Style {
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn on_crash_path() -> PathBuf {
+    crate::paths::state_dir().join("mcp-on-crash.json")
+}
+
+fn load_on_crash() -> HashMap<String, bool> {
+    std::fs::read_to_string(on_crash_path())
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+fn save_on_crash(m: &HashMap<String, bool>) {
+    let p = on_crash_path();
+    if let Some(d) = p.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let _ = std::fs::write(p, serde_json::to_string(m).unwrap_or_default());
+}
+
+/// The tools/call request a call sent, pretty printed.
+fn request_json(c: &Call) -> String {
+    let args: serde_json::Value = serde_json::from_str(&c.input).unwrap_or(serde_json::Value::Null);
+    serde_json::to_string_pretty(&serde_json::json!({"name": c.tool, "arguments": args}))
+        .unwrap_or_default()
+}
+
+/// A result, pretty printed when it is JSON.
+fn pretty_output(t: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(t.trim()) {
+        Ok(v) if v.is_object() || v.is_array() => {
+            serde_json::to_string_pretty(&v).unwrap_or_else(|_| t.to_string())
+        }
+        _ => t.to_string(),
+    }
+}
+
+/// 2h 14m, 3m 10s, 2d 4h.
+fn dur(secs: u64) -> String {
+    match secs {
+        0..=59 => format!("{secs}s"),
+        60..=3599 => format!("{}m {}s", secs / 60, secs % 60),
+        3600..=86_399 => format!("{}h {}m", secs / 3600, secs % 3600 / 60),
+        _ => format!("{}d {}h", secs / 86_400, secs % 86_400 / 3600),
+    }
+}
+
+/// "10 min ago".
+fn ago_s(secs: i64) -> String {
+    let s = secs.max(0) as u64;
+    match s {
+        0..=59 => "just now".into(),
+        60..=3599 => format!("{} min ago", s / 60),
+        3600..=86_399 => format!("{} h ago", s / 3600),
+        _ => format!("{} days ago", s / 86_400),
+    }
+}
+
+/// HH:MM in local time.
+fn short_hm(at: i64) -> String {
+    hms(at).chars().take(5).collect()
+}
+
+/// "since yesterday", "since 3 days ago"…
+fn since(at: u64) -> String {
+    if at == 0 {
+        return "since it was last seen".into();
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let d = now.saturating_sub(at) / 86_400;
+    match d {
+        0 => "today".into(),
+        1 => "since yesterday".into(),
+        n => format!("since {n} days ago"),
+    }
+}
+
+pub(crate) fn st(c: Color) -> Style {
     Style::default().fg(c)
 }
 
@@ -2736,7 +3958,7 @@ fn level_color(l: Level) -> Color {
     }
 }
 
-fn boxed(
+pub(crate) fn boxed(
     buf: &mut Buffer,
     r: Rect,
     border: Color,
@@ -2759,14 +3981,14 @@ fn boxed(
 }
 
 /// Write within `area`, clipped; returns nothing.
-fn put(buf: &mut Buffer, area: Rect, x: u16, y: u16, t: &str, s: Style) {
+pub(crate) fn put(buf: &mut Buffer, area: Rect, x: u16, y: u16, t: &str, s: Style) {
     if y >= area.y && y < area.bottom() && x >= area.x && x < area.right() {
         buf.set_stringn(x, y, t, (area.right() - x) as usize, s);
     }
 }
 
 /// Write within `area`; returns the x after the text.
-fn put_w(buf: &mut Buffer, area: Rect, x: u16, y: u16, t: &str, s: Style) -> u16 {
+pub(crate) fn put_w(buf: &mut Buffer, area: Rect, x: u16, y: u16, t: &str, s: Style) -> u16 {
     if y >= area.y && y < area.bottom() && x >= area.x && x < area.right() {
         let (nx, _) = buf.set_stringn(x, y, t, (area.right() - x) as usize, s);
         nx
@@ -2775,20 +3997,20 @@ fn put_w(buf: &mut Buffer, area: Rect, x: u16, y: u16, t: &str, s: Style) -> u16
     }
 }
 
-fn put_n(buf: &mut Buffer, x: u16, y: u16, t: &str, s: Style, w: u16) {
+pub(crate) fn put_n(buf: &mut Buffer, x: u16, y: u16, t: &str, s: Style, w: u16) {
     if w > 0 && x < buf.area.right() && y < buf.area.bottom() {
         buf.set_stringn(x, y, t, w as usize, s);
     }
 }
 
-fn put_right(buf: &mut Buffer, area: Rect, y: u16, t: &str, s: Style) {
+pub(crate) fn put_right(buf: &mut Buffer, area: Rect, y: u16, t: &str, s: Style) {
     let w = t.chars().count() as u16;
     let x = area.right().saturating_sub(w + 1).max(area.x);
     put(buf, area, x, y, t, s);
 }
 
 /// The first text that fits in `w` columns (else the last one).
-fn fit<'a>(choices: &[&'a str], w: u16) -> &'a str {
+pub(crate) fn fit<'a>(choices: &[&'a str], w: u16) -> &'a str {
     choices
         .iter()
         .find(|t| t.chars().count() as u16 <= w)
@@ -2798,7 +4020,7 @@ fn fit<'a>(choices: &[&'a str], w: u16) -> &'a str {
 }
 
 /// Break text into lines of at most `w` characters, at spaces where possible.
-fn wrap(t: &str, w: usize) -> Vec<String> {
+pub(crate) fn wrap(t: &str, w: usize) -> Vec<String> {
     let w = w.max(8);
     let mut out = Vec::new();
     let mut line = String::new();
@@ -2846,7 +4068,7 @@ fn size(b: usize) -> String {
 }
 
 /// Rough tokens for a result (≈ 4 bytes a token): "540", "61k".
-fn tokens(bytes: usize) -> String {
+pub(crate) fn tokens(bytes: usize) -> String {
     let t = bytes / 4;
     if t >= 10_000 {
         format!("{}k", t / 1000)
@@ -2858,7 +4080,7 @@ fn tokens(bytes: usize) -> String {
 }
 
 /// Local HH:MM:SS for a unix time.
-fn hms(at: i64) -> String {
+pub(crate) fn hms(at: i64) -> String {
     let t = at as libc::time_t;
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     unsafe { libc::localtime_r(&t, &mut tm) };
@@ -2912,6 +4134,57 @@ pub fn json_lines(text: &str) -> Vec<Vec<(String, Color)>> {
         out.push(spans);
     }
     out
+}
+
+/// Snapshot helpers for the board tests (text of a buffer, compare or write).
+#[cfg(test)]
+pub(crate) mod snap {
+    use ratatui::buffer::Buffer;
+
+    /// The buffer as text, with clocks, times of day and "… ago" masked.
+    pub fn text(buf: &Buffer) -> String {
+        let a = buf.area;
+        let mut out = String::new();
+        for y in a.y..a.bottom() {
+            let mut line = String::new();
+            for x in a.x..a.right() {
+                line.push_str(buf[(x, y)].symbol());
+            }
+            out.push_str(line.trim_end());
+            out.push('\n');
+        }
+        let re = regex_lite::Regex::new(r"\b\d\d:\d\d(:\d\d)?\b").unwrap();
+        let out = re.replace_all(&out, "##:##").into_owned();
+        let ago = regex_lite::Regex::new(r"\d+ (min|h|days?) ago|just now").unwrap();
+        ago.replace_all(&out, "# ago").into_owned()
+    }
+
+    /// Compare with tests/snapshots/NAME (write it when missing or with
+    /// UPDATE_SNAPSHOTS set); the first difference, if any.
+    pub fn check(name: &str, got: &str) -> Option<String> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots");
+        let path = dir.join(name);
+        if std::env::var_os("UPDATE_SNAPSHOTS").is_some() || !path.exists() {
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(&path, got).unwrap();
+            return None;
+        }
+        let want = std::fs::read_to_string(&path).unwrap();
+        if want == got {
+            return None;
+        }
+        let first = want
+            .lines()
+            .zip(got.lines())
+            .position(|(a, b)| a != b)
+            .unwrap_or(0);
+        Some(format!(
+            "{name}: first difference on line {}\n  want: {}\n  got:  {}",
+            first + 1,
+            want.lines().nth(first).unwrap_or(""),
+            got.lines().nth(first).unwrap_or("")
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -3038,6 +4311,11 @@ mod tests {
             bytes: Some(bytes),
             ms: Some(ms),
             ok,
+            input: "{}".into(),
+            output: String::new(),
+            log: "session.jsonl".into(),
+            line: 1,
+            id: "t1".into(),
         };
         let calls = vec![
             call(
@@ -3086,6 +4364,13 @@ mod tests {
                 280,
             ),
         ];
+        let mut calls = calls;
+        calls[0].input = r#"{"query":"shellvisor user:avmg0","perPage":10}"#.into();
+        calls[0].output =
+            r#"{"total_count":1,"items":[{"full_name":"avmg0/shellvisor","language":"Rust"}]}"#
+                .into();
+        calls[0].line = 412;
+        calls[0].id = "toolu_31".into();
         sc.calls = calls;
         sc.sel = sc
             .servers
@@ -3141,6 +4426,19 @@ mod tests {
                         got.lines().nth(first).unwrap_or("")
                     ));
                 }
+            }
+        }
+        // board 19: the newest call in full
+        let first_call = sc.calls[0].clone();
+        sc.open_call(first_call);
+        for (w, h) in [(160u16, 44u16), (100, 24)] {
+            let area = Rect::new(0, 0, w, h);
+            let mut buf = Buffer::empty(area);
+            sc.render(area, &mut buf, None);
+            if let Some(e) =
+                super::snap::check(&format!("mcp19-{w}x{h}.txt"), &super::snap::text(&buf))
+            {
+                failed.push(e);
             }
         }
         // the colours that make it read like the boards

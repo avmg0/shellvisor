@@ -122,6 +122,10 @@ pub enum Cmd {
     Broadcast,
     RemoteFiles,
     Mcp,
+    /// Board 21: review the focused agent's work.
+    Review,
+    /// Board 20: ssh port forwards.
+    Forwards,
 }
 
 /// Ready-made layouts for a tab.
@@ -307,6 +311,18 @@ pub const ACTIONS: &[(&str, Cmd, &[&str], &str)] = &[
         Cmd::ClearPane,
         &[],
         "clear this pane and its scrollback (also: ctrl+] k, right-click)",
+    ),
+    (
+        "forwards",
+        Cmd::Forwards,
+        &[],
+        "ssh port forwards: local, remote and SOCKS tunnels for your sessions (also: ctrl+] P, sv ssh forward)",
+    ),
+    (
+        "review",
+        Cmd::Review,
+        &[],
+        "review an agent's work: diff, merge, approve for a while (also: ctrl+] D, sv agent diff NAME)",
     ),
     (
         "mcp",
@@ -647,6 +663,8 @@ pub fn after_leader(key: &[u8]) -> Option<Cmd> {
         b"B" => Broadcast,
         b"F" => RemoteFiles,
         b"M" => Mcp,
+        b"D" => Review,
+        b"P" => Forwards,
         b"\x1b[A" => Focus(Dir::Up),
         b"\x1b[B" => Focus(Dir::Down),
         b"\x1b[C" => Focus(Dir::Right),

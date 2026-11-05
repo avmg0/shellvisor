@@ -23,8 +23,12 @@ pub struct Session {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identity: Option<String>,
     /// Port forwards as ssh takes them: "-L 8080:localhost:80", "-D 1080"…
+    /// These open with the session.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub forwards: Vec<String>,
+    /// Saved forwards opened by hand (ctrl+] P), not on login.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub manual: Vec<String>,
     /// Seconds between keepalives (0: none). Default 30.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keepalive: Option<u32>,
@@ -76,6 +80,16 @@ fn q(s: &str) -> String {
 impl Session {
     /// The ssh command line that opens it.
     pub fn command_line(&self) -> String {
+        self.line(true)
+    }
+
+    /// The command line without its forwards (inside Shellvisor, which runs
+    /// the forwards itself so it can show and count them).
+    pub fn command_line_bare(&self) -> String {
+        self.line(false)
+    }
+
+    fn line(&self, forwards: bool) -> String {
         let mut c = vec!["ssh".to_string()];
         let ka = self.keepalive.unwrap_or(30);
         if ka > 0 {
@@ -87,8 +101,10 @@ impl Session {
         if let Some(i) = &self.identity {
             c.push(format!("-i {}", q(i)));
         }
-        for f in &self.forwards {
-            c.push(f.clone());
+        if forwards {
+            for f in &self.forwards {
+                c.push(f.clone());
+            }
         }
         let target = match &self.user {
             Some(u) => format!("{u}@{}", self.host),
@@ -113,6 +129,25 @@ impl Session {
         }
         s
     }
+}
+
+/// Save a forward with a session (`auto`: open on login), or forget it (None).
+pub fn set_forward(name: &str, spec: &str, keep: Option<bool>) -> Result<(), String> {
+    let mut list = load();
+    let Some(s) = list.iter_mut().find(|s| s.name == name) else {
+        return Err(format!("no saved session `{name}`"));
+    };
+    let same = |x: &String| {
+        x.split_whitespace().collect::<String>() == spec.split_whitespace().collect::<String>()
+    };
+    s.forwards.retain(|x| !same(x));
+    s.manual.retain(|x| !same(x));
+    match keep {
+        Some(true) => s.forwards.push(spec.to_string()),
+        Some(false) => s.manual.push(spec.to_string()),
+        None => {}
+    }
+    save_all(&list).map_err(|e| e.to_string())
 }
 
 /// Parse `NAME [user@]host [-p port] [-i key] [-L|-R|-D spec]… [-k secs] [-- cmd]`.

@@ -31,6 +31,7 @@ use crossterm::{cursor, execute, terminal};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
+use ratatui::style::{Color, Modifier};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -313,6 +314,39 @@ pub fn fuzzy(query: &str, text: &str) -> Option<i64> {
         score += 30;
     }
     Some(score)
+}
+
+/// "ends 23:52" / "until it's done" for an agent approving by itself.
+fn approving_text(a: &Agent) -> Option<String> {
+    let (until, _) = a.approve_for.as_ref()?;
+    match until {
+        None => Some("until its task is done".into()),
+        Some(u) => {
+            let left = u.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            let at = std::time::SystemTime::now() + left;
+            let secs = at
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as libc::time_t)
+                .unwrap_or(0);
+            let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+            unsafe { libc::localtime_r(&secs, &mut tm) };
+            Some(format!("ends {:02}:{:02}", tm.tm_hour, tm.tm_min))
+        }
+    }
+}
+
+/// "5 min ago", "2 h ago", "3 days ago".
+fn ago_text(secs: i64) -> String {
+    let s = secs.max(0);
+    match s {
+        0..=59 => "just now".into(),
+        60..=3599 => format!("{} min ago", s / 60),
+        3600..=86_399 => format!("{}h ago", s / 3600),
+        _ => format!("{} days ago", s / 86_400),
+    }
 }
 
 /// Is `cmd` a program on PATH?
@@ -763,6 +797,11 @@ pub struct App {
     pub find: Option<Find>,
     /// The MCP screen (ctrl+] M, sv mcp).
     pub mcp: Option<crate::mcpscreen::McpScreen>,
+    /// Board 21: reviewing an agent's work.
+    pub review: Option<crate::review::Review>,
+    /// Board 20: the port forwards screen, and the forwards running.
+    pub fwd: Option<crate::forwards::FwdScreen>,
+    pub forwards: Vec<crate::forwards::Live>,
     mcp_scan_at: Instant,
     /// The command palette (ctrl+] space).
     pub palette: Option<Palette>,
@@ -886,6 +925,9 @@ pub fn run(opts: Options) -> io::Result<i32> {
         palette: None,
         tour: None,
         mcp: None,
+        review: None,
+        fwd: None,
+        forwards: Vec::new(),
         mcp_scan_at: Instant::now(),
         broadcast: std::collections::HashSet::new(),
         session_marks: std::collections::BTreeSet::new(),
@@ -1012,6 +1054,10 @@ pub fn run(opts: Options) -> io::Result<i32> {
     drop(tx);
 
     let result = app.event_loop(rx);
+    // end the forwards' ssh processes
+    for l in &app.forwards {
+        l.stop();
+    }
     let _ = std::fs::remove_file(&app.opts.bus_path);
     app.save_session();
     for p in app.panes.values_mut() {
@@ -1456,8 +1502,16 @@ impl App {
                                 Vec::new()
                             }
                             (Some(m), McpEv::Traffic(c)) => {
-                                m.traffic(c);
-                                Vec::new()
+                                // which agent CLI each process group belongs to
+                                m.agent_pgs = self
+                                    .panes
+                                    .values()
+                                    .filter_map(|p| {
+                                        let a = p.agent.as_ref()?;
+                                        Some((p.pane.foreground_job()?, a.name.clone()))
+                                    })
+                                    .collect();
+                                m.traffic(c)
                             }
                             (Some(m), McpEv::Added(r)) => m.added(r),
                             _ => Vec::new(),
@@ -2425,6 +2479,25 @@ impl App {
     fn on_input(&mut self, bytes: &[u8]) -> io::Result<()> {
         let mut forward: Vec<u8> = Vec::new();
         for key in keys::tokenize(bytes) {
+            if self.fwd.is_some() && self.modal == Modal::None && key != [0x1d] {
+                self.flush_forward(&mut forward)?;
+                let snap = self.fwd_snap();
+                let act = self.fwd.as_mut().and_then(|f| f.key(key, &snap));
+                if let Some(a) = act {
+                    self.fwd_act(a)?;
+                }
+                self.dirty = true;
+                continue;
+            }
+            if self.review.is_some() && self.modal == Modal::None && key != [0x1d] {
+                self.flush_forward(&mut forward)?;
+                let act = self.review.as_mut().and_then(|r| r.key(key));
+                if let Some(a) = act {
+                    self.review_act(a)?;
+                }
+                self.dirty = true;
+                continue;
+            }
             if self.mcp.is_some() && self.modal == Modal::None && key != [0x1d] && key != b"\x1ba" {
                 self.flush_forward(&mut forward)?;
                 let waiting = !self.pending_approvals().is_empty();
@@ -2922,15 +2995,32 @@ impl App {
                         );
                     }
                 }
-                Act::Copy(t) => {
+                Act::Copy(t, what) => {
                     self.copy(&t);
                     if let Some(m) = self.mcp.as_mut() {
-                        m.note = Some("copied the result".into());
+                        m.note = Some(format!("copied {what}"));
                     }
                 }
-                Act::Save(t) => {
+                Act::Kill(name, pid) => {
+                    unsafe { libc::kill(pid, libc::SIGKILL) };
+                    if let Some(m) = self.mcp.as_mut() {
+                        m.running.remove(&name);
+                        m.note = Some(format!("killed {name} (pid {pid})"));
+                    }
+                }
+                Act::Save(t, name) => {
                     let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
-                    let p = home.join(format!("mcp-result-{}.txt", std::process::id()));
+                    let safe: String = name
+                        .chars()
+                        .map(|c| {
+                            if c.is_alphanumeric() || c == '-' {
+                                c
+                            } else {
+                                '-'
+                            }
+                        })
+                        .collect();
+                    let p = home.join(format!("{safe}.txt"));
                     let msg = match std::fs::write(&p, t) {
                         Ok(()) => format!("saved to {}", p.display()),
                         Err(e) => format!("couldn't save: {e}"),
@@ -3345,9 +3435,22 @@ impl App {
 
     /// Open a saved session (or ~/.ssh/config host) in a new tab named after it.
     fn open_session_tab(&mut self, name: &str, cmd: &str) -> io::Result<()> {
+        // a saved session: Shellvisor runs its forwards (to show and count them)
+        let saved = crate::sessions::load().into_iter().find(|s| s.name == name);
+        let cmd = match &saved {
+            Some(s) if !s.forwards.is_empty() => s.command_line_bare(),
+            _ => cmd.to_string(),
+        };
         let id = self.new_pane(self.focused_cwd())?;
         if let Some(p) = self.panes.get_mut(&id) {
             p.pending_input = Some((format!("{cmd}\r"), Instant::now()));
+        }
+        if let Some(s) = saved {
+            for f in &s.forwards {
+                if let Some(spec) = crate::forwards::Spec::parse(f) {
+                    self.start_forward(name, spec, Some(id));
+                }
+            }
         }
         let tab = self.active;
         let mut t = Tab::new(id);
@@ -4519,6 +4622,12 @@ impl App {
             }
             let old = std::mem::replace(&mut a.reported, key);
             a.history.push((Instant::now(), key));
+            if matches!(key, "done" | "exited" | "failed")
+                && a.approve_for.as_ref().is_some_and(|(u, _)| u.is_none())
+            {
+                // "this task" is over
+                a.approve_for = None;
+            }
             if old.is_empty() {
                 events.push((a.name.clone(), "started"));
             }
@@ -4691,6 +4800,10 @@ impl App {
                 }
             }
             Some(BoardAct::Merge(name)) => self.merge_agent(&name),
+            Some(BoardAct::Review(name)) => {
+                self.close_board();
+                self.open_review(&name);
+            }
             Some(BoardAct::Plan) => self.start_planner(),
             Some(BoardAct::Dispatch) => self.dispatch_plan(),
             Some(BoardAct::NextStage) => {
@@ -4809,6 +4922,638 @@ impl App {
     }
 
     /// Merge an agent's branch into the checkout it came from.
+    /// Board 20.
+    fn open_forwards(&mut self, name: Option<&str>) {
+        let list = crate::sessions::load();
+        let sel = match name {
+            Some(n) => match list.iter().position(|s| s.name == n) {
+                Some(i) => i,
+                None => {
+                    self.notice(format!(
+                        "no saved session `{n}` · sv ssh save {n} user@host"
+                    ));
+                    0
+                }
+            },
+            // the session of the focused tab, if it's one
+            None => {
+                let tab = self.tabs.get(self.active).and_then(|t| t.name.clone());
+                list.iter()
+                    .position(|s| Some(&s.name) == tab.as_ref())
+                    .unwrap_or(0)
+            }
+        };
+        self.fwd = Some(crate::forwards::FwdScreen::new(sel));
+        self.dirty = true;
+    }
+
+    /// What board 20 shows: saved sessions, their forwards, the live ones.
+    pub fn fwd_snap(&self) -> crate::forwards::Snap {
+        use crate::forwards::{Row, SessInfo, Spec};
+        let mut sessions = Vec::new();
+        let mut rows: Vec<(String, Row)> = Vec::new();
+        for s in crate::sessions::load() {
+            let bare = s.command_line_bare();
+            let full = s.command_line();
+            // the tab its ssh runs in
+            let tab = self.tabs.iter().position(|t| {
+                t.root.panes().iter().any(|id| {
+                    self.panes
+                        .get(id)
+                        .is_some_and(|p| p.running && (p.command == bare || p.command == full))
+                })
+            });
+            let saved: Vec<(Spec, bool)> = s
+                .forwards
+                .iter()
+                .filter_map(|f| Spec::parse(f).map(|x| (x, true)))
+                .chain(
+                    s.manual
+                        .iter()
+                        .filter_map(|f| Spec::parse(f).map(|x| (x, false))),
+                )
+                .collect();
+            for (spec, auto) in &saved {
+                let live = self
+                    .forwards
+                    .iter()
+                    .find(|l| l.session == s.name && l.spec == *spec);
+                rows.push((
+                    s.name.clone(),
+                    Row {
+                        spec: spec.clone(),
+                        state: live.map(|l| l.state()),
+                        conns: live
+                            .map(|l| l.conns.load(std::sync::atomic::Ordering::Relaxed))
+                            .unwrap_or(0),
+                        bytes_in: live
+                            .map(|l| l.bytes_in.load(std::sync::atomic::Ordering::Relaxed))
+                            .unwrap_or(0),
+                        bytes_out: live
+                            .map(|l| l.bytes_out.load(std::sync::atomic::Ordering::Relaxed))
+                            .unwrap_or(0),
+                        saved: true,
+                        auto: *auto,
+                    },
+                ));
+            }
+            // running but not saved
+            for l in self
+                .forwards
+                .iter()
+                .filter(|l| l.session == s.name && !saved.iter().any(|(x, _)| *x == l.spec))
+            {
+                rows.push((
+                    s.name.clone(),
+                    Row {
+                        spec: l.spec.clone(),
+                        state: Some(l.state()),
+                        conns: l.conns.load(std::sync::atomic::Ordering::Relaxed),
+                        bytes_in: l.bytes_in.load(std::sync::atomic::Ordering::Relaxed),
+                        bytes_out: l.bytes_out.load(std::sync::atomic::Ordering::Relaxed),
+                        saved: false,
+                        auto: false,
+                    },
+                ));
+            }
+            sessions.push(SessInfo {
+                name: s.name.clone(),
+                address: s.address(),
+                keepalive: s.keepalive.unwrap_or(30),
+                tab: tab.map(|t| t + 1),
+                saved,
+            });
+        }
+        crate::forwards::Snap { sessions, rows }
+    }
+
+    /// Start a forward for a saved session (replacing one for the same spec).
+    fn start_forward(
+        &mut self,
+        session: &str,
+        spec: crate::forwards::Spec,
+        with_pane: Option<PaneId>,
+    ) {
+        let Some(s) = crate::sessions::load()
+            .into_iter()
+            .find(|s| s.name == session)
+        else {
+            return;
+        };
+        let Some(args) = crate::remote::ssh_target(&s.command_line_bare()) else {
+            return;
+        };
+        if let Some(i) = self
+            .forwards
+            .iter()
+            .position(|l| l.session == session && l.spec == spec)
+        {
+            self.forwards.remove(i).stop();
+        }
+        let mut live = crate::forwards::start(session, &args, spec);
+        live.with_pane = with_pane;
+        self.forwards.push(live);
+    }
+
+    fn fwd_act(&mut self, act: crate::forwards::FwdAct) -> io::Result<()> {
+        use crate::forwards::{FwdAct, State};
+        let note = |app: &mut App, n: String| {
+            if let Some(f) = app.fwd.as_mut() {
+                f.note = Some(n);
+            }
+        };
+        match act {
+            FwdAct::Close => self.fwd = None,
+            FwdAct::OpenSession(name) => {
+                let cmd = crate::sessions::load()
+                    .into_iter()
+                    .find(|s| s.name == name)
+                    .map(|s| s.command_line())
+                    .unwrap_or_default();
+                self.fwd = None;
+                self.open_session_tab(&name, &cmd)?;
+            }
+            FwdAct::Add {
+                session,
+                spec,
+                save,
+                auto,
+            } => {
+                if save {
+                    if let Err(e) =
+                        crate::sessions::set_forward(&session, &spec.to_arg(), Some(auto))
+                    {
+                        note(self, e);
+                        return Ok(());
+                    }
+                }
+                let arg = spec.to_arg();
+                self.start_forward(&session, spec, None);
+                note(self, format!("added {arg}"));
+            }
+            FwdAct::Toggle(session, spec) => {
+                match self
+                    .forwards
+                    .iter()
+                    .position(|l| l.session == session && l.spec == spec)
+                {
+                    Some(i) if self.forwards[i].state() == State::Listening => {
+                        self.forwards[i].stop();
+                        if let Ok(mut s) = self.forwards[i].state.lock() {
+                            *s = State::Paused;
+                        }
+                        note(self, "paused · space resumes".into());
+                    }
+                    _ => {
+                        self.start_forward(&session, spec, None);
+                        note(self, "started".into());
+                    }
+                }
+            }
+            FwdAct::Remove(session, spec) => {
+                if let Some(i) = self
+                    .forwards
+                    .iter()
+                    .position(|l| l.session == session && l.spec == spec)
+                {
+                    self.forwards.remove(i).stop();
+                }
+                let _ = crate::sessions::set_forward(&session, &spec.to_arg(), None);
+                if let Some(f) = self.fwd.as_mut() {
+                    f.row = f.row.saturating_sub(1);
+                }
+                note(self, format!("closed {}", spec.to_arg()));
+            }
+            FwdAct::Repick(session, spec) => {
+                let mut p = spec.port.saturating_add(1);
+                while p < u16::MAX && std::net::TcpListener::bind(("127.0.0.1", p)).is_err() {
+                    p += 1;
+                }
+                let mut new = spec.clone();
+                new.port = p;
+                let was_auto = crate::sessions::load()
+                    .into_iter()
+                    .find(|s| s.name == session)
+                    .is_some_and(|s| {
+                        s.forwards
+                            .iter()
+                            .any(|f| crate::forwards::Spec::parse(f).as_ref() == Some(&spec))
+                    });
+                if let Some(i) = self
+                    .forwards
+                    .iter()
+                    .position(|l| l.session == session && l.spec == spec)
+                {
+                    self.forwards.remove(i).stop();
+                }
+                let _ = crate::sessions::set_forward(&session, &spec.to_arg(), None);
+                let _ = crate::sessions::set_forward(&session, &new.to_arg(), Some(was_auto));
+                self.start_forward(&session, new, None);
+                note(self, format!("moved to port {p}"));
+            }
+            FwdAct::Copy(t) => {
+                self.copy(&t);
+                note(self, format!("copied {t}"));
+            }
+            FwdAct::OpenUrl(u) => self.open_url(&u),
+        }
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Board 21 for an agent.
+    fn open_review(&mut self, name: &str) {
+        let Some(id) = self.agent_pane(name) else {
+            self.notice(format!("no agent called {name}"));
+            return;
+        };
+        let v = self.agent_summary(id);
+        let Some(a) = self.agent_by_name(name).cloned() else {
+            return;
+        };
+        let (Some(repo), Some(branch)) = (a.repo.clone(), a.branch.clone()) else {
+            self.notice(format!(
+                "{name} has no branch of its own to review (it works in your checkout)"
+            ));
+            return;
+        };
+        let wt = a.worktree.clone().unwrap_or_else(|| repo.clone());
+        let status = v["status"].as_str().unwrap_or("").to_string();
+        let (icon, color) = match status.as_str() {
+            "done" | "exited" => ("✔ ", Color::Indexed(108)),
+            "working" | "starting" => ("⠋ ", Color::Indexed(179)),
+            "needs approval" => ("⚑ ", Color::Indexed(179)),
+            s if s.starts_with("exited") => ("✖ ", Color::Indexed(167)),
+            _ => ("", Color::Indexed(245)),
+        };
+        let mut r = crate::review::Review::new(
+            name,
+            Color::Indexed(a.color),
+            (format!("{icon}{status}"), color),
+            repo,
+            wt,
+            branch,
+            a.base.clone(),
+            a.tokens,
+        );
+        r.checks = self.review_checks(name, &r);
+        r.approving = approving_text(&a);
+        self.review = Some(r);
+        self.dirty = true;
+    }
+
+    /// The review's checks: tests seen in the agent's output, overlap with
+    /// other agents, files you changed too, changes not committed yet.
+    fn review_checks(&self, name: &str, r: &crate::review::Review) -> Vec<crate::review::Check> {
+        use ratatui::style::Style;
+        let (green, amber, red, text, dim) = (
+            Color::Indexed(108),
+            Color::Indexed(179),
+            Color::Indexed(167),
+            Style::default().fg(Color::Indexed(252)),
+            Style::default().fg(Color::Indexed(245)),
+        );
+        let bold = text.add_modifier(Modifier::BOLD);
+        let mut out: Vec<crate::review::Check> = Vec::new();
+        // tests: the newest summary line in its output
+        if let Some(id) = self.agent_pane(name) {
+            if let Some(p) = self.panes.get(&id) {
+                let lines = p.pane.screen().all_lines();
+                if let Some((ok, what, n)) = crate::review::test_summary(&lines) {
+                    out.push((
+                        if ok { "✔" } else { "✖" },
+                        if ok { green } else { red },
+                        vec![(what, bold), (format!(" · {n}"), dim)],
+                    ));
+                }
+            }
+        }
+        // overlap with other agents
+        let mine: Vec<&str> = r.files.iter().map(|f| f.path.as_str()).collect();
+        let others: Vec<(String, u8, Vec<String>)> = self
+            .panes
+            .values()
+            .filter_map(|p| p.agent.as_ref())
+            .filter(|a| a.name != name)
+            .map(|a| {
+                let both: Vec<String> = a
+                    .files
+                    .iter()
+                    .filter(|f| mine.contains(&f.path.as_str()))
+                    .map(|f| f.path.clone())
+                    .collect();
+                (a.name.clone(), a.color, both)
+            })
+            .collect();
+        for (n, c, both) in &others {
+            if both.is_empty() {
+                out.push((
+                    "✔",
+                    green,
+                    vec![
+                        ("no overlap with ".into(), text),
+                        (format!("● {n}"), Style::default().fg(Color::Indexed(*c))),
+                    ],
+                ));
+            } else {
+                out.push((
+                    "✖",
+                    red,
+                    vec![
+                        (format!("● {n}"), Style::default().fg(Color::Indexed(*c))),
+                        (" changed ".into(), text),
+                        (both[0].clone(), bold),
+                        (
+                            if both.len() > 1 {
+                                format!(" +{}", both.len() - 1)
+                            } else {
+                                String::new()
+                            },
+                            dim,
+                        ),
+                        (" too".into(), text),
+                    ],
+                ));
+            }
+        }
+        // files you changed as well (in your checkout, or committed since it branched)
+        let mine_dirty: Vec<String> = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&r.repo)
+            .args(["status", "--porcelain"])
+            .output()
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .filter(|l| l.len() > 3)
+                    .map(|l| l[3..].to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        for f in &r.files {
+            if mine_dirty.contains(&f.path) {
+                out.push((
+                    "⚑",
+                    amber,
+                    vec![
+                        ("touches ".into(), text),
+                        (f.path.clone(), bold),
+                        (" · you're changing it too".into(), dim),
+                    ],
+                ));
+                continue;
+            }
+            let t = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&r.repo)
+                .args([
+                    "log",
+                    "-1",
+                    "--format=%ct",
+                    &format!("{}..HEAD", r.base),
+                    "--",
+                    &f.path,
+                ])
+                .output()
+                .ok()
+                .and_then(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .trim()
+                        .parse::<i64>()
+                        .ok()
+                });
+            if let Some(t) = t {
+                out.push((
+                    "⚑",
+                    amber,
+                    vec![
+                        ("touches ".into(), text),
+                        (f.path.clone(), bold),
+                        (format!(" · you edited it {}", ago_text(now - t)), dim),
+                    ],
+                ));
+            }
+        }
+        let open = r.files.iter().filter(|f| !f.committed).count();
+        if open > 0 {
+            out.push((
+                "⚑",
+                amber,
+                vec![
+                    (
+                        format!(
+                            "{open} file{} not committed yet",
+                            if open == 1 { "" } else { "s" }
+                        ),
+                        text,
+                    ),
+                    (" · merging takes commits".into(), dim),
+                ],
+            ));
+        }
+        out.truncate(5);
+        out
+    }
+
+    fn review_act(&mut self, act: crate::review::ReviewAct) -> io::Result<()> {
+        use crate::review::ReviewAct;
+        let Some(name) = self.review.as_ref().map(|r| r.agent.clone()) else {
+            return Ok(());
+        };
+        match act {
+            ReviewAct::Close => self.review = None,
+            ReviewAct::Merge => {
+                self.merge_agent(&name);
+                self.review = None;
+            }
+            ReviewAct::Squash => {
+                let Some(a) = self.agent_by_name(&name) else {
+                    return Ok(());
+                };
+                let (Some(repo), Some(branch)) = (a.repo.clone(), a.branch.clone()) else {
+                    return Ok(());
+                };
+                let task = a
+                    .task
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .take(60)
+                    .collect::<String>();
+                let msg = if task.is_empty() {
+                    format!("{name}: {branch}")
+                } else {
+                    format!("{name}: {task}")
+                };
+                let tx = self.tx.clone();
+                let _ = spawn_thread("squash".into(), move || {
+                    let run = |args: &[&str]| {
+                        std::process::Command::new("git")
+                            .arg("-C")
+                            .arg(&repo)
+                            .args(args)
+                            .output()
+                    };
+                    let m = match run(&["merge", "--squash", &branch]) {
+                        Ok(o) if o.status.success() => match run(&["commit", "-m", &msg]) {
+                            Ok(o) if o.status.success() => {
+                                format!("✔ squashed {branch} into one commit")
+                            }
+                            Ok(o) => format!(
+                                "✖ squash {branch}: {} — finish it in your shell",
+                                String::from_utf8_lossy(&o.stdout)
+                                    .lines()
+                                    .next()
+                                    .unwrap_or("commit failed")
+                            ),
+                            Err(e) => format!("✖ squash: {e}"),
+                        },
+                        Ok(o) => format!(
+                            "✖ squash {branch}: {} — finish it in your shell (git status)",
+                            String::from_utf8_lossy(&o.stderr)
+                                .lines()
+                                .chain(String::from_utf8_lossy(&o.stdout).lines())
+                                .find(|l| l.contains("CONFLICT")
+                                    || l.contains("error")
+                                    || l.contains("fatal"))
+                                .unwrap_or("git merge --squash failed")
+                        ),
+                        Err(e) => format!("✖ squash: {e}"),
+                    };
+                    let _ = tx.send(Ev::Notice(m));
+                });
+                self.review = None;
+            }
+            ReviewAct::Message(t) => match self.send_to_agent(&name, &t, "you") {
+                Ok(()) => {
+                    if let Some(r) = self.review.as_mut() {
+                        r.note = Some(format!("sent to {name}"));
+                    }
+                }
+                Err(e) => {
+                    if let Some(r) = self.review.as_mut() {
+                        r.note = Some(e);
+                    }
+                }
+            },
+            ReviewAct::OpenFiles(path) => {
+                self.review = None;
+                self.reveal_in_files(&path)?;
+            }
+            ReviewAct::Edit(path, line) => {
+                self.review = None;
+                let dir = path.parent().map(Path::to_path_buf);
+                let cmd = edit_command(&editor(), &path.display().to_string(), line);
+                let label = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let id = self.new_pane(dir)?;
+                if let Some(p) = self.panes.get_mut(&id) {
+                    p.pending_input = Some((format!("{cmd}\r"), Instant::now()));
+                }
+                let tab = self.active;
+                let mut t = Tab::new(id);
+                t.name = Some(label);
+                self.tabs.insert(tab + 1, t);
+                self.switch_tab(tab + 1);
+                self.session_dirty = true;
+            }
+            ReviewAct::Discard => {
+                let Some(a) = self.agent_by_name(&name).cloned() else {
+                    return Ok(());
+                };
+                if !matches!(a.status, agents::Status::Exited(_)) {
+                    if let Some(r) = self.review.as_mut() {
+                        r.note = Some(format!(
+                            "{name} is still running · sv agent stop {name} first"
+                        ));
+                    }
+                    return Ok(());
+                }
+                let (Some(repo), Some(branch)) = (a.repo.clone(), a.branch.clone()) else {
+                    return Ok(());
+                };
+                let git = |args: &[&str]| {
+                    std::process::Command::new("git")
+                        .arg("-C")
+                        .arg(&repo)
+                        .args(args)
+                        .output()
+                };
+                let mut ok = true;
+                if let Some(wt) = a.worktree.as_ref() {
+                    ok &= git(&["worktree", "remove", "--force", &wt.display().to_string()])
+                        .is_ok_and(|o| o.status.success());
+                }
+                ok &= git(&["branch", "-D", &branch]).is_ok_and(|o| o.status.success());
+                self.review = None;
+                self.notice(if ok {
+                    format!("threw away {branch} and its worktree")
+                } else {
+                    format!("couldn't remove all of {branch} · git worktree list / git branch")
+                });
+            }
+            ReviewAct::Approve(what) => {
+                let text = {
+                    let Some(id) = self.agent_pane(&name) else {
+                        return Ok(());
+                    };
+                    let Some(a) = self.panes.get_mut(&id).and_then(|p| p.agent.as_mut()) else {
+                        return Ok(());
+                    };
+                    a.approve_for = what.map(|(d, kinds)| (d.map(|d| Instant::now() + d), kinds));
+                    approving_text(a)
+                };
+                let msg = match &text {
+                    Some(t) => format!("{name}'s approvals answer themselves · {t}"),
+                    None => format!("{name} asks again"),
+                };
+                if let Some(r) = self.review.as_mut() {
+                    r.approving = text;
+                    r.focus_approve = false;
+                    r.note = Some(msg);
+                }
+            }
+        }
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Show a path in the files pane of this tab (opening one).
+    fn reveal_in_files(&mut self, target: &Path) -> io::Result<()> {
+        if self.view == View::Basic {
+            self.set_view(View::Full);
+        }
+        let tab = self.active;
+        let existing = self.tabs[tab]
+            .root
+            .panes()
+            .into_iter()
+            .find(|id| matches!(self.tools.get(id), Some(Tool::Files(_))));
+        let fid = match existing {
+            Some(id) => id,
+            None => {
+                self.show_tool("files", false)?;
+                self.focused()
+            }
+        };
+        if let Some(Tool::Files(f)) = self.tools.get_mut(&fid) {
+            let jobs = f.reveal(target);
+            self.run_jobs(fid, jobs);
+        }
+        let t = &mut self.tabs[tab];
+        t.focus = fid;
+        t.zoomed = false;
+        self.relayout();
+        Ok(())
+    }
+
     fn merge_agent(&mut self, name: &str) {
         let Some(a) = self.agent_by_name(name) else {
             return;
@@ -5487,7 +6232,10 @@ impl App {
             Some(ap) => {
                 let same = a.approval().is_some_and(|old| old.what == ap.what);
                 if !same {
-                    if a.always.contains(&ap.action) || auto.contains(&ap.action) {
+                    let for_now = a.approve_for.as_ref().is_some_and(|(until, kinds)| {
+                        kinds.contains(&ap.action) && until.is_none_or(|u| Instant::now() < u)
+                    });
+                    if a.always.contains(&ap.action) || auto.contains(&ap.action) || for_now {
                         let _ = p.pane.write(a.cli.keys().allow.as_bytes());
                         p.agent_quiet_until = Instant::now() + Duration::from_millis(800);
                         notice = Some(format!(
@@ -5597,6 +6345,20 @@ impl App {
 
     fn tick_agents(&mut self) {
         self.tick_mcp();
+        // forwards that came with a session's tab end with it
+        let gone: Vec<usize> = self
+            .forwards
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.with_pane.is_some_and(|p| !self.panes.contains_key(&p)))
+            .map(|(i, _)| i)
+            .collect();
+        for i in gone.into_iter().rev() {
+            self.forwards.remove(i).stop();
+        }
+        if self.fwd.is_some() {
+            self.dirty = true;
+        }
         // typed at a new shell's first prompt (sessions, duplicates, agents);
         // a shell without our hooks never says "prompt": type it anyway
         for p in self.panes.values_mut() {
@@ -6179,6 +6941,14 @@ impl App {
                         self.notice(msg);
                     }
                 }
+                Ok(())
+            }
+            ["ssh-forwards", rest @ ..] => {
+                self.open_forwards(rest.first().copied());
+                Ok(())
+            }
+            ["agent-review", name] => {
+                self.open_review(name);
                 Ok(())
             }
             ["tour"] => {
@@ -6848,6 +7618,19 @@ impl App {
             Cmd::Sessions => self.open_sessions(),
             Cmd::Palette => self.open_palette(),
             Cmd::Mcp => self.open_mcp(),
+            Cmd::Forwards => self.open_forwards(None),
+            Cmd::Review => {
+                let id = self.focused();
+                match self
+                    .panes
+                    .get(&id)
+                    .and_then(|p| p.agent.as_ref())
+                    .map(|a| a.name.clone())
+                {
+                    Some(n) => self.open_review(&n),
+                    None => self.notice("focus an agent's column first (or sv agent diff NAME)"),
+                }
+            }
             Cmd::Broadcast => self.toggle_broadcast(),
             Cmd::RemoteFiles => self.open_remote()?,
             Cmd::Reconnect => {

@@ -1,0 +1,44 @@
+ ▍shellvisor  MCP · github · a call, the server, its log                                                                         ● running · pid 48211   ##:##
+ ╭ CALL · api → github · search_repositories ────────────────────────────────────────╮ ╭──────────────────────────────────────────────────────────────────────╮
+ │                                                                                   │ │ Server                                                   runs as you │
+ │ when        ##:## · # ago     agent       ● api · claude               │ │ state       ● running · 0 restarts                                   │
+ │ time        640 ms                       result      ✔ ok · 2.1K · ≈ 525 tokens   │ │ process     pid 48211                                                │
+ │ permission  asks · no rule               log         session.jsonl · line 412     │ │ command     npx -y @modelcontextprotocol/server-github               │
+ │                                                                                   │ │ on a crash   restart   leave stopped   o                             │
+ │ Request                                                  tools/call · id toolu_31 │ │ tool list   7 tools · ≈ 185 tokens in every agent's context          │
+ │ ╭───────────────────────────────────────────────────────────────────────────────╮ │ │  s Stop   r Restart   k Kill   agents start it again on their next ca│
+ │ │ {                                                                             │ │ ╰──────────────────────────────────────────────────────────────────────╯
+ │ │   "name": "search_repositories",                                              │ │ ╭──────────────────────────────────────────────────────────────────────╮
+ │ │   "arguments": {                                                              │ │ │ Server log                stderr   protocol   errors only   f follow │
+ │ │     "query": "shellvisor user:avmg0",                                         │ │ │ ##:## → tools/call search_repositories query shellvisor user:avmg0│
+ │ │     "perPage": 10                                                             │ │ │ ##:## → tools/call list_issues state open, labels bug             │
+ │ │   }                                                                           │ │ │ ##:## → tools/call get_file_contents path README.md               │
+ │ │ }                                                                             │ │ │ ##:## ← ok 3.7K · 280 ms                                          │
+ │ ╰───────────────────────────────────────────────────────────────────────────────╯ │ │ ##:## ← ok 2.1K · 640 ms                                          │
+ │ Result                                         content[0] · text · pretty printed │ │ ##:## ← ok 8.7K · 864 ms                                          │
+ │ ╭───────────────────────────────────────────────────────────────────────────────╮ │ │ ##:## → initialize · protocol 2025-06-18                          │
+ │ │ {                                                                             │ │ │ ##:## ← 7 tools · 2 prompts · 0 resources · 312 ms                │
+ │ │   "total_count": 1,                                                           │ │ │                                                                      │
+ │ │   "items": [                                                                  │ │ │                                                                      │
+ │ │     {                                                                         │ │ │                                                                      │
+ │ │       "full_name": "avmg0/shellvisor",                                        │ │ │                                                                      │
+ │ │       "language": "Rust"                                                      │ │ │                                                                      │
+ │ │     }                                                                         │ │ │                                                                      │
+ │ │   ]                                                                           │ │ │                                                                      │
+ │ │ }                                                                             │ │ │                                                                      │
+ │ │                                                                               │ │ │                                                                      │
+ │ │                                                                               │ │ │                                                                      │
+ │ │                                                                               │ │ │                                                                      │
+ │ │                                                                               │ │ │                                                                      │
+ │ │                                                                               │ │ │                                                                      │
+ │ │                                                                               │ │ │                                                                      │
+ │ │                                                                               │ │ │                                                                      │
+ │ │                                                                               │ │ │                                                                      │
+ │ │                                                                               │ │ │                                                                      │
+ │ │                                                                               │ │ │                                                                      │
+ │ │                                                                               │ │ │                                                                      │
+ │ │                                                                               │ │ │                                                                      │
+ │ ╰───────────────────────────────────────────────────────────────────────────────╯ │ │                                                                      │
+ │  t Run again in Try a tool   c copy request · C copy result · ←→ calls            │ │ kept for this session · / search · y copy · w save to a file         │
+ ╰───────────────────────────────────────────────────────────────────────────────────╯ ╰──────────────────────────────────────────────────────────────────────╯
+ t Run again   ←→ Calls   s Stop   r Restart   d Description change   f Follow log   esc Back   · ⏎ on a traffic row · l on a server

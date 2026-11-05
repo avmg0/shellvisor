@@ -11,7 +11,7 @@
 //! so the agent enforces them. Secret values are never shown or logged.
 
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -912,6 +912,8 @@ pub struct DescChange {
     pub tool: String,
     pub before: String,
     pub now: String,
+    /// When the change was first seen (unix seconds; 0 unknown).
+    pub at: u64,
 }
 
 /// Compare a server's tool descriptions with the ones remembered in `path`
@@ -951,6 +953,11 @@ pub fn desc_changes(path: &Path, server: &str, tools: &[Tool]) -> Vec<DescChange
                 if old != t.desc {
                     if !e.contains_key("before") {
                         e.insert("before".into(), Value::String(old));
+                        let now = SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        e.insert("changed".into(), Value::from(now));
                     }
                     e.insert("desc".into(), Value::String(t.desc.clone()));
                     dirty = true;
@@ -961,6 +968,7 @@ pub fn desc_changes(path: &Path, server: &str, tools: &[Tool]) -> Vec<DescChange
                             tool: t.name.clone(),
                             before: b.to_string(),
                             now: t.desc.clone(),
+                            at: e.get("changed").and_then(|c| c.as_u64()).unwrap_or(0),
                         });
                     } else {
                         e.remove("before");
@@ -997,6 +1005,117 @@ pub fn seen_change(path: &Path, server: &str, tool: &str) {
     }
 }
 
+/// A line of a server's log: (unix ms, level: "debug" "info" "warn" "error", text).
+pub type LogLine = (i64, String, String);
+
+/// What Claude Code logged about a server (it keeps a log per server and
+/// project: `…/claude-cli-nodejs/<project>/mcp-logs-<server>/*.txt`, a JSON
+/// list of {debug|info|error, timestamp}). The newest few files, oldest first.
+pub fn claude_server_log(home: &Path, dirs: &[PathBuf], server: &str) -> Vec<LogLine> {
+    let mut files: Vec<(SystemTime, PathBuf)> = Vec::new();
+    for base in [
+        home.join("Library/Caches/claude-cli-nodejs"),
+        home.join(".cache/claude-cli-nodejs"),
+    ] {
+        for d in dirs {
+            let dir = base.join(claude_key(d)).join(format!("mcp-logs-{server}"));
+            if let Ok(rd) = std::fs::read_dir(&dir) {
+                for e in rd.flatten() {
+                    if let Ok(t) = e.metadata().and_then(|m| m.modified()) {
+                        files.push((t, e.path()));
+                    }
+                }
+            }
+        }
+    }
+    files.sort();
+    let mut out = Vec::new();
+    for (_, f) in files.iter().rev().take(3).rev() {
+        let Ok(text) = std::fs::read_to_string(f) else {
+            continue;
+        };
+        out.extend(parse_server_log(&text));
+    }
+    out.sort_by_key(|l| l.0);
+    let skip = out.len().saturating_sub(2000);
+    out.split_off(skip)
+}
+
+pub fn parse_server_log(text: &str) -> Vec<LogLine> {
+    let Ok(Value::Array(items)) = serde_json::from_str::<Value>(text) else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|it| {
+            let ts = it
+                .get("timestamp")
+                .and_then(|t| t.as_str())
+                .and_then(parse_ts_ms)
+                .unwrap_or(0);
+            for level in ["error", "warn", "info", "debug"] {
+                if let Some(t) = it.get(level) {
+                    let text = match t {
+                        Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    };
+                    let level = if level == "debug" && text.to_lowercase().contains("warn") {
+                        "warn"
+                    } else {
+                        level
+                    };
+                    return Some((ts, level.to_string(), text));
+                }
+            }
+            None
+        })
+        .collect()
+}
+
+/// For each pid: (parent pid, cpu %, memory bytes, seconds running), from ps.
+pub fn proc_info(pids: &[i32]) -> HashMap<i32, (i32, f32, u64, u64)> {
+    let mut out = HashMap::new();
+    if pids.is_empty() {
+        return out;
+    }
+    let list: Vec<String> = pids.iter().map(|p| p.to_string()).collect();
+    let Ok(o) = std::process::Command::new("ps")
+        .args(["-o", "pid=,ppid=,%cpu=,rss=,etime=", "-p", &list.join(",")])
+        .output()
+    else {
+        return out;
+    };
+    for line in String::from_utf8_lossy(&o.stdout).lines() {
+        let w: Vec<&str> = line.split_whitespace().collect();
+        if w.len() < 5 {
+            continue;
+        }
+        let (Ok(pid), Ok(ppid)) = (w[0].parse::<i32>(), w[1].parse::<i32>()) else {
+            continue;
+        };
+        let cpu = w[2].replace(',', ".").parse().unwrap_or(0.0);
+        let rss = w[3].parse::<u64>().unwrap_or(0) * 1024;
+        out.insert(pid, (ppid, cpu, rss, etime_secs(w[4])));
+    }
+    out
+}
+
+/// ps's elapsed time, `[[dd-]hh:]mm:ss`, in seconds.
+pub fn etime_secs(s: &str) -> u64 {
+    let (days, rest) = match s.split_once('-') {
+        Some((d, r)) => (d.parse::<u64>().unwrap_or(0), r),
+        None => (0, s),
+    };
+    let parts: Vec<u64> = rest.split(':').map(|p| p.parse().unwrap_or(0)).collect();
+    let (h, m, sec) = match parts.as_slice() {
+        [h, m, s] => (*h, *m, *s),
+        [m, s] => (0, *m, *s),
+        [s] => (0, 0, *s),
+        _ => (0, 0, 0),
+    };
+    days * 86_400 + h * 3600 + m * 60 + sec
+}
+
 // ------------------------------------------------------------------ traffic
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1012,6 +1131,41 @@ pub struct Call {
     pub ms: Option<u64>,
     /// None: waiting; Some(true) ok; Some(false) failed.
     pub ok: Option<bool>,
+    /// The arguments as JSON, and the result text (the first 16 KB).
+    pub input: String,
+    pub output: String,
+    /// The log it came from (file name) and the line in it.
+    pub log: String,
+    pub line: usize,
+    /// The call's id in that log.
+    pub id: String,
+}
+
+/// Keep the first 16 KB of a result for the call view.
+fn clip(s: &str) -> String {
+    if s.len() <= 16 * 1024 {
+        return s.to_string();
+    }
+    let mut end = 16 * 1024;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
+}
+
+/// The text of a tool result (string, or content parts with text).
+fn result_text(v: &Value) -> String {
+    match v {
+        Value::String(s) => clip(s),
+        Value::Array(a) => clip(
+            &a.iter()
+                .filter_map(|x| x.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        Value::Null => String::new(),
+        other => clip(&other.to_string()),
+    }
 }
 
 /// Claude Code's folder name for a project path (`/a/b.c` → `-a-b-c`).
@@ -1087,7 +1241,14 @@ pub fn traffic(home: &Path, who: &[(String, String)], since: SystemTime) -> Vec<
                 continue;
             }
             if let Ok(t) = std::fs::read_to_string(&p) {
-                calls.extend(parse_log(&t, agent));
+                let name = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                calls.extend(parse_log(&t, agent).into_iter().map(|mut c| {
+                    c.log = name.clone();
+                    c
+                }));
             }
         }
     }
@@ -1099,7 +1260,7 @@ pub fn traffic(home: &Path, who: &[(String, String)], since: SystemTime) -> Vec<
 /// Tool uses named `mcp__<server>__<tool>` and their results, from one log.
 pub fn parse_log(text: &str, agent: &str) -> Vec<Call> {
     let mut calls: Vec<(String, Call, i64)> = Vec::new();
-    for line in text.lines() {
+    for (lineno, line) in text.lines().enumerate() {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             continue;
         };
@@ -1132,7 +1293,7 @@ pub fn parse_log(text: &str, agent: &str) -> Vec<Call> {
                         .unwrap_or("")
                         .to_string();
                     calls.push((
-                        id,
+                        id.clone(),
                         Call {
                             at,
                             agent: agent.to_string(),
@@ -1142,6 +1303,11 @@ pub fn parse_log(text: &str, agent: &str) -> Vec<Call> {
                             bytes: None,
                             ms: None,
                             ok: None,
+                            input: item.get("input").map(|i| i.to_string()).unwrap_or_default(),
+                            output: String::new(),
+                            log: String::new(),
+                            line: lineno + 1,
+                            id: id.clone(),
                         },
                         at_ms,
                     ));
@@ -1166,6 +1332,7 @@ pub fn parse_log(text: &str, agent: &str) -> Vec<Call> {
                             _ => 0,
                         };
                         c.bytes = Some(size);
+                        c.output = result_text(item.get("content").unwrap_or(&Value::Null));
                         c.ms = Some((at_ms - *start).max(0) as u64);
                         c.ok = Some(
                             !item
@@ -1232,7 +1399,14 @@ pub fn codex_traffic(
     walk_jsonl(&root, 4, since, &mut files);
     for f in files {
         if let Ok(t) = std::fs::read_to_string(&f) {
-            out.extend(parse_codex(&t, dirs, tool_server));
+            let name = f
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            out.extend(parse_codex(&t, dirs, tool_server).into_iter().map(|mut c| {
+                c.log = name.clone();
+                c
+            }));
         }
     }
     out
@@ -1262,7 +1436,7 @@ pub fn parse_codex(
 ) -> Vec<Call> {
     let mut agent: Option<String> = None;
     let mut open: Vec<(String, Call, i64)> = Vec::new();
-    for line in text.lines() {
+    for (lineno, line) in text.lines().enumerate() {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             continue;
         };
@@ -1298,6 +1472,14 @@ pub fn parse_codex(
                             bytes: None,
                             ms: None,
                             ok: None,
+                            input: inv
+                                .get("arguments")
+                                .map(|a| a.to_string())
+                                .unwrap_or_default(),
+                            output: String::new(),
+                            log: String::new(),
+                            line: lineno + 1,
+                            id: id.to_string(),
                         },
                         at_ms,
                     ));
@@ -1326,6 +1508,11 @@ pub fn parse_codex(
                             bytes: None,
                             ms: None,
                             ok: None,
+                            input: args.to_string(),
+                            output: String::new(),
+                            log: String::new(),
+                            line: lineno + 1,
+                            id: id.to_string(),
                         },
                         at_ms,
                     ));
@@ -1348,6 +1535,7 @@ pub fn parse_codex(
                     };
                     c.ok = Some(ok);
                     c.bytes = Some(result_size(&body));
+                    c.output = result_text(&body);
                     let d = p.get("duration").unwrap_or(&Value::Null);
                     c.ms = match (d.get("secs"), d.get("nanos")) {
                         (Some(s), n) => Some(
@@ -1359,6 +1547,7 @@ pub fn parse_codex(
                 } else if c.ok.is_none() {
                     let o = p.get("output").unwrap_or(&Value::Null);
                     c.bytes = Some(result_size(o));
+                    c.output = result_text(o);
                     c.ok = Some(true);
                     c.ms = Some((at_ms - *start).max(0) as u64);
                 }
@@ -1398,7 +1587,18 @@ pub fn gemini_traffic(
         walk_jsonl(&p.join("chats"), 0, since, &mut files);
         for f in files {
             if let Ok(t) = std::fs::read_to_string(&f) {
-                out.extend(parse_gemini(&t, &agent, tool_server));
+                let name = f
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                out.extend(
+                    parse_gemini(&t, &agent, tool_server)
+                        .into_iter()
+                        .map(|mut c| {
+                            c.log = name.clone();
+                            c
+                        }),
+                );
             }
         }
     }
@@ -1446,6 +1646,15 @@ pub fn parse_gemini(text: &str, agent: &str, tool_server: &BTreeMap<String, Stri
                     "error" | "cancelled" => Some(false),
                     _ => None,
                 },
+                input: tc.get("args").map(|a| a.to_string()).unwrap_or_default(),
+                output: tc.get("result").map(result_text).unwrap_or_default(),
+                log: String::new(),
+                line: 0,
+                id: tc
+                    .get("id")
+                    .and_then(|i| i.as_str())
+                    .unwrap_or("")
+                    .to_string(),
             });
         }
     }
@@ -2150,6 +2359,28 @@ for line in sys.stdin:
         assert_eq!(
             (g[0].server.as_str(), g[0].bytes, g[0].ok),
             ("github", Some(3), Some(true))
+        );
+    }
+    #[test]
+    fn server_logs_and_ps() {
+        let log = r#"[{"debug":"Starting connection","timestamp":"2026-11-05T20:27:41.000Z"},
+            {"debug":"Server stderr: GitHub MCP Server running on stdio","timestamp":"2026-11-05T20:27:41.500Z"},
+            {"error":"Connection failed: 401","timestamp":"2026-11-05T20:28:00.000Z"},
+            {"debug":"Warning: rate limit low","timestamp":"2026-11-05T20:29:00.000Z"}]"#;
+        let l = parse_server_log(log);
+        assert_eq!(l.len(), 4);
+        assert_eq!(l[2].1, "error");
+        assert_eq!(l[3].1, "warn");
+        assert!(l[1].2.contains("running on stdio"));
+        assert_eq!(etime_secs("02:14:05"), 2 * 3600 + 14 * 60 + 5);
+        assert_eq!(etime_secs("1-00:00:10"), 86_410);
+        assert_eq!(etime_secs("05:09"), 309);
+        let me = std::process::id() as i32;
+        let p = proc_info(&[me]);
+        assert!(
+            p.get(&me)
+                .is_some_and(|(ppid, _, rss, _)| *ppid > 0 && *rss > 0),
+            "{p:?}"
         );
     }
 }

@@ -392,6 +392,8 @@ pub enum BoardAct {
     /// pause / resume / stop, agent, with its sub-agents.
     Signal(&'static str, String),
     Merge(String),
+    /// Board 21 for that agent.
+    Review(String),
     /// Ask the planner (the goal is in the plan).
     Plan,
     Dispatch,
@@ -556,6 +558,11 @@ impl Board {
                             name,
                         )),
                     );
+                }
+            }
+            b"d" if self.view == View::Tree => {
+                if let Some(name) = self.selected_name(snap) {
+                    return (true, Some(BoardAct::Review(name)));
                 }
             }
             b"k" if self.view == View::Tree => {
@@ -805,7 +812,7 @@ impl Board {
                     Phase::Dispatched(_) => "tab tree / timeline / log · g new goal · esc close",
                 },
                 View::Tree => {
-                    "↑↓ agent · ⏎ go to it · p pause/resume branch · k stop branch · m merge its branch · tab view · esc close"
+                    "↑↓ agent · ⏎ go to it · p pause/resume branch · k stop branch · d review · m merge its branch · tab view · esc close"
                 }
                 View::Timeline => {
                     "↑↓ agent · ⏎ go to it · ━ working · ─ waiting · ⚑ approval · ┄ paused · tab view · esc close"

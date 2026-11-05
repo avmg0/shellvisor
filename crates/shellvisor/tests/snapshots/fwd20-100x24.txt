@@ -1,0 +1,24 @@
+ ▍shellvisor  ssh · port forwards                         ● 4 listening · ✖ 1 port busy   ##:##
+ ╭────────────────────────────╮ ╭ prod-web · FORWARDS ────────────────────────────────────────────╮
+ │ SESSIONS             saved │ │                                                                 │
+ │╭──────────────────────────╮│ │ type listen on       goes to          state            in / out │
+ ││ ● db-bastion   connected ││ │  L   localhost:5433  db.internal:5432 ● listening    840K / 12K │
+ ││ aditya@bastion.internal  ││ │  L   localhost:8080  localhost:80     ● listening    310K / 41K │
+ ││ 1 forward      50K moved ││ │  R   prod-web:9000   your localhost:… ● listening     22K / 96K │
+ │╰──────────────────────────╯│ │  D   localhost:1080  SOCKS proxy thr… ✖ port busy             — │
+ │╭──────────────────────────╮│ │      1080 is used by ssh -D (pid 9112) · p pick another port    │
+ ││ ○ pi-lab        not open ││ │                                                                 │
+ ││ pi@raspberrypi.local     ││ │ ⏎ open http://localhost:5433 · c copy address · x close forward │
+ ││ 1 opens with the session ││ ╰─────────────────────────────────────────────────────────────────╯
+ │╰──────────────────────────╯│ ╭─────────────────────────────────────────────────────────────────╮
+ │╭──────────────────────────╮│ │ Add a forward     to prod-web  │ What it means                  │
+ ││ ● prod-web     connected ││ │ type         L   R   D         │ same as                        │
+ ││ deploy@10.0.4.12         ││ │ listen on   ▕ localhost:6380▏  │ ╭────────────────────────────╮ │
+ ││ 4 forwards    1.3M moved ││ │ goes to     ▕ redis.internal▏  │ │ ssh -L 6380:redis.internal:│ │
+ │╰──────────────────────────╯│ │ keep        ☑ save in prod-web │ ╰────────────────────────────╯ │
+ │                            │ │  ⏎ Add   its own ssh · your se │ ~/.config/shellvisor/sessions.y│
+ │                            │ │                                │                                │
+ │                            │ │                                │                                │
+ │ ⏎ open · sv ssh NAME       │ │                                │                                │
+ ╰────────────────────────────╯ ╰─────────────────────────────────────────────────────────────────╯
+ a Add forward   x Close   ⏎ Open in browser   c Copy address   tab Sessions   esc Back   · sv ssh f

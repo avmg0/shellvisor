@@ -226,13 +226,35 @@ Totals: **17 boards · 111 items · 79 ✅ built · 11 ◐ partly or differently
 | Permissions grid allow / ask / never | ✅ | `.claude/settings.local.json` per agent |
 | Add a server: templates, form, JSON / TOML previews, Add & check | ✅ | scrolls when the window is short |
 
-## 19 – 21 · proposed (drawn, not built yet)
+## 19 · MCP call in full, the server, its log
 
-| Board | | Notes |
+| Item | | Notes |
 |---|---|---|
-| 19 · MCP call in full, server start / stop / restart, server log | ✗ | description-change warning already built (board 17, `d`) |
-| 20 · ssh port forwards per session | ✗ | `-L` / `-R` / `-D` already saved with `sv ssh save` |
-| 21 · Agent review: diff before merge, approve for a while | ✗ | merge from the agent tree already built (`m`) |
+| Call: when, agent, time, result, permission rule, log line | ✅ | first-byte time isn't in the logs |
+| Request and result as pretty JSON, more lines, ←→ calls | ✅ | |
+| Server: state, process (cpu, memory, up), command, started by | ✅ | |
+| s Stop / r Restart / k Kill, on a crash restart / leave stopped | ✅ | a crash re-runs the handshake check |
+| Server log: stderr / protocol / errors only, follow, search | ✅ | Claude Code's per-server log + calls + checks |
+| Description-change banner, d shows the change | ✅ | |
+
+## 20 · ssh port forwards
+
+| Item | | Notes |
+|---|---|---|
+| Sessions: connected / not open, tab, keepalive, forwards, traffic | ✅ | |
+| Forwards table: type, listen on, goes to, state, conns, in / out | ✅ | counted by Shellvisor's relay |
+| Busy port: who holds it, p picks another | ✅ | lsof + ps |
+| Add a forward: L / R / D, save, open on login, what it means, same as | ✅ | own ssh -N, no reconnect |
+
+## 21 · Agent review
+
+| Item | | Notes |
+|---|---|---|
+| Files with +/−, commits, checks | ✅ | tests from the agent's output, overlap, files you changed |
+| Diff: unified / side by side / whole file, n / N, ]f | ✅ | |
+| m Merge, S Squash, t Message, o files, e $EDITOR, x throw away | ✅ | x asks twice |
+| Approve for a while: 15 min / 1 hour / this task, kinds | ✅ | |
+| Opened from an agent column | ◐ | ctrl+] D (typing in a column goes to the agent), d on the agent board |
 
 ## Not on any board, built anyway
 

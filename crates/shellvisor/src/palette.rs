@@ -58,6 +58,10 @@ pub enum Role {
     Shell,
     /// The dark amber behind a waiting approval (#1f1a10).
     Warn,
+    /// Behind an added line in a diff (#132018).
+    AddBg,
+    /// Behind a removed line in a diff (#22151a).
+    DelBg,
 }
 
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -88,12 +92,17 @@ pub fn role(r: Role) -> Color {
         Role::Selection => (0x2c, 0x40, 0x5a),
         Role::Shell => SHELL,
         Role::Warn => (0x1f, 0x1a, 0x10),
+        Role::AddBg => (0x13, 0x20, 0x18),
+        Role::DelBg => (0x22, 0x15, 0x1a),
     };
     match MODE.load(Ordering::Relaxed) {
         2 => Color::Rgb(c.0, c.1, c.2),
         1 => match r {
             // too close to the page in 256 colours: no fill
             Role::Card | Role::ErrBg | Role::Shell => Color::Reset,
+            // the nearest greys lose the tint
+            Role::AddBg => Color::Indexed(22),
+            Role::DelBg => Color::Indexed(52),
             _ => Color::Indexed(nearest_256(c)),
         },
         _ => match r {
@@ -106,6 +115,8 @@ pub fn role(r: Role) -> Color {
             Role::Selection => Color::Indexed(24),
             Role::Shell => Color::Reset,
             Role::Warn => Color::Indexed(94),
+            Role::AddBg => Color::Indexed(22),
+            Role::DelBg => Color::Indexed(52),
         },
     }
 }

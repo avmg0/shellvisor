@@ -147,6 +147,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         || app.settings.is_some()
         || app.acts_list.is_some()
         || app.mcp.is_some()
+        || app.review.is_some()
+        || app.fwd.is_some()
         || !matches!(app.modal, Modal::None);
     let mut areas = crate::palette::Areas::default();
     if !covered {
@@ -594,6 +596,17 @@ fn draw_all(f: &mut Frame, app: &App) {
     if let Some(pal) = &app.palette {
         draw_palette(f, app, pal);
     }
+    if let Some(fs) = &app.fwd {
+        let area = app.screen;
+        f.render_widget(Clear, area);
+        fs.render(area, f.buffer_mut(), &app.fwd_snap());
+    }
+    if let Some(r) = &app.review {
+        // the whole window, like board 21
+        let area = app.screen;
+        f.render_widget(Clear, area);
+        r.render(area, f.buffer_mut());
+    }
     if let Some(m) = &app.mcp {
         // the whole window, like the design boards (own header and key strip)
         let r = app.screen;
@@ -657,6 +670,8 @@ fn draw_all(f: &mut Frame, app: &App) {
     let overlay = app.ctx.is_some()
         || app.tour.is_some()
         || app.mcp.is_some()
+        || app.review.is_some()
+        || app.fwd.is_some()
         || app.sessions.is_some()
         || app.palette.is_some()
         || app.table.is_some()

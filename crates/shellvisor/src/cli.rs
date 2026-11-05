@@ -263,6 +263,20 @@ pub fn run(args: &[String]) -> i32 {
             if rest.is_empty() && inside() {
                 return send_seq(request_sequence(&["ssh"]));
             }
+            // sv ssh forward [NAME]: the port forwards screen
+            if matches!(
+                rest.first().map(String::as_str),
+                Some("forward" | "forwards" | "fwd")
+            ) {
+                if !inside() {
+                    return not_running("ssh forward");
+                }
+                let mut req = vec!["ssh-forwards"];
+                if let Some(n) = rest.get(1) {
+                    req.push(n);
+                }
+                return send_seq(request_sequence(&req));
+            }
             // sv ssh all [NAME…]: every (or the named) saved session in one
             // tab, typing going to all of them
             if rest.first().map(String::as_str) == Some("all") {
@@ -492,6 +506,16 @@ fn agent(args: &[String]) -> i32 {
             | "emit" | "usage" | "budget"),
         ) => agent_bus(op, &args[1..]),
         Some("run") => agent_run(&args[1..]),
+        Some("diff" | "review") => {
+            let Some(name) = args.get(1) else {
+                eprintln!("sv agent diff NAME: which agent's work to review");
+                return 2;
+            };
+            if !inside() {
+                return not_running("agent diff");
+            }
+            send_seq(request_sequence(&["agent-review", name]))
+        }
         Some("board") => {
             let view = args.get(1).map(String::as_str).unwrap_or("tree");
             if crate::board::View::parse(view).is_none() {

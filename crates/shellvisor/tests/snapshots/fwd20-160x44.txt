@@ -1,0 +1,44 @@
+ ▍shellvisor  ssh · port forwards · tunnels to and from your sessions                                                 ● 4 listening · ✖ 1 port busy   ##:##
+ ╭───────────────────────────────────────╮ ╭ prod-web · FORWARDS ─────────────────────────────────────────────────────────────────────────────────────────────╮
+ │ SESSIONS        saved · ~/.ssh/config │ │                                                                                                                  │
+ │╭─────────────────────────────────────╮│ │ type listen on            goes to                                           state           conns       in / out │
+ ││ ● db-bastion · tab 3      connected ││ │  L   localhost:5433       db.internal:5432 · postgres                       ● listening         2     840K / 12K │
+ ││ aditya@bastion.internal             ││ │  L   localhost:8080       localhost:80 · http                               ● listening         0     310K / 41K │
+ ││ 1 forward                 50K moved ││ │  R   prod-web:9000        your localhost:3000 · dev server                  ● listening         1      22K / 96K │
+ │╰─────────────────────────────────────╯│ │  D   localhost:1080       SOCKS proxy through prod-web                      ✖ port busy         —              — │
+ │╭─────────────────────────────────────╮│ │      1080 is used by ssh -D (pid 9112) · p pick another port                                                     │
+ ││ ○ pi-lab                   not open ││ │                                                                                                                  │
+ ││ pi@raspberrypi.local                ││ │                                                                                                                  │
+ ││ 1 forward savopens with the session ││ │                                                                                                                  │
+ │╰─────────────────────────────────────╯│ │                                                                                                                  │
+ │╭─────────────────────────────────────╮│ │                                                                                                                  │
+ ││ ● prod-web · tab 2        connected ││ │                                                                                                                  │
+ ││ deploy@10.0.4.12 · keepalive 30 s   ││ │                                                                                                                  │
+ ││ 4 forwards               1.3M moved ││ │                                                                                                                  │
+ │╰─────────────────────────────────────╯│ │                                                                                                                  │
+ │╭─────────────────────────────────────╮│ │                                                                                                                  │
+ ││ ○ staging                  not open ││ │                                                                                                                  │
+ ││ deploy@staging.example.com          ││ │                                                                                                                  │
+ ││ no forwards                         ││ │                                                                                                                  │
+ │╰─────────────────────────────────────╯│ │                                                                                                                  │
+ │                                       │ │                                                                                                                  │
+ │                                       │ │                                                                                                                  │
+ │                                       │ │ ⏎ open http://localhost:5433 · c copy address · x close forward · space pause             saved with the session │
+ │                                       │ ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ │                                       │ ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+ │                                       │ │ Add a forward        to prod-web · no reconnect needed  │ What it means                                          │
+ │                                       │ │                                                         │ ╭────────────────────────────────────────────────────╮ │
+ │                                       │ │ type         Local  L   Remote  R   SOCKS  D            │ │ this computer localhost:6380                       │ │
+ │                                       │ │                                                         │ │    │  ssh tunnel to prod-web                       │ │
+ │                                       │ │ listen on   ▕ localhost:6380                         ▏  │ │    ▼                                               │ │
+ │                                       │ │ goes to     ▕ redis.internal:6379                    ▏  │ │ prod-web      → redis.internal:6379                │ │
+ │                                       │ │ keep        ☑ save in prod-web · ☐ open on login        │ ╰────────────────────────────────────────────────────╯ │
+ │                                       │ │                                                         │ same as                                                │
+ │                                       │ │  ⏎ Add   its own ssh · your session isn't touched       │ ╭────────────────────────────────────────────────────╮ │
+ │                                       │ │                                                         │ │ ssh -L 6380:redis.internal:6379 prod-web           │ │
+ │                                       │ │                                                         │ ╰────────────────────────────────────────────────────╯ │
+ │                                       │ │                                                         │ ~/.config/shellvisor/sessions.yaml · LocalForward      │
+ │                                       │ │                                                         │                                                        │
+ │ ⏎ open · sv ssh NAME                  │ │                                                         │                                                        │
+ ╰───────────────────────────────────────╯ ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ a Add forward   x Close   ⏎ Open in browser   c Copy address   tab Sessions   esc Back   · sv ssh forward · ctrl+] P
