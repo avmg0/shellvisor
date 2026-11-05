@@ -1394,3 +1394,65 @@ fn settings_colour_the_prompt_folder_and_ls_prints_a_table() {
         );
     }
 }
+
+#[test]
+fn mouse_selects_copies_and_right_click_menu() {
+    let mut s = Session::start_full("select");
+    s.wait_for("PROMPT>");
+    s.run("echo 'pick-me and https://example.org/page more'");
+    s.wait_for("pick-me and https");
+    s.pump(Duration::from_millis(300));
+    // screen position (1-based, as the mouse reports it) of some text
+    let find = |s: &Session, needle: &str| -> (u16, u16) {
+        let screen = s.screen.screen();
+        let (rows, cols) = screen.size();
+        for r in (0..rows).rev() {
+            let line: String = (0..cols)
+                .map(|c| screen.cell(r, c).map(|x| x.contents()).unwrap_or_default())
+                .collect();
+            if let Some(i) = line.find(needle) {
+                if !line.contains("echo") {
+                    return (line[..i].chars().count() as u16 + 1, r + 1);
+                }
+            }
+        }
+        panic!("{needle} not on screen:\n{}", s.text());
+    };
+    let (x, y) = find(&s, "pick-me");
+    // drag over "pick-me" and release: copied
+    s.send(&format!("\x1b[<0;{x};{y}M"));
+    s.send(&format!("\x1b[<32;{};{y}M", x + 3));
+    s.send(&format!("\x1b[<0;{};{y}m", x + 6));
+    s.wait_for("copied 7 characters");
+    // the selection is highlighted (not the default background)
+    let cell = s.screen.screen().cell(y - 1, x - 1).unwrap().bgcolor();
+    assert_ne!(cell, vt100::Color::Default, "selected text is highlighted");
+    // double-click a word
+    let (wx, wy) = find(&s, "more");
+    for _ in 0..2 {
+        s.send(&format!("\x1b[<0;{wx};{wy}M"));
+        s.send(&format!("\x1b[<0;{wx};{wy}m"));
+    }
+    s.wait_for("copied 4 characters");
+    s.pump(Duration::from_millis(600)); // a new click sequence
+    // triple-click: the whole line
+    for _ in 0..3 {
+        s.send(&format!("\x1b[<0;{wx};{wy}M"));
+        s.send(&format!("\x1b[<0;{wx};{wy}m"));
+    }
+    s.wait_for("copied 41 characters");
+    // right-click on the link: the menu, with Open link
+    let (lx, ly) = find(&s, "example.org");
+    s.send(&format!("\x1b[<2;{lx};{ly}M"));
+    s.wait_until("context menu", |t| {
+        t.contains("Copy")
+            && t.contains("Paste")
+            && t.contains("Open link")
+            && t.contains("Split stacked")
+    });
+    s.send("\x1b");
+    s.wait_until("menu closed", |t| !t.contains("Split stacked"));
+    // typing still goes to the shell
+    s.run("echo still-typing");
+    s.wait_for("still-typing");
+}

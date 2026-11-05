@@ -108,8 +108,9 @@ impl InputModes {
     /// mouse events itself (SGR encoding) so the wheel can scroll history.
     pub fn effective(self, capture: bool) -> Self {
         if capture && self.mouse == vt100::MouseProtocolMode::None {
+            // drags too, so text can be selected with the mouse
             InputModes {
-                mouse: vt100::MouseProtocolMode::PressRelease,
+                mouse: vt100::MouseProtocolMode::ButtonMotion,
                 encoding: vt100::MouseProtocolEncoding::Sgr,
                 ..self
             }

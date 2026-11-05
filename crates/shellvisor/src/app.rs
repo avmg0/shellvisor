@@ -202,6 +202,100 @@ enum Ev {
     Quit,
 }
 
+/// Text selected with the mouse in a shell pane: cells as (row, col) in
+/// the pane, `a` where the drag started, `b` where it is now.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Selection {
+    pub pane: PaneId,
+    pub a: (u16, u16),
+    pub b: (u16, u16),
+    /// The pane's scrollback offset when it was made (it goes if that changes).
+    pub scroll: usize,
+    pub dragging: bool,
+}
+
+impl Selection {
+    /// (first, last) cell, in reading order.
+    pub fn range(&self) -> ((u16, u16), (u16, u16)) {
+        if self.a <= self.b {
+            (self.a, self.b)
+        } else {
+            (self.b, self.a)
+        }
+    }
+
+    pub fn contains(&self, row: u16, col: u16) -> bool {
+        let (s, e) = self.range();
+        (row, col) >= s && (row, col) <= e
+    }
+}
+
+/// The right-click menu: where it opened and the highlighted item.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ContextMenu {
+    pub pane: PaneId,
+    pub x: u16,
+    pub y: u16,
+    pub sel: usize,
+    /// Pane-local cell that was right-clicked (for Open link).
+    pub cell: (u16, u16),
+}
+
+pub const CONTEXT_ITEMS: [&str; 6] = [
+    "Copy",
+    "Paste",
+    "Select all",
+    "Open link",
+    "Split side by side",
+    "Split stacked",
+];
+
+/// The URL (http, https, file, ftp) around `col` in `line`, if any.
+pub fn url_at(line: &str, col: usize) -> Option<String> {
+    let chars: Vec<char> = line.chars().collect();
+    let ok = |c: char| !c.is_whitespace() && !"\"'<>`|".contains(c);
+    if col >= chars.len() || !ok(chars[col]) {
+        return None;
+    }
+    let mut a = col;
+    while a > 0 && ok(chars[a - 1]) {
+        a -= 1;
+    }
+    let mut b = col;
+    while b + 1 < chars.len() && ok(chars[b + 1]) {
+        b += 1;
+    }
+    let word: String = chars[a..=b].iter().collect();
+    let start = ["https://", "http://", "file://", "ftp://"]
+        .iter()
+        .filter_map(|p| word.find(p))
+        .min()?;
+    let url = word[start..].trim_end_matches(['.', ',', ')', ']', ':', ';']);
+    (url.len() > 8).then(|| url.to_string())
+}
+
+/// A word for double-click selection: anything but spaces and brackets/quotes.
+fn word_char(c: char) -> bool {
+    !c.is_whitespace() && !"\"'()[]{}<>|`,;".contains(c)
+}
+
+/// The (first, last) column of the word at `col` in `line`.
+pub fn word_at(line: &str, col: usize) -> Option<(usize, usize)> {
+    let chars: Vec<char> = line.chars().collect();
+    if col >= chars.len() || !word_char(chars[col]) {
+        return None;
+    }
+    let mut a = col;
+    while a > 0 && word_char(chars[a - 1]) {
+        a -= 1;
+    }
+    let mut b = col;
+    while b + 1 < chars.len() && word_char(chars[b + 1]) {
+        b += 1;
+    }
+    Some((a, b))
+}
+
 /// A download/install that finished.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Finished {
@@ -365,6 +459,12 @@ pub struct App {
     pub editor: Option<crate::layouted::Editor>,
     /// The settings screen (alt+s).
     pub settings: Option<crate::settings::Screen>,
+    /// Text selected with the mouse.
+    pub sel: Option<Selection>,
+    /// The last left click (for double / triple click): when, where, how many.
+    click: Option<(Instant, PaneId, u16, u16, u8)>,
+    /// The right-click menu.
+    pub ctx: Option<ContextMenu>,
     /// The activity list (ctrl+] j, `sv activity`), with the selected row.
     pub acts_list: Option<usize>,
     /// Downloads and installs that finished, newest first.
@@ -465,6 +565,9 @@ pub fn run(opts: Options) -> io::Result<i32> {
         editor: None,
         settings: None,
         acts_list: None,
+        sel: None,
+        click: None,
+        ctx: None,
         done: std::collections::VecDeque::new(),
         toast_act: None,
         ui: crate::settings::Settings::load(),
@@ -1754,6 +1857,33 @@ impl App {
     fn on_input(&mut self, bytes: &[u8]) -> io::Result<()> {
         let mut forward: Vec<u8> = Vec::new();
         for key in keys::tokenize(bytes) {
+            if let Some(m) = self.ctx {
+                self.dirty = true;
+                match key {
+                    b"\x1b[A" | b"\x1bOA" => {
+                        self.ctx = Some(ContextMenu {
+                            sel: (m.sel + CONTEXT_ITEMS.len() - 1) % CONTEXT_ITEMS.len(),
+                            ..m
+                        })
+                    }
+                    b"\x1b[B" | b"\x1bOB" => {
+                        self.ctx = Some(ContextMenu {
+                            sel: (m.sel + 1) % CONTEXT_ITEMS.len(),
+                            ..m
+                        })
+                    }
+                    b"\r" => {
+                        self.ctx = None;
+                        self.context_act_menu(&m, m.sel)?;
+                    }
+                    _ => self.ctx = None,
+                }
+                continue;
+            }
+            if self.sel.is_some_and(|s| !s.dragging) && !key.starts_with(b"\x1b[<") {
+                self.sel = None;
+                self.dirty = true;
+            }
             if self.board.is_some() && self.modal == Modal::None {
                 self.board_key(key);
                 continue;
@@ -2039,6 +2169,144 @@ impl App {
                 let q = format!("{} ", shell_quote(&text));
                 self.type_in_shell_raw(&q);
             }
+        }
+        Ok(())
+    }
+
+    /// The selected text (trailing spaces trimmed on each line).
+    pub fn selection_text(&self) -> Option<String> {
+        let s = self.sel?;
+        let p = self.panes.get(&s.pane)?;
+        if p.pane.scroll() != s.scroll {
+            return None;
+        }
+        let ((r0, c0), (r1, c1)) = s.range();
+        let text = p.pane.screen().contents_between(r0, c0, r1, c1 + 1);
+        let text: Vec<&str> = text.lines().map(str::trim_end).collect();
+        let text = text.join("\n");
+        (!text.is_empty()).then_some(text)
+    }
+
+    /// Copy the selection to the clipboard (as soon as it's made, like
+    /// most terminals and tmux).
+    fn copy_selection(&mut self) {
+        if let Some(t) = self.selection_text() {
+            self.copy(&t);
+            let n = t.chars().count();
+            self.notice(format!(
+                "copied {n} character{} · right-click for paste",
+                if n == 1 { "" } else { "s" }
+            ));
+        }
+    }
+
+    /// Where the right-click menu is drawn.
+    pub fn context_rect(&self, m: &ContextMenu) -> Rect {
+        let w = 24u16;
+        let h = CONTEXT_ITEMS.len() as u16 + 2;
+        let x = m.x.min(self.screen.right().saturating_sub(w));
+        let y = if m.y + h <= self.screen.bottom() {
+            m.y
+        } else {
+            m.y.saturating_sub(h)
+        };
+        Rect::new(x, y, w.min(self.screen.width), h.min(self.screen.height))
+    }
+
+    /// The link under the right-click, if there is one.
+    pub fn context_link(&self, m: &ContextMenu) -> Option<String> {
+        let p = self.panes.get(&m.pane)?;
+        let cols = p.pane.screen().size().1;
+        let (r, c) = m.cell;
+        let line = p.pane.screen().contents_between(r, 0, r, cols);
+        url_at(&line, c as usize)
+    }
+
+    fn context_act_menu(&mut self, m: &ContextMenu, item: usize) -> io::Result<()> {
+        if item == 3 {
+            match self.context_link(m) {
+                Some(url) => {
+                    let opener = if cfg!(target_os = "macos") {
+                        "open"
+                    } else {
+                        "xdg-open"
+                    };
+                    let ok = std::process::Command::new(opener)
+                        .arg(&url)
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()
+                        .is_ok();
+                    self.notice(if ok {
+                        format!("opening {url}")
+                    } else {
+                        format!("couldn't run {opener}")
+                    });
+                }
+                None => self.notice("no link there — right-click on a URL to open it"),
+            }
+            return Ok(());
+        }
+        self.context_act(m.pane, item)
+    }
+
+    /// Do a right-click menu item for a pane.
+    fn context_act(&mut self, pane: PaneId, item: usize) -> io::Result<()> {
+        self.dirty = true;
+        match item {
+            0 => match self.selection_text() {
+                Some(_) => self.copy_selection(),
+                None => self.notice("nothing selected — drag over text to select it"),
+            },
+            1 => {
+                let Some(text) = crate::osinfo::paste_from_clipboard() else {
+                    self.notice("the clipboard is empty (or can't be read here)");
+                    return Ok(());
+                };
+                if let Some(p) = self.panes.get_mut(&pane) {
+                    // like a terminal's own paste: bracketed when the program asked
+                    let clean = text.replace("\x1b[201~", "");
+                    let bytes = if p.pane.screen().bracketed_paste() {
+                        format!("\x1b[200~{clean}\x1b[201~")
+                    } else {
+                        clean.replace("\r\n", "\r").replace('\n', "\r")
+                    };
+                    p.pane.write(bytes.as_bytes())?;
+                }
+                self.focus_pane(pane);
+            }
+            2 => {
+                if let Some(p) = self.panes.get(&pane) {
+                    let (rows, cols) = p.pane.screen().size();
+                    let last = (0..rows)
+                        .rev()
+                        .find(|r| {
+                            !p.pane
+                                .screen()
+                                .contents_between(*r, 0, *r, cols)
+                                .trim()
+                                .is_empty()
+                        })
+                        .unwrap_or(0);
+                    self.sel = Some(Selection {
+                        pane,
+                        a: (0, 0),
+                        b: (last, cols.saturating_sub(1)),
+                        scroll: p.pane.scroll(),
+                        dragging: false,
+                    });
+                    self.notice("selected · right-click → Copy");
+                }
+            }
+            4 | 5 => {
+                self.focus_pane(pane);
+                self.run_cmd(if item == 4 {
+                    Cmd::SplitRight
+                } else {
+                    Cmd::SplitDown
+                })?;
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -4021,6 +4289,51 @@ impl App {
             }
             return Ok(());
         }
+        // the right-click menu: a click on an item does it, anywhere else closes it
+        if let Some(m) = self.ctx {
+            if ev.is_left_press() || (!ev.release && ev.code & 0b11 == 2) {
+                self.ctx = None;
+                self.dirty = true;
+                let r = self.context_rect(&m);
+                if ev.is_left_press() && r.contains((ev.x, ev.y).into()) {
+                    let i = ev.y.saturating_sub(r.y + 1) as usize;
+                    if i < CONTEXT_ITEMS.len() {
+                        self.context_act_menu(&m, i)?;
+                    }
+                    return Ok(());
+                }
+                if ev.is_left_press() {
+                    return Ok(());
+                }
+            } else {
+                return Ok(());
+            }
+        }
+        // dragging out a selection: follow the mouse within that pane
+        if let Some(mut s) = self.sel.filter(|s| s.dragging) {
+            if let Some((_, _, inner)) = self.visible().into_iter().find(|(v, _, _)| *v == s.pane) {
+                let row = ev.y.clamp(inner.y, inner.bottom().saturating_sub(1)) - inner.y;
+                let col = ev.x.clamp(inner.x, inner.right().saturating_sub(1)) - inner.x;
+                if ev.is_motion() || ev.release {
+                    s.b = (row, col);
+                    if ev.release {
+                        s.dragging = false;
+                        if s.a == s.b {
+                            self.sel = None;
+                        } else {
+                            self.sel = Some(s);
+                            self.copy_selection();
+                        }
+                    } else {
+                        self.sel = Some(s);
+                    }
+                    self.dirty = true;
+                    return Ok(());
+                }
+            } else {
+                self.sel = None;
+            }
+        }
         // drag a divider between splits to resize them
         if let Some(path) = self.drag.clone() {
             if ev.release {
@@ -4101,6 +4414,73 @@ impl App {
             return Ok(());
         };
         let inside = inner.contains((ev.x, ev.y).into());
+        // select text with the mouse, right-click for the menu (with shift
+        // when the program in the pane uses the mouse itself)
+        let shift = ev.code & 4 != 0;
+        let program = p.pane.wants_mouse() && p.pane.scroll() == 0 && !shift;
+        if inside && !program && ev.wheel().is_none() && !ev.release && !ev.is_motion() {
+            let (row, col) = (ev.y - inner.y, ev.x - inner.x);
+            let scroll = p.pane.scroll();
+            match ev.code & 0b11 {
+                0 => {
+                    let n = match self.click {
+                        Some((t, pid, r, c, n))
+                            if pid == id
+                                && t.elapsed() < Duration::from_millis(450)
+                                && r == row
+                                && c.abs_diff(col) <= 1 =>
+                        {
+                            n % 3 + 1
+                        }
+                        _ => 1,
+                    };
+                    self.click = Some((Instant::now(), id, row, col, n));
+                    let cols = p.pane.screen().size().1;
+                    let line = p.pane.screen().contents_between(row, 0, row, cols);
+                    let sel = |a, b, dragging| Selection {
+                        pane: id,
+                        a,
+                        b,
+                        scroll,
+                        dragging,
+                    };
+                    match n {
+                        1 => self.sel = Some(sel((row, col), (row, col), true)),
+                        2 => {
+                            self.sel = word_at(&line, col as usize)
+                                .map(|(a, b)| sel((row, a as u16), (row, b as u16), false));
+                            self.copy_selection();
+                        }
+                        _ => {
+                            let end = line.trim_end().chars().count().max(1) as u16 - 1;
+                            self.sel = Some(sel((row, 0), (row, end), false));
+                            self.copy_selection();
+                        }
+                    }
+                    self.dirty = true;
+                    return Ok(());
+                }
+                2 => {
+                    self.ctx = Some(ContextMenu {
+                        pane: id,
+                        x: ev.x,
+                        y: ev.y,
+                        cell: (row, col),
+                        sel: if self.sel.is_some_and(|s| s.pane == id) {
+                            0
+                        } else {
+                            1
+                        },
+                    });
+                    self.dirty = true;
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+        let Some(p) = self.panes.get_mut(&id) else {
+            return Ok(());
+        };
         if inside && p.pane.wants_mouse() && p.pane.scroll() == 0 {
             if let Some(bytes) = ev.encode(
                 ev.x - inner.x,
@@ -4955,5 +5335,33 @@ mod tests {
     fn shrink_borders() {
         assert_eq!(shrink(Rect::new(0, 1, 80, 22)), Rect::new(1, 2, 78, 20));
         assert_eq!(shrink(Rect::new(0, 0, 2, 2)), Rect::new(0, 0, 2, 2));
+    }
+}
+
+#[cfg(test)]
+mod select_tests {
+    use super::*;
+
+    #[test]
+    fn words_and_links() {
+        let line = "see https://github.com/avmg0/shellvisor. and ~/PROJECTS/app now";
+        assert_eq!(word_at(line, 0), Some((0, 2)));
+        assert_eq!(word_at(line, 3), None, "a space");
+        let p = line.find("~/").unwrap();
+        assert_eq!(word_at(line, p + 3), Some((p, p + 13)));
+        assert_eq!(
+            url_at(line, 10).as_deref(),
+            Some("https://github.com/avmg0/shellvisor")
+        );
+        assert_eq!(url_at(line, 1), None);
+        let s = Selection {
+            pane: 1,
+            a: (3, 5),
+            b: (1, 2),
+            scroll: 0,
+            dragging: false,
+        };
+        assert_eq!(s.range(), ((1, 2), (3, 5)));
+        assert!(s.contains(2, 0) && s.contains(1, 2) && !s.contains(1, 1) && !s.contains(3, 6));
     }
 }

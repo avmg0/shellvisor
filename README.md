@@ -88,7 +88,7 @@ CPU (history and per core), memory, swap, disks, network, disk I/O, load, temper
 
 **Mac users:** `alt` shortcuts need your terminal to send Option as Alt — Terminal.app: *Settings → Profiles → Keyboard → Use Option as Meta key*; iTerm2: *Profiles → Keys → Left Option key → Esc+*. Shellvisor tells you if it's off. The leader key `ctrl+]` always works.
 
-**Selecting text:** Shellvisor uses the mouse wheel for scrollback. To select text with the mouse, hold **Option** (iTerm2) or turn off *View → Allow Mouse Reporting* (Terminal.app). Or set `mouse: false` in the config.
+**Selecting text and right-click:** drag in a pane to select its text (only that pane's, even with splits) — it's copied to the clipboard when you let go; double-click selects a word, triple-click a line. Right-click opens a menu: Copy, Paste, Select all, Open link (on a URL), Split side by side, Split stacked. When the program in a pane uses the mouse itself (vim with `mouse=a`, htop…), hold **shift** to select. Your terminal's own selection still works too: hold **fn** while dragging (Terminal.app) or **Option** (iTerm2), or set `mouse: false` in the config.
 
 ### `ls` as a table
 

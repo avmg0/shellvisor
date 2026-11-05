@@ -52,6 +52,8 @@ pub enum Role {
     Bar,
     ErrBg,
     ErrBorder,
+    /// Text selected with the mouse.
+    Selection,
 }
 
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -79,6 +81,7 @@ pub fn role(r: Role) -> Color {
         Role::Bar => BAR,
         Role::ErrBg => ERR_BG,
         Role::ErrBorder => ERR_BORDER,
+        Role::Selection => (0x2c, 0x40, 0x5a),
     };
     match MODE.load(Ordering::Relaxed) {
         2 => Color::Rgb(c.0, c.1, c.2),
@@ -94,6 +97,7 @@ pub fn role(r: Role) -> Color {
             Role::Track => Color::Indexed(237),
             Role::Bar => Color::Indexed(236),
             Role::ErrBorder => Color::Indexed(167),
+            Role::Selection => Color::Indexed(24),
         },
     }
 }

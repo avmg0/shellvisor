@@ -311,6 +311,21 @@ fn draw_all(f: &mut Frame, app: &App) {
             f.render_widget(pane_block_line(title, rest, is_focus), outer);
         }
         f.render_widget(TermView(p.pane.screen()), inner);
+        // text selected with the mouse
+        if let Some(sel) = app
+            .sel
+            .filter(|s| s.pane == id && s.scroll == p.pane.scroll())
+        {
+            let bg = crate::palette::role(crate::palette::Role::Selection);
+            let buf = f.buffer_mut();
+            for row in 0..inner.height {
+                for col in 0..inner.width {
+                    if sel.contains(row, col) {
+                        buf[(inner.x + col, inner.y + row)].set_bg(bg);
+                    }
+                }
+            }
+        }
         if p.pane.scroll() > 0 {
             badge(
                 f,
@@ -509,7 +524,11 @@ fn draw_all(f: &mut Frame, app: &App) {
         Modal::None => {}
     }
 
-    let overlay = app.table.is_some()
+    if let Some(m) = &app.ctx {
+        draw_context_menu(f, app, m);
+    }
+    let overlay = app.ctx.is_some()
+        || app.table.is_some()
         || app.board.is_some()
         || app.settings.is_some()
         || app.acts_list.is_some()
@@ -1496,6 +1515,45 @@ fn draw_activity(f: &mut Frame, app: &App, sel: usize) {
         Style::default().fg(FAINT),
         inner.width - 2,
     );
+}
+
+/// The right-click menu: Copy, Paste, Select all, Open link, splits.
+fn draw_context_menu(f: &mut Frame, app: &App, m: &crate::app::ContextMenu) {
+    use crate::palette::{Role, role};
+    let r = app.context_rect(m);
+    f.render_widget(Clear, r);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(role(Role::Stroke)))
+        .style(Style::default().bg(role(Role::Bar)));
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    let has_sel = app.selection_text().is_some();
+    let has_link = app.context_link(m).is_some();
+    let lines: Vec<Line> = crate::app::CONTEXT_ITEMS
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            let enabled = match i {
+                0 => has_sel,
+                3 => has_link,
+                _ => true,
+            };
+            let st = if i == m.sel {
+                Style::default()
+                    .bg(AMBER)
+                    .fg(INK)
+                    .add_modifier(Modifier::BOLD)
+            } else if enabled {
+                Style::default().fg(TEXT)
+            } else {
+                Style::default().fg(FAINT)
+            };
+            let w = inner.width as usize;
+            Line::styled(format!(" {:<w$}", item, w = w.saturating_sub(1)), st)
+        })
+        .collect();
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 #[cfg(test)]

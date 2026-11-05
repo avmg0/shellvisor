@@ -88,6 +88,31 @@ pub fn on_battery() -> Option<bool> {
 
 /// Copy text with the system clipboard tool, if there is one. Returns
 /// false when none worked (the caller then falls back to OSC 52).
+/// The system clipboard's text (pbpaste, wl-paste, xclip, xsel).
+pub fn paste_from_clipboard() -> Option<String> {
+    let tools: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
+        &[("pbpaste", &[])]
+    } else {
+        &[
+            ("wl-paste", &["-n"]),
+            ("xclip", &["-o", "-selection", "clipboard"]),
+            ("xsel", &["--clipboard", "--output"]),
+        ]
+    };
+    for (tool, args) in tools {
+        if let Ok(out) = std::process::Command::new(tool)
+            .args(*args)
+            .stderr(std::process::Stdio::null())
+            .output()
+        {
+            if out.status.success() {
+                return Some(String::from_utf8_lossy(&out.stdout).into_owned());
+            }
+        }
+    }
+    None
+}
+
 pub fn copy_to_clipboard(text: &str) -> bool {
     use std::io::Write;
     let tools: &[(&str, &[&str])] = if cfg!(target_os = "macos") {

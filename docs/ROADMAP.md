@@ -184,6 +184,8 @@ Deliverables
 - Flow pane as on board 2 (done) when it has room (≥ 90 × 26, cards ≥ 18 wide): the command box with state and keys, a card per stage with status, in / out / rate / kept, sparkline and latest line (new `sample` in the stats file), arrows with kept %, a throughput chart per lane over the last 30 s, the slowest stage and why, output and tagged stderr (repeats counted); the table stays for small panes.
 - Colours (done): Terminal.app on macOS 26+ counts as 24-bit; a "Colours" setting (auto / 24-bit / 256); in 256 colours the page, panel and shell backgrounds are left to the terminal (256 colours have no dark blue); `sv terminal-colors [undo]` sets Terminal.app's profile to the design's background and text.
 
+- Mouse selection and right-click menu (done): drag selects within a pane and copies on release (pbcopy / wl-copy / xclip, else OSC 52), double-click a word, triple-click a line, shift when the program uses the mouse; right-click menu Copy / Paste (bracketed when asked) / Select all / Open link / split right / split below. Shellvisor now asks the terminal for drags (1002) so the selection follows the mouse. Nothing the terminal does is taken away: fn-drag (Terminal.app), Option-drag (iTerm2) and `mouse: false` still work.
+
 Exit criteria: `sv resize` covered by an end-to-end test; a `v1.0.1` tag releases with one macOS job; CI and Release runs show no deprecation warnings.
 
 ---
