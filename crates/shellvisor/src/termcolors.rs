@@ -6,10 +6,18 @@
 //! background to the terminal, and this sets the terminal's own background
 //! to the design's `#0b0e12` (text `#d6dbe3`). The colours it replaces are
 //! saved first; `sv terminal-colors undo` puts them back.
+//!
+//! `sv terminal-colors profile` instead imports the whole Shellvisor profile
+//! (packaging/terminal/Shellvisor.terminal: background, text, the 16 ANSI
+//! colours, JetBrains Mono), which Terminal then offers in Settings →
+//! Profiles, where it can be made the default.
 
 use std::process::Command;
 
 const BACKUP: &str = "terminal-colors-backup.txt";
+
+/// The Shellvisor profile for Terminal.app (made by scripts/terminal-profile.py).
+const PROFILE: &[u8] = include_bytes!("../../../packaging/terminal/Shellvisor.terminal");
 
 /// AppleScript colours are 16-bit per channel.
 fn c16((r, g, b): (u8, u8, u8)) -> String {
@@ -66,6 +74,29 @@ pub fn run(args: &[String]) -> i32 {
     }
     let backup = crate::paths::state_dir().join(BACKUP);
     match args.first().map(String::as_str) {
+        Some("profile") => {
+            let path = std::env::temp_dir().join("Shellvisor.terminal");
+            if let Err(e) = std::fs::write(&path, PROFILE) {
+                eprintln!("sv terminal-colors: {}: {e}", path.display());
+                return 1;
+            }
+            // opening a .terminal file imports it (and opens a window with it)
+            match Command::new("open").arg(&path).status() {
+                Ok(st) if st.success() => {
+                    println!(
+                        "imported the Shellvisor profile into Terminal (a new window shows it)"
+                    );
+                    println!(
+                        "make it the default: Terminal → Settings → Profiles → Shellvisor → Default"
+                    );
+                    0
+                }
+                _ => {
+                    eprintln!("sv terminal-colors: couldn't open {}", path.display());
+                    1
+                }
+            }
+        }
         Some("undo") => {
             let Ok(saved) = std::fs::read_to_string(&backup) else {
                 eprintln!("sv terminal-colors: nothing to undo");
@@ -129,7 +160,7 @@ pub fn run(args: &[String]) -> i32 {
             }
         }
         Some(other) => {
-            eprintln!("sv terminal-colors: `{other}` — no argument, or undo");
+            eprintln!("sv terminal-colors: `{other}` — no argument, profile, or undo");
             2
         }
     }
@@ -149,5 +180,7 @@ mod tests {
         let s = set_script("{1, 2, 3}", "{4, 5, 6}", "{4, 5, 6}", "{7, 8, 9}");
         assert!(s.contains("set background color of s to {1, 2, 3}"));
         assert!(s.contains("selected tab of front window"));
+        let p = String::from_utf8_lossy(PROFILE);
+        assert!(p.contains("<string>Shellvisor</string>") && p.contains("BackgroundColor"));
     }
 }

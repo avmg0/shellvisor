@@ -22,7 +22,7 @@ usage:
   sv power on|off|auto            low-power mode (auto = on battery)
   sv theme light|dark|auto        colours of Shellvisor's own frames and panes
   sv autostart on|off|status      start Shellvisor when a terminal opens (zsh, bash)
-  sv terminal-colors [undo]       give Terminal.app the design's dark blue background
+  sv terminal-colors [profile|undo]  Terminal.app: the design's background (profile: import the Shellvisor profile)
   sv settings     folder colours (prompt, lists), ls as a table, table borders, theme (also alt+s)
   sv activity     downloads & installs: progress, speed, time left, cd / open (also ctrl+] j)
   sv agent new [claude|codex|gemini|aider] [--name N] [--here] ['first task']
