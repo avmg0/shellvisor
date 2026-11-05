@@ -25,6 +25,7 @@ usage:
   sv resize left|right|up|down [n] · sv resize 30% [width|height]   resize this pane
   sv ssh [NAME] · sv ssh save NAME user@host [-p port] [-i key] [-L spec] · sv ssh rm NAME
                                   saved connections (like PuTTY), opened in a new tab
+  sv serial [device] [baud]       serial console (routers, boards); no device: list ports · ~. quits
   sv log start [file] · sv log stop   save everything this pane shows to a text file
   sv terminal-colors [profile|undo]  Terminal.app: the design's background (profile: import the Shellvisor profile)
   sv settings     folder colours (prompt, lists), ls as a table, table borders, theme (also alt+s)
@@ -127,6 +128,52 @@ pub fn run(args: &[String]) -> i32 {
             send_seq(request_sequence(&req))
         }
         "autostart" => crate::autostart::run(&args[1..]),
+        "serial" => {
+            let rest: Vec<&str> = args[1..].iter().map(String::as_str).collect();
+            let (here, rest) = match rest.split_first() {
+                Some((&"--here", r)) => (true, r.to_vec()),
+                _ => (false, rest),
+            };
+            match rest.as_slice() {
+                [] => {
+                    let ports = crate::serial::ports();
+                    if ports.is_empty() {
+                        println!("no serial ports found (plug in the USB adapter or board)");
+                    }
+                    for p in ports {
+                        println!("{p}");
+                    }
+                    println!("open one: sv serial /dev/… [baud, default 115200] · ~. quits");
+                    0
+                }
+                [dev] | [dev, _] => {
+                    let baud: u32 = match rest.get(1).map(|b| b.parse()) {
+                        None => 115200,
+                        Some(Ok(b)) => b,
+                        Some(Err(_)) => {
+                            eprintln!("sv serial: the baud rate is a number (9600, 115200…)");
+                            return 2;
+                        }
+                    };
+                    if crate::serial::speed(baud).is_none() {
+                        eprintln!(
+                            "sv serial: {baud} isn't a baud rate this system knows (try 9600 or 115200)"
+                        );
+                        return 2;
+                    }
+                    if inside() && !here {
+                        // its own tab, named after the port
+                        send_seq(request_sequence(&["serial", dev, &baud.to_string()]))
+                    } else {
+                        crate::serial::console(dev, baud)
+                    }
+                }
+                _ => {
+                    eprintln!("sv serial [device] [baud]");
+                    2
+                }
+            }
+        }
         "ssh" => {
             let rest = &args[1..];
             // inside Shellvisor, plain `sv ssh` opens the picker

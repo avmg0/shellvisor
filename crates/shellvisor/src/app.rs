@@ -111,6 +111,7 @@ pub enum Tool {
     Files(FilesPane),
     System(SysPane),
     Flow(FlowPane),
+    Remote(crate::remote::RemotePane),
 }
 
 impl Tool {
@@ -121,6 +122,7 @@ impl Tool {
             Tool::System(s) if s.thermal => "thermal",
             Tool::System(_) => "system",
             Tool::Flow(_) => "flow",
+            Tool::Remote(_) => "remote",
         }
     }
 
@@ -129,6 +131,7 @@ impl Tool {
             Tool::Files(f) => f.title(),
             Tool::System(s) => s.title(),
             Tool::Flow(f) => f.title(),
+            Tool::Remote(r) => r.title(),
         }
     }
 }
@@ -190,6 +193,8 @@ enum Ev {
     Output(PaneId, Vec<u8>),
     PaneExit(PaneId, i32),
     Job(PaneId, Box<Done>),
+    /// Remote files: a listing, upload or download finished.
+    Remote(PaneId, Box<crate::remote::Done>),
     Battery(Option<bool>),
     /// A command-bar pipeline finished: (title, rows or error).
     TableReady(String, Box<Result<Data, String>>),
@@ -230,6 +235,121 @@ impl Selection {
         let (s, e) = self.range();
         (row, col) >= s && (row, col) <= e
     }
+}
+
+/// What a command palette entry does.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PaletteAct {
+    Cmd(Cmd),
+    Setting(usize),
+    Session(String, String),
+    Layout(String),
+    Tab(usize),
+}
+
+/// The command palette: query, selected row, every entry (label, detail, act).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Palette {
+    pub query: String,
+    pub sel: usize,
+    pub items: Vec<(String, String, PaletteAct)>,
+}
+
+impl Palette {
+    /// Entries matching the query, best first.
+    pub fn matches(&self) -> Vec<usize> {
+        let mut scored: Vec<(i64, usize)> = self
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(i, (label, detail, _))| {
+                fuzzy(&self.query, label)
+                    .map(|s| s + 50)
+                    .or_else(|| fuzzy(&self.query, detail))
+                    .map(|s| (s, i))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        scored.into_iter().map(|(_, i)| i).collect()
+    }
+}
+
+/// Fuzzy match: every query letter in order. Higher is better (words that
+/// start with the letters, letters close together).
+pub fn fuzzy(query: &str, text: &str) -> Option<i64> {
+    if query.is_empty() {
+        return Some(0);
+    }
+    let t: Vec<char> = text.to_lowercase().chars().collect();
+    let mut score = 0i64;
+    let mut ti = 0usize;
+    let mut last: Option<usize> = None;
+    for qc in query.to_lowercase().chars().filter(|c| !c.is_whitespace()) {
+        let found = (ti..t.len()).find(|&i| t[i] == qc)?;
+        let word_start = found == 0 || !t[found - 1].is_alphanumeric();
+        score += if word_start { 10 } else { 1 };
+        if let Some(l) = last {
+            score -= (found - l - 1).min(10) as i64;
+        }
+        last = Some(found);
+        ti = found + 1;
+    }
+    if t.iter().collect::<String>().contains(&query.to_lowercase()) {
+        score += 30;
+    }
+    Some(score)
+}
+
+/// A command that failed: its pane, text, exit code, time and last lines.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FailCard {
+    pub pane: PaneId,
+    pub cmd: String,
+    pub code: i32,
+    pub took: u64,
+    pub lines: Vec<String>,
+}
+
+/// How long a failed-command card stays up.
+pub const FAIL_CARD: Duration = Duration::from_secs(15);
+
+/// Programs whose non-zero exit isn't an "error" worth a card.
+fn no_card_for(cmd: &str) -> bool {
+    let first = cmd
+        .split_whitespace()
+        .find(|w| !w.contains('=') && *w != "sudo")
+        .unwrap_or("");
+    let prog = first.rsplit('/').next().unwrap_or(first);
+    matches!(
+        prog,
+        "vi" | "vim"
+            | "nvim"
+            | "less"
+            | "more"
+            | "man"
+            | "nano"
+            | "top"
+            | "htop"
+            | "btop"
+            | "ssh"
+            | "mosh"
+            | "python"
+            | "python3"
+            | "node"
+            | "irb"
+            | "watch"
+            | "tail"
+            | "fzf"
+            | "grep"
+            | "rg"
+            | "diff"
+            | "test"
+            | "["
+            | "false"
+            | "exit"
+            | "sv"
+            | "shellvisor"
+    )
 }
 
 /// Find in a pane's scrollback (ctrl+] /).
@@ -520,6 +640,12 @@ pub struct App {
     pub ctx: Option<ContextMenu>,
     /// Find in a pane's scrollback.
     pub find: Option<Find>,
+    /// The command palette (ctrl+] space).
+    pub palette: Option<Palette>,
+    /// Shells that get what you type (broadcast, per tab).
+    pub broadcast: std::collections::HashSet<PaneId>,
+    /// The last failed command, while its card shows.
+    pub fail: Option<(FailCard, Instant)>,
     /// The saved-sessions picker: selected row, (name, address, command).
     pub sessions: Option<(usize, Vec<crate::sessions::Entry>)>,
     /// The activity list (ctrl+] j, `sv activity`), with the selected row.
@@ -627,6 +753,9 @@ pub fn run(opts: Options) -> io::Result<i32> {
         ctx: None,
         find: None,
         sessions: None,
+        palette: None,
+        broadcast: std::collections::HashSet::new(),
+        fail: None,
         done: std::collections::VecDeque::new(),
         toast_act: None,
         ui: crate::settings::Settings::load(),
@@ -833,7 +962,7 @@ impl App {
             Some(t) => Leaf {
                 cwd: match t {
                     Tool::Files(f) => f.root.display().to_string(),
-                    Tool::System(_) | Tool::Flow(_) => String::new(),
+                    Tool::System(_) | Tool::Flow(_) | Tool::Remote(_) => String::new(),
                 },
                 tool: Some(t.kind().to_string()),
             },
@@ -1169,6 +1298,13 @@ impl App {
                     Ev::Bus(req, reply) => self.on_bus(req, reply),
                     Ev::Plan(run, out) => self.on_plan(run, out),
                     Ev::Notice(msg) => self.notice(msg),
+                    Ev::Remote(id, done) => {
+                        if let Some(Tool::Remote(r)) = self.tools.get_mut(&id) {
+                            let jobs = r.done(*done);
+                            self.run_remote(id, jobs);
+                            self.dirty = true;
+                        }
+                    }
                     Ev::TableReady(title, res) => {
                         self.bar_running = None;
                         match *res {
@@ -1201,6 +1337,14 @@ impl App {
             self.sync_modes(&mut term)?;
             self.sync_tools();
 
+            if self
+                .fail
+                .as_ref()
+                .is_some_and(|(_, at)| at.elapsed() >= FAIL_CARD)
+            {
+                self.fail = None;
+                self.dirty = true;
+            }
             if self
                 .toast_act
                 .as_ref()
@@ -1540,7 +1684,7 @@ impl App {
                     }
                     out.redraw = true;
                 }
-                Some(Tool::System(_)) => {}
+                Some(Tool::System(_)) | Some(Tool::Remote(_)) => {}
                 None => {}
             }
             self.apply(id, out);
@@ -1634,6 +1778,7 @@ impl App {
             let due = match &self.tools[&id] {
                 Tool::Flow(fp) => fp.due_in(self.low_power),
                 Tool::System(sp) => sp.due_in(self.low_power),
+                Tool::Remote(_) => continue,
                 Tool::Files(_) if self.low_power => continue,
                 Tool::Files(f) => f.poll_due_in(),
             };
@@ -1644,6 +1789,9 @@ impl App {
         }
         if let Some((d, at)) = &self.toast_act {
             t = t.min((*at + toast_life(d)).saturating_duration_since(Instant::now()));
+        }
+        if let Some((_, at)) = &self.fail {
+            t = t.min((*at + FAIL_CARD).saturating_duration_since(Instant::now()));
         }
         if self.session_dirty {
             t = t.min((self.last_save + SAVE_EVERY).saturating_duration_since(Instant::now()));
@@ -1757,6 +1905,9 @@ impl App {
             }
             ShellEvent::CommandStarted => {
                 p.reconnect = None;
+                if self.fail.as_ref().is_some_and(|(c, _)| c.pane == id) {
+                    self.fail = None;
+                }
                 p.started = Some(Instant::now());
                 p.running = true;
                 p.activity = activity::start(&p.command, Path::new(&p.cwd));
@@ -1801,6 +1952,45 @@ impl App {
                     });
                 let first = p.command.split_whitespace().next().unwrap_or("");
                 let dropped = (first == "ssh" || first == "mosh") && code == Some(255);
+                // a failed command: its last lines, for the card
+                let card = match code {
+                    Some(c)
+                        if c != 0
+                            && ![130, 131, 141, 143, 146, 148].contains(&c)
+                            && !p.command.trim().is_empty()
+                            && p.agent.is_none()
+                            && p.activity.is_none()
+                            && !no_card_for(&p.command) =>
+                    {
+                        let screen = p.pane.screen();
+                        let (crow, ccol) = screen.cursor_position();
+                        let cols = screen.size().1;
+                        let cmd = p.command.trim().to_string();
+                        // the new prompt may already be on the cursor's row
+                        let end = if ccol > 0 { crow } else { crow + 1 };
+                        let mut lines: Vec<String> = (0..end)
+                            .rev()
+                            .map(|r| {
+                                screen
+                                    .contents_between(r, 0, r, cols)
+                                    .trim_end()
+                                    .to_string()
+                            })
+                            .filter(|l| !l.trim().is_empty())
+                            .take_while(|l| !l.ends_with(&cmd))
+                            .take(5)
+                            .collect();
+                        lines.reverse();
+                        Some(FailCard {
+                            pane: id,
+                            cmd,
+                            code: c,
+                            took: p.started.map(|s| s.elapsed().as_secs()).unwrap_or(0),
+                            lines,
+                        })
+                    }
+                    _ => None,
+                };
                 if dropped {
                     p.reconnect = Some(p.command.clone());
                 }
@@ -1812,6 +2002,9 @@ impl App {
                 self.dirty = true;
                 if dropped {
                     self.notice("the ssh connection closed · ctrl+] R (or right-click) reconnects");
+                }
+                if let Some(c) = card.filter(|_| self.ui.fail_card) {
+                    self.fail = Some((c, Instant::now()));
                 }
                 if let Some(a) = done {
                     let ok = matches!(code, Some(0) | None);
@@ -1932,6 +2125,11 @@ impl App {
     fn on_input(&mut self, bytes: &[u8]) -> io::Result<()> {
         let mut forward: Vec<u8> = Vec::new();
         for key in keys::tokenize(bytes) {
+            if self.palette.is_some() && self.modal == Modal::None {
+                self.flush_forward(&mut forward)?;
+                self.palette_key(key)?;
+                continue;
+            }
             if self.sessions.is_some() && self.modal == Modal::None {
                 self.flush_forward(&mut forward)?;
                 self.sessions_key(key)?;
@@ -2104,6 +2302,22 @@ impl App {
                     } else if let (Some(d), b"o") = (&offer, key) {
                         self.flush_forward(&mut forward)?;
                         self.done_open(d)?;
+                    } else if let (Some((card, _)), b"c" | b"r") = (self.fail.clone(), key) {
+                        self.flush_forward(&mut forward)?;
+                        if key == b"c" {
+                            let mut text = format!("$ {}\n", card.cmd);
+                            text.push_str(&card.lines.join("\n"));
+                            self.copy(&text);
+                            self.notice("copied the command and its last lines");
+                        } else if let Some(p) = self.panes.get_mut(&card.pane) {
+                            if p.running {
+                                self.notice("the shell is busy — wait for the command to finish");
+                            } else {
+                                let _ = p.pane.write(format!("\x05\x15{}\r", card.cmd).as_bytes());
+                                self.fail = None;
+                                self.focus_pane(card.pane);
+                            }
+                        }
                     } else if let Some(cmd) = keys::after_leader(key) {
                         self.flush_forward(&mut forward)?;
                         self.run_cmd(cmd)?;
@@ -2254,6 +2468,204 @@ impl App {
                 let q = format!("{} ", shell_quote(&text));
                 self.type_in_shell_raw(&q);
             }
+        }
+        Ok(())
+    }
+
+    fn run_remote(&self, id: PaneId, jobs: Vec<crate::remote::Job>) {
+        for job in jobs {
+            let tx = self.tx.clone();
+            let _ = spawn_thread("remote".into(), move || {
+                let _ = tx.send(Ev::Remote(id, Box::new(crate::remote::run(job))));
+            });
+        }
+    }
+
+    /// A remote files pane for the ssh session in this tab (the focused
+    /// shell, else any shell in the tab running or just out of ssh).
+    fn open_remote(&mut self) -> io::Result<()> {
+        let tab = self.active;
+        let mut ids = vec![self.focused()];
+        ids.extend(self.tabs[tab].root.panes());
+        let found = ids.iter().find_map(|id| {
+            let p = self.panes.get(id)?;
+            let cmd = if p.running {
+                Some(p.command.clone())
+            } else {
+                p.reconnect.clone()
+            }?;
+            crate::remote::ssh_target(&cmd).map(|a| (*id, a, PathBuf::from(&p.cwd)))
+        });
+        let Some((shell, args, local)) = found else {
+            self.notice("no ssh session in this tab — connect first (sv ssh NAME, or ssh host)");
+            return Ok(());
+        };
+        if self.view == View::Basic {
+            self.view = View::Full;
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        let (pane, job) = crate::remote::RemotePane::new(args, local);
+        self.tools.insert(id, Tool::Remote(pane));
+        self.run_remote(id, vec![job]);
+        let t = &mut self.tabs[tab];
+        t.root.split_at(shell, Axis::Horizontal, id, 0.55);
+        t.focus = id;
+        t.zoomed = false;
+        self.relayout();
+        Ok(())
+    }
+
+    fn toggle_broadcast(&mut self) {
+        let tab = self.active;
+        let shells: Vec<PaneId> = self.tabs[tab]
+            .root
+            .panes()
+            .into_iter()
+            .filter(|id| self.panes.contains_key(id))
+            .collect();
+        if shells.len() < 2 {
+            self.notice("broadcast needs two or more shells in this tab — split one with alt+\\");
+            return;
+        }
+        if shells.iter().all(|id| self.broadcast.contains(id)) {
+            for id in &shells {
+                self.broadcast.remove(id);
+            }
+            self.notice("broadcast off");
+        } else {
+            self.broadcast.extend(shells.iter().copied());
+            self.notice(format!(
+                "broadcast on: what you type goes to all {} shells in this tab · ctrl+] B stops",
+                shells.len()
+            ));
+        }
+        self.dirty = true;
+    }
+
+    fn open_palette(&mut self) {
+        let mut items: Vec<(String, String, PaletteAct)> = Vec::new();
+        for (name, cmd, _keys, desc) in keys::ACTIONS {
+            if desc.is_empty() || matches!(cmd, Cmd::Leader | Cmd::Palette) {
+                continue;
+            }
+            let label = desc.split(" (also").next().unwrap_or(desc);
+            let mut c = label.chars();
+            let label = match c.next() {
+                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                None => String::new(),
+            };
+            let shown = self.opts.keymap.shown(name).to_string();
+            items.push((label, shown, PaletteAct::Cmd(*cmd)));
+        }
+        for (i, row) in crate::settings::row_names().iter().enumerate() {
+            items.push((
+                format!("Setting: {row}"),
+                "settings".into(),
+                PaletteAct::Setting(i),
+            ));
+        }
+        for (name, addr, cmd) in crate::sessions::entries() {
+            items.push((
+                format!("Connect: {name}"),
+                addr,
+                PaletteAct::Session(name, cmd),
+            ));
+        }
+        for p in keys::Preset::ALL {
+            items.push((
+                format!("Layout: {}", p.name()),
+                "preset".into(),
+                PaletteAct::Cmd(Cmd::Preset(p)),
+            ));
+        }
+        for name in crate::layouted::saved_layouts() {
+            items.push((
+                format!("Layout: {name}"),
+                "saved".into(),
+                PaletteAct::Layout(name),
+            ));
+        }
+        for i in 0..self.tabs.len() {
+            let label = self.tabs[i]
+                .name
+                .clone()
+                .or_else(|| {
+                    self.panes
+                        .get(&self.tabs[i].focus)
+                        .map(|p| format!("{} · {}", p.shell, crate::ui::short_path(&p.cwd)))
+                })
+                .unwrap_or_default();
+            items.push((
+                format!("Tab {}: {label}", i + 1),
+                "go to tab".into(),
+                PaletteAct::Tab(i),
+            ));
+        }
+        for dev in crate::serial::ports() {
+            items.push((
+                format!("Serial: {dev}"),
+                "115200 baud".into(),
+                PaletteAct::Session(
+                    format!("serial · {}", dev.rsplit('/').next().unwrap_or(&dev)),
+                    format!("sv serial --here {} 115200", shell_quote(&dev)),
+                ),
+            ));
+        }
+        self.palette = Some(Palette {
+            query: String::new(),
+            sel: 0,
+            items,
+        });
+        self.dirty = true;
+    }
+
+    fn palette_key(&mut self, key: &[u8]) -> io::Result<()> {
+        self.dirty = true;
+        let Some(pal) = self.palette.as_mut() else {
+            return Ok(());
+        };
+        let n = pal.matches().len();
+        match key {
+            b"\x1b" => self.palette = None,
+            b"\x1b[A" | b"\x1bOA" => pal.sel = pal.sel.saturating_sub(1),
+            b"\x1b[B" | b"\x1bOB" => pal.sel = (pal.sel + 1).min(n.saturating_sub(1)),
+            [0x7f] | [0x08] => {
+                pal.query.pop();
+                pal.sel = 0;
+            }
+            [0x15] => {
+                pal.query.clear();
+                pal.sel = 0;
+            }
+            b"\r" => {
+                let m = pal.matches();
+                let Some(&i) = m.get(pal.sel) else {
+                    return Ok(());
+                };
+                let act = pal.items[i].2.clone();
+                self.palette = None;
+                match act {
+                    PaletteAct::Cmd(c) => self.run_cmd(c)?,
+                    PaletteAct::Setting(row) => {
+                        let mut sc = crate::settings::Screen::new();
+                        sc.sel = row;
+                        self.settings = Some(sc);
+                    }
+                    PaletteAct::Session(name, cmd) => self.open_session_tab(&name, &cmd)?,
+                    PaletteAct::Layout(name) => {
+                        if let Err(e) = self.open_layout(&name) {
+                            self.notice(format!("layout: {e}"));
+                        }
+                    }
+                    PaletteAct::Tab(t) => self.switch_tab(t),
+                }
+            }
+            k if k.first().is_some_and(|b| *b >= 0x20) && !k.starts_with(b"\x1b") => {
+                pal.query.push_str(&String::from_utf8_lossy(k));
+                pal.sel = 0;
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -4615,6 +5027,12 @@ impl App {
                 }
                 return;
             }
+            Some(Tool::Remote(r)) => {
+                let jobs = r.key(key);
+                self.run_remote(id, jobs);
+                self.dirty = true;
+                return;
+            }
             None => return,
         };
         self.apply(id, out);
@@ -4625,12 +5043,25 @@ impl App {
             return Ok(());
         }
         let id = self.input_target();
-        if let Some(p) = self.panes.get_mut(&id) {
-            if p.pane.scroll() > 0 {
-                p.pane.scroll_by(isize::MIN / 2);
-                self.dirty = true;
+        // broadcast: the same keys to every shell in this tab that has it on
+        let mut targets = vec![id];
+        if self.broadcast.contains(&id) {
+            if let Some(t) = self.tab_of(id) {
+                for other in self.tabs[t].root.panes() {
+                    if other != id && self.broadcast.contains(&other) {
+                        targets.push(other);
+                    }
+                }
             }
-            p.pane.write(buf)?;
+        }
+        for t in targets {
+            if let Some(p) = self.panes.get_mut(&t) {
+                if p.pane.scroll() > 0 {
+                    p.pane.scroll_by(isize::MIN / 2);
+                    self.dirty = true;
+                }
+                p.pane.write(buf)?;
+            }
         }
         buf.clear();
         Ok(())
@@ -4970,6 +5401,15 @@ impl App {
                         "sv resize: nothing to resize here (one pane, or already at the limit)",
                     );
                 }
+                Ok(())
+            }
+            ["serial", dev, baud] => {
+                let name = dev.rsplit('/').next().unwrap_or(dev).to_string();
+                let cmd = format!("sv serial --here {} {baud}", shell_quote(dev));
+                self.open_session_tab(&format!("serial · {name}"), &cmd)
+            }
+            ["palette"] => {
+                self.open_palette();
                 Ok(())
             }
             ["ssh"] => {
@@ -5650,6 +6090,9 @@ impl App {
                 self.clear_pane(id);
             }
             Cmd::Sessions => self.open_sessions(),
+            Cmd::Palette => self.open_palette(),
+            Cmd::Broadcast => self.toggle_broadcast(),
+            Cmd::RemoteFiles => self.open_remote()?,
             Cmd::Reconnect => {
                 let id = self.focused();
                 self.reconnect(id);
@@ -5848,5 +6291,9 @@ mod select_tests {
             "a capital: exact case"
         );
         assert!(find_in(&lines, "").is_empty());
+        assert!(fuzzy("spl", "Split side by side").is_some());
+        assert!(fuzzy("xyz", "Split").is_none());
+        assert!(fuzzy("sb", "Split side by side").is_some());
+        assert!(fuzzy("split", "Split stacked").unwrap() > fuzzy("split", "sxpxlxixt").unwrap());
     }
 }

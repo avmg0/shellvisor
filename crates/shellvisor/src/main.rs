@@ -32,6 +32,8 @@ mod mouse;
 mod osinfo;
 mod palette;
 mod paths;
+mod remote;
+mod serial;
 mod session;
 mod sessionlog;
 mod sessions;

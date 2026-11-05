@@ -220,6 +220,13 @@ fn draw_all(f: &mut Frame, app: &App) {
                 Tool::Files(fp) => fp.render(inner, f.buffer_mut(), is_focus),
                 Tool::System(sp) => sp.render(inner, f.buffer_mut(), app.low_power),
                 Tool::Flow(fp) => fp.render(inner, f.buffer_mut()),
+                Tool::Remote(r) => {
+                    let folder = match crate::settings::color_index(&app.ui.list_folder) {
+                        Some(c) => Style::default().fg(Color::Indexed(c)),
+                        None => Style::default(),
+                    };
+                    r.render(inner, f.buffer_mut(), folder, is_focus)
+                }
             }
             continue;
         }
@@ -310,6 +317,15 @@ fn draw_all(f: &mut Frame, app: &App) {
             }
             if p.log.is_some() {
                 rest.push(Span::styled("· ⏺ logging ", Style::default().fg(RED)));
+            }
+            if app.broadcast.contains(&id) {
+                rest.push(Span::styled(
+                    " ⇶ broadcast ",
+                    Style::default()
+                        .fg(INK)
+                        .bg(AMBER)
+                        .add_modifier(Modifier::BOLD),
+                ));
             }
             let mut block = pane_block_line(title, rest, is_focus);
             if let Some(h) = stuck_hint(p) {
@@ -502,6 +518,11 @@ fn draw_all(f: &mut Frame, app: &App) {
                         format!(" ctrl+] → o show {name} in files ·")
                     }
                 });
+            let offer = offer.or_else(|| {
+                app.fail
+                    .as_ref()
+                    .map(|_| " ctrl+] → c copy the error · r run it again ·".to_string())
+            });
             let hint = match offer {
                 Some(o) => format!("{o}{}", keys::LEADER_HINT.trim_start_matches(" ctrl+] →")),
                 None => keys::LEADER_HINT.to_string(),
@@ -561,6 +582,14 @@ fn draw_all(f: &mut Frame, app: &App) {
     if let Some((sel, list)) = &app.sessions {
         draw_sessions(f, app, *sel, list);
     }
+    if let Some((card, _)) = &app.fail {
+        if app.toast_act.is_none() {
+            draw_fail_card(f, app, card);
+        }
+    }
+    if let Some(pal) = &app.palette {
+        draw_palette(f, app, pal);
+    }
     if let Some(fd) = &app.find {
         let row = status.unwrap_or(Rect::new(
             0,
@@ -598,6 +627,7 @@ fn draw_all(f: &mut Frame, app: &App) {
     }
     let overlay = app.ctx.is_some()
         || app.sessions.is_some()
+        || app.palette.is_some()
         || app.table.is_some()
         || app.board.is_some()
         || app.settings.is_some()
@@ -740,7 +770,12 @@ fn tab_label(app: &App, i: usize) -> (String, Option<(String, Color)>) {
     } else {
         None
     };
-    (format!("{} {shell} · {what}{split}", i + 1), icon)
+    let cast = if ids.iter().any(|id| app.broadcast.contains(id)) {
+        " ⇶"
+    } else {
+        ""
+    };
+    (format!("{} {shell} · {what}{split}{cast}", i + 1), icon)
 }
 
 /// Tab index under screen column `x` (for mouse clicks).
@@ -1697,6 +1732,121 @@ fn draw_sessions(f: &mut Frame, app: &App, sel: usize, list: &[(String, String, 
         Style::default().fg(FAINT),
     ));
     f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The failed-command card: exit code, the command, its last lines, and
+/// what you can do (copy the error, run it again).
+fn draw_fail_card(f: &mut Frame, app: &App, c: &crate::app::FailCard) {
+    use crate::palette::{Role, role};
+    // only over the pane the command ran in, when it's on screen
+    let Some((_, _, content)) = app.visible().into_iter().find(|(id, _, _)| *id == c.pane) else {
+        return;
+    };
+    let w = content.width.saturating_sub(2).min(76);
+    let h = c.lines.len() as u16 + 4;
+    if w < 30 || content.height < h + 1 {
+        return;
+    }
+    let r = Rect::new(content.right() - w, content.bottom() - h, w, h);
+    f.render_widget(Clear, r);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(role(Role::ErrBorder)))
+        .style(Style::default().bg(role(Role::ErrBg)));
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    let iw = inner.width as usize;
+    let cmd: String = c.cmd.chars().take(iw.saturating_sub(24)).collect();
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            format!(" ✖ exit {} ", c.code),
+            Style::default().fg(RED).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!("· {cmd} "), Style::default().fg(TEXT)),
+        Span::styled(format!("· {}", fmt_secs(c.took)), Style::default().fg(DIM)),
+    ])];
+    for l in &c.lines {
+        let l: String = l.chars().take(iw.saturating_sub(2)).collect();
+        lines.push(Line::styled(format!(" {l}"), Style::default().fg(DIM)));
+    }
+    lines.push(Line::styled(
+        if iw >= 50 {
+            " ctrl+] c copy the error · ctrl+] r run it again"
+        } else {
+            " ctrl+] c copy · r run again"
+        },
+        Style::default().fg(AMBER),
+    ));
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The command palette: type to filter every action, setting, session,
+/// layout and tab.
+fn draw_palette(f: &mut Frame, app: &App, pal: &crate::app::Palette) {
+    let (_, content, _) = app.regions();
+    let w = content.width.saturating_sub(4).min(84);
+    let h = content.height.saturating_sub(4).min(22);
+    if w < 30 || h < 6 {
+        return;
+    }
+    let r = Rect::new(content.x + (content.width - w) / 2, content.y + 1, w, h);
+    f.render_widget(Clear, r);
+    let block = pane_block(" ⌘ command palette ".to_string(), true);
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    let iw = inner.width as usize;
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(
+                " ❯ ",
+                Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("{}▏", pal.query), Style::default().fg(TEXT)),
+            if pal.query.is_empty() {
+                Span::styled(
+                    "type an action, setting, session, layout or tab",
+                    Style::default().fg(FAINT),
+                )
+            } else {
+                Span::raw("")
+            },
+        ]),
+        Line::raw(""),
+    ];
+    let m = pal.matches();
+    let rows = inner.height.saturating_sub(3) as usize;
+    let first = pal.sel.saturating_sub(rows.saturating_sub(1));
+    for (k, &i) in m.iter().enumerate().skip(first).take(rows) {
+        let (label, detail, _) = &pal.items[i];
+        let dw = detail.chars().count();
+        let lw = iw.saturating_sub(dw + 4);
+        let label: String = label.chars().take(lw).collect();
+        let text = format!(" {label:<lw$}  {detail} ");
+        let st = if k == pal.sel {
+            Style::default()
+                .bg(AMBER)
+                .fg(INK)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(TEXT)
+        };
+        lines.push(Line::styled(text, st));
+    }
+    if m.is_empty() {
+        lines.push(Line::styled(" nothing matches", Style::default().fg(DIM)));
+    }
+    f.render_widget(Paragraph::new(lines), inner);
+    let foot = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
+    f.render_widget(
+        Paragraph::new(Line::styled(
+            format!(
+                " ↑↓ choose · ⏎ run · esc close · {} entries",
+                pal.items.len()
+            ),
+            Style::default().fg(FAINT),
+        )),
+        foot,
+    );
 }
 
 /// The right-click menu: Copy, Paste, Select all, Open link, splits.

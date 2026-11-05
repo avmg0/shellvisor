@@ -96,11 +96,19 @@ CPU (history and per core), memory, swap, disks, network, disk I/O, load, temper
 - **Option-click** on the line you're typing moves the cursor there; **ctrl-click** a link opens it (terminals don't pass ⌘ with clicks).
 - **Hints when you might be stuck**, on the pane's border: an unclosed quote (`quote>`), an unfinished command, vim (`Esc then :q!`), less / man (`q`), nano, top, a Python or Node prompt, ssh.
 
+**Command palette** (`ctrl+]` `space`): type a few letters to find any action, setting, saved session, layout, tab or serial port, and ⏎ runs it — no shortcuts to remember.
+
+**Broadcast typing** (`ctrl+]` `B`, or the palette): what you type goes to every shell in the tab at once (several servers, one command); panes show `⇶ broadcast`, `ctrl+]` `B` again stops it.
+
+**Failed command card:** when a command exits with an error, a card over its pane shows the exit code, the command, how long it ran and its last lines; `ctrl+]` `c` copies the command and error (for an issue or a chat), `ctrl+]` `r` runs it again. Programs whose exit code isn't an error (vim, less, grep, diff…) and ctrl+C don't get one; turn it off in settings.
+
 **Saved sessions, logging and more (like PuTTY):**
 - `sv ssh save prod deploy@10.0.0.5 -p 2222 -i ~/.ssh/prod -L 8080:localhost:80` saves a connection (keepalive every 30 s unless `-k 0`; `-- cmd` runs a command instead of a shell); `sv ssh prod` opens it in a new tab named after it; `sv ssh` (or `ctrl+]` `S`, or the tab menu) lists your saved sessions and the hosts in `~/.ssh/config`; `sv ssh rm prod`. Your own `ssh`, keys and config are used.
 - When an ssh session drops, `ctrl+]` `R` (or right-click → Reconnect) runs it again.
 - **Duplicate session** (right-click, tab menu): a new tab in the same folder, reconnecting to the same server.
 - **Log to file** (`sv log start [file]`, `sv log stop`, right-click): everything the pane shows, as plain text (colours and progress-bar redraws taken out), in `~/shellvisor-logs/` by default. The pane title shows `⏺ logging`.
+- **Serial consoles**: `sv serial` lists the ports (USB adapters, boards); `sv serial /dev/tty.usbserial-1410 115200` opens one in its own tab (default 115200 baud). Keys go straight to the device; `~.` at the start of a line quits, like `cu`.
+- **Remote files** (`ctrl+]` `F`, or the palette) over the tab's ssh session: a pane listing the server's folders; ⏎ opens, ⌫ goes up, `d` downloads into your local folder, and dropping files from Finder on the pane uploads them. It reuses the session's options (port, key, user, jump host) with one shared connection; it needs a key or ssh-agent login (a password prompt can't be answered in the background).
 - **Right-click pastes** like PuTTY if you set *Right-click: paste* in settings (ctrl+right-click still opens the menu); middle-click always pastes.
 
 ### `ls` as a table

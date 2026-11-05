@@ -191,6 +191,8 @@ Deliverables
 - Terminal features per pane (done): find in scrollback with highlights (`ctrl+] /`), clear pane + scrollback (`ctrl+] k`; ED 3 now clears scrollback), option-click moves the cursor, ctrl-click opens links, hints on the border when stuck (unclosed quote, unfinished command, vim, less, nano, top, REPLs, ssh).
 - PuTTY-style (done): saved sessions (`sv ssh save|rm|NAME`, picker `ctrl+] S`, ~/.ssh/config hosts, keepalive), reconnect a dropped ssh (`ctrl+] R`), duplicate session, session logging to plain text (`sv log start|stop`), right-click pastes (setting) and middle-click paste.
 
+- Command palette, broadcast typing, serial consoles, remote files, failed command card (done): `ctrl+] space` fuzzy-searches actions, settings, sessions, layouts, tabs and serial ports; `ctrl+] B` broadcasts keys to every shell in a tab; `sv serial [dev] [baud]` is a built-in serial console (termios raw, `~.` quits); `ctrl+] F` opens a remote files pane over the tab's ssh (batch-mode ssh with ControlMaster: list, download `d`, drop to upload); a card over the pane for failed commands with copy (`ctrl+] c`) and run again (`ctrl+] r`). The card is drawn only over the pane the command ran in.
+
 Exit criteria: `sv resize` covered by an end-to-end test; a `v1.0.1` tag releases with one macOS job; CI and Release runs show no deprecation warnings.
 
 ---

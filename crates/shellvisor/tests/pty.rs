@@ -86,6 +86,10 @@ impl Session {
         cmd.env("TERM", "xterm-256color");
         cmd.env("SHELL", "/bin/sh");
         cmd.env("SHELLVISOR_STATE_DIR", dir.join("state"));
+        let fake_ssh = dir.join("home/bin/ssh");
+        if fake_ssh.exists() {
+            cmd.env("SHELLVISOR_SSH", &fake_ssh);
+        }
         cmd.env("SHELLVISOR_CACHE_DIR", dir.join("cache"));
         cmd.env("SHELLVISOR_CONFIG", dir.join("config.yaml"));
         let child = pair.slave.spawn_command(cmd).unwrap();
@@ -1517,7 +1521,7 @@ fn mouse_setting_gives_the_mouse_back_to_the_terminal() {
     );
     // settings → Mouse: terminal
     s.send("\x1bs");
-    s.wait_for("Mouse");
+    s.wait_for("Folder colour in the prompt");
     for _ in 0..12 {
         s.send("\x1b[B");
     }
@@ -1660,4 +1664,149 @@ fn saved_sessions_reconnect_and_logging() {
     });
     s.send("\x1b");
     s.wait_until("picker closed", |t| !t.contains("saved sessions"));
+}
+
+#[test]
+fn palette_broadcast_and_failed_command_card() {
+    let mut s = Session::start_full("palette");
+    s.wait_for("PROMPT>");
+    // the command palette runs an action by name
+    s.send("\x1d");
+    s.send(" ");
+    s.wait_for("command palette");
+    s.send("split side");
+    s.wait_for("Split side by side");
+    s.send("\r");
+    s.wait_until("two panes", |t| {
+        t.lines().nth(1).unwrap_or("").matches('╭').count() == 2
+    });
+    s.wait_until("prompt in the new pane", |t| {
+        t.matches("PROMPT>").count() >= 2
+    });
+    // broadcast: one command, both shells
+    s.send("\x1d");
+    s.send("B");
+    s.wait_for("broadcast on");
+    s.send("echo cast-$((6*7))\r");
+    s.wait_until("ran in both", |t| t.matches("cast-42").count() >= 2);
+    s.send("\x1d");
+    s.send("B");
+    s.wait_for("broadcast off");
+    // a failed command: the card, copy, run again
+    s.run("ls /no-such-dir-here");
+    s.wait_until("card", |t| {
+        t.contains("✖ exit") && t.contains("ls /no-such-dir-here") && t.contains("run again")
+    });
+    s.send("\x1d");
+    s.send("c");
+    s.wait_for("copied the command and its last lines");
+    s.send("\x1d");
+    s.send("r");
+    s.wait_until("ran again", |t| {
+        t.matches("No such file").count() >= 2 || t.matches("cannot access").count() >= 2
+    });
+}
+
+#[test]
+fn serial_console_talks_to_a_device() {
+    if !have("python3") {
+        return;
+    }
+    let dir = scratch("serial");
+    std::fs::write(
+        dir.join("config.yaml"),
+        "start_view: full\nrestore: never\n",
+    )
+    .unwrap();
+    // a fake device: a pty that answers in capitals
+    let name = dir.join("devname");
+    let script = format!(
+        "import pty,os,select,tty\nm,s=pty.openpty()\ntty.setraw(s)\nopen({:?},'w').write(os.ttyname(s))\n\
+         while True:\n  r,_,_=select.select([m],[],[],30)\n  if not r: break\n  d=os.read(m,1024)\n  os.write(m,d.upper())\n",
+        name.display().to_string()
+    );
+    let mut dev = std::process::Command::new("python3")
+        .arg("-c")
+        .arg(script)
+        .spawn()
+        .unwrap();
+    let start = Instant::now();
+    while !name.exists() && start.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let path = std::fs::read_to_string(&name).unwrap();
+    let mut s = Session::launch("bash", dir.clone());
+    s.wait_for("PROMPT>");
+    s.send(&format!("sv serial {path} 9600\r"));
+    s.wait_for("connected to");
+    assert!(
+        s.text().lines().next().unwrap_or("").contains("serial ·"),
+        "own tab"
+    );
+    s.send("hello");
+    s.wait_for("HELLO");
+    s.send("\r~.");
+    s.wait_for("disconnected from");
+    let _ = dev.kill();
+    let _ = dev.wait();
+}
+
+#[test]
+fn remote_files_over_the_ssh_session() {
+    let dir = scratch("remote");
+    std::fs::write(
+        dir.join("config.yaml"),
+        "start_view: full\nrestore: never\n",
+    )
+    .unwrap();
+    // a stand-in ssh: "box" alone is the interactive session; a remote
+    // command runs here (so listing, cat > and cat -- work on local files)
+    std::fs::create_dir_all(dir.join("home/bin")).unwrap();
+    let fake = dir.join("home/bin/ssh");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\nfor a; do last=$a; done\nif [ \"$last\" = box ]; then echo connected-to-box; sleep 60; else sh -c \"$last\"; fi\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(
+        dir.join("home/.bash_profile"),
+        "PS1='PROMPT> '\nexport PATH=\"$HOME/bin:$PATH\"\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("home/remote-file.txt"), "from the server\n").unwrap();
+    std::fs::write(dir.join("work/up.txt"), "to the server\n").unwrap();
+    let mut s = Session::launch("bash", dir.clone());
+    s.wait_for("PROMPT>");
+    s.send("ssh -p 2222 box\r");
+    s.wait_for("connected-to-box");
+    s.send("\x1d");
+    s.send("F");
+    s.wait_until("remote listing", |t| {
+        t.contains("box:") && t.contains("remote-file.txt")
+    });
+    // move to remote-file.txt (folders first, then files by name) and download it
+    s.send("j");
+    for _ in 0..12 {
+        s.send("d");
+        s.pump(Duration::from_millis(400));
+        if dir.join("work/remote-file.txt").exists() {
+            break;
+        }
+        s.send("j");
+    }
+    assert!(
+        dir.join("work/remote-file.txt").exists(),
+        "downloaded:\n{}",
+        s.text()
+    );
+    // drop a local file on the pane: uploaded
+    let up = dir.join("work/up.txt");
+    s.send(&format!("\x1b[200~{}\x1b[201~", up.display()));
+    s.wait_for("uploaded up.txt");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("home/up.txt")).unwrap(),
+        "to the server\n"
+    );
 }

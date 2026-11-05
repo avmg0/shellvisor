@@ -73,6 +73,8 @@ pub struct Settings {
     /// Right-click: "menu" (Copy, Paste, Find…) or "paste" (like PuTTY;
     /// ctrl+right-click still opens the menu).
     pub right_click: String,
+    /// When a command fails, a card with its last lines, copy and run again.
+    pub fail_card: bool,
 }
 
 impl Default for Settings {
@@ -92,6 +94,7 @@ impl Default for Settings {
             colors: "auto".into(),
             mouse: "shellvisor".into(),
             right_click: "menu".into(),
+            fail_card: true,
         }
     }
 }
@@ -176,7 +179,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
-const ROWS: [&str; 14] = [
+const ROWS: [&str; 15] = [
     "Folder colour in the prompt",
     "Folder in the prompt bold",
     "Commands you type",
@@ -191,7 +194,13 @@ const ROWS: [&str; 14] = [
     "Colours",
     "Mouse",
     "Right-click",
+    "Failed command card",
 ];
+
+/// The settings' names, in order (for the command palette).
+pub fn row_names() -> &'static [&'static str] {
+    &ROWS
+}
 
 /// The settings screen (alt+s, `sv settings`): ↑↓ pick, ←→ change.
 #[derive(Debug, Clone, PartialEq)]
@@ -252,6 +261,7 @@ impl Screen {
             11 => s.colors = cycle(&["auto", "24-bit", "256"], &s.colors, by),
             12 => s.mouse = cycle(&["shellvisor", "terminal"], &s.mouse, by),
             13 => s.right_click = cycle(&["menu", "paste"], &s.right_click, by),
+            14 => s.fail_card = !s.fail_card,
             _ => {
                 let cur = if s.theme.is_empty() {
                     "config"
@@ -292,6 +302,7 @@ impl Screen {
                 _ if crate::palette::truecolor_terminal() => "auto · 24-bit".into(),
                 _ => "auto · 256 (no 24-bit from this terminal)".into(),
             },
+            14 => on(s.fail_card),
             13 => if s.right_click == "paste" {
                 "paste (like PuTTY) · ctrl+right-click for the menu"
             } else {
@@ -341,7 +352,29 @@ impl Screen {
             faint,
         );
         y += 2;
-        for (i, label) in ROWS.iter().enumerate() {
+        // on a short screen the list scrolls, so the preview stays in view
+        let preview_h: u16 = if self.s.ls_table && self.s.boxed() {
+            12
+        } else {
+            8
+        };
+        let room = (area.bottom().saturating_sub(y + preview_h + 1) as usize).max(4);
+        let first = if ROWS.len() <= room {
+            0
+        } else {
+            self.sel.saturating_sub(room / 2).min(ROWS.len() - room)
+        };
+        let last = (first + room).min(ROWS.len());
+        if first > 0 {
+            put(
+                buf,
+                x0 + 32,
+                y.saturating_sub(1),
+                &format!("↑ {first} more"),
+                faint,
+            );
+        }
+        for (i, label) in ROWS.iter().enumerate().skip(first).take(last - first) {
             let on = i == self.sel;
             let st = if on {
                 Style::default()
@@ -381,6 +414,15 @@ impl Screen {
                 );
             }
             y += 1;
+        }
+        if last < ROWS.len() {
+            put(
+                buf,
+                x0 + 32,
+                y,
+                &format!("↓ {} more", ROWS.len() - last),
+                faint,
+            );
         }
         // drawn first: on a short screen the preview goes over them
         if !self.s.true_color() && std::env::var("TERM_PROGRAM").as_deref() == Ok("Apple_Terminal")
@@ -608,7 +650,10 @@ mod tests {
         for _ in 0..10 {
             sc.key(b"\x1b[B");
         }
-        assert_eq!(sc.sel, 13, "stops at the last row");
+        assert_eq!(sc.sel, 14, "stops at the last row");
+        sc.key(b"\r");
+        assert!(!sc.s.fail_card);
+        sc.key(b"\x1b[A");
         sc.key(b"\r");
         assert_eq!(sc.s.right_click, "paste");
         sc.key(b"\x1b[A");

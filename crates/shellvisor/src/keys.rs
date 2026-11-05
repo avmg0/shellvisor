@@ -118,6 +118,9 @@ pub enum Cmd {
     Sessions,
     Reconnect,
     Duplicate,
+    Palette,
+    Broadcast,
+    RemoteFiles,
 }
 
 /// Ready-made layouts for a tab.
@@ -303,6 +306,24 @@ pub const ACTIONS: &[(&str, Cmd, &[&str], &str)] = &[
         Cmd::ClearPane,
         &[],
         "clear this pane and its scrollback (also: ctrl+] k, right-click)",
+    ),
+    (
+        "palette",
+        Cmd::Palette,
+        &[],
+        "command palette: search every action, setting, session, layout and tab (also: ctrl+] space)",
+    ),
+    (
+        "broadcast",
+        Cmd::Broadcast,
+        &[],
+        "broadcast typing to every shell in this tab, on / off (also: ctrl+] B)",
+    ),
+    (
+        "remote_files",
+        Cmd::RemoteFiles,
+        &[],
+        "remote files over this tab's ssh session: browse, download, drop to upload (also: ctrl+] F)",
     ),
     (
         "sessions",
@@ -615,6 +636,9 @@ pub fn after_leader(key: &[u8]) -> Option<Cmd> {
         b"k" => ClearPane,
         b"S" => Sessions,
         b"R" => Reconnect,
+        b" " => Palette,
+        b"B" => Broadcast,
+        b"F" => RemoteFiles,
         b"\x1b[A" => Focus(Dir::Up),
         b"\x1b[B" => Focus(Dir::Down),
         b"\x1b[C" => Focus(Dir::Right),
@@ -624,7 +648,7 @@ pub fn after_leader(key: &[u8]) -> Option<Cmd> {
     })
 }
 
-pub const LEADER_HINT: &str = " ctrl+] → t tab · w close tab · x close split · \\ split │ · - split ─ · o next split · z zoom · l layout · m menu · f files · s system · d flow · g agents · + new agent · a approvals · e agent board · E layout editor · , settings · j downloads · / find · k clear · S sessions · R reconnect · ; command bar · v table · b basic view · r rename · 1-9 tab · ? help · ctrl+] send ctrl+] ";
+pub const LEADER_HINT: &str = " ctrl+] → space palette · t tab · w close tab · x close split · \\ split │ · - split ─ · o next split · z zoom · l layout · m menu · f files · s system · d flow · g agents · + new agent · a approvals · e agent board · E layout editor · , settings · j downloads · / find · k clear · S sessions · R reconnect · B broadcast · F remote files · ; command bar · v table · b basic view · r rename · 1-9 tab · ? help · ctrl+] send ctrl+] ";
 
 /// On macOS, Option+key types these characters unless the terminal is set to
 /// send Option as Alt/Meta. Seeing one alone means alt shortcuts can't work.
