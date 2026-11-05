@@ -167,9 +167,9 @@ Exit criteria: v1.0 — all boards implemented, budget met, install in one comma
 **Goal:** small additions and release fixes after 1.0.
 
 Deliverables
-- `sv resize left|right|up|down [steps]` — move the focused pane's border from the command line (same as `alt+shift+arrows`, which need Option-as-Meta on macOS); `sv resize 30%` sets the focused pane's share of its split directly.
-- Release workflow: build both macOS targets (arm64 and x86_64) on one Mac runner, so a release needs a single Mac machine (GitHub's Mac runners were short on capacity for 1.0.0).
-- Update GitHub Actions to Node 24 versions (`actions/checkout`, `upload-artifact`, `download-artifact`, `attest-build-provenance`) to clear the deprecation warnings.
+- `sv resize left|right|up|down [steps]` (done) — move the focused pane's border from the command line (same as `alt+shift+arrows`, which need Option-as-Meta on macOS); `sv resize 30%` sets the focused pane's share of its split directly.
+- Release workflow (done): build both macOS targets (arm64 and x86_64) on one Mac runner, so a release needs a single Mac machine (GitHub's Mac runners were short on capacity for 1.0.0).
+- Update GitHub Actions to Node 24 versions (done): checkout v5, upload-artifact v6, download-artifact v7, attest-build-provenance v3, rust-cache v2.9.0.
 
 - Layout editor as designed on board 4 (done): its own screen with preset thumbnails (built-in and saved, `1`–`9` or click), a palette (shell, files, git changes, system stats, thermals, data flow; `[ ]` or click), a map of the tab (select, split, change kind, remove, resize in 5 % steps with keys or by dragging, undo), and a save form (name, default, this folder) with the YAML that will be written. Edits apply on ⏎ only; esc cancels; running panes are kept, and a removed pane that is still running a command blocks the apply with a message.
 
@@ -185,6 +185,8 @@ Deliverables
 - Colours (done): Terminal.app on macOS 26+ counts as 24-bit; a "Colours" setting (auto / 24-bit / 256); in 256 colours the page, panel and shell backgrounds are left to the terminal (256 colours have no dark blue); `sv terminal-colors [undo]` sets Terminal.app's profile to the design's background and text.
 
 - Mouse selection and right-click menu (done): drag selects within a pane and copies on release (pbcopy / wl-copy / xclip, else OSC 52), double-click a word, triple-click a line, shift when the program uses the mouse; right-click menu Copy / Paste (bracketed when asked) / Select all / Open link / split right / split below. Shellvisor now asks the terminal for drags (1002) so the selection follows the mouse. Nothing the terminal does is taken away: fn-drag (Terminal.app), Option-drag (iTerm2) and `mouse: false` still work.
+
+- Mouse setting (done): *shellvisor* (default) or *terminal*, which gives the terminal its own selection, right-click menu and ⌘-click back.
 
 Exit criteria: `sv resize` covered by an end-to-end test; a `v1.0.1` tag releases with one macOS job; CI and Release runs show no deprecation warnings.
 

@@ -22,6 +22,7 @@ usage:
   sv power on|off|auto            low-power mode (auto = on battery)
   sv theme light|dark|auto        colours of Shellvisor's own frames and panes
   sv autostart on|off|status      start Shellvisor when a terminal opens (zsh, bash)
+  sv resize left|right|up|down [n] · sv resize 30% [width|height]   resize this pane
   sv terminal-colors [profile|undo]  Terminal.app: the design's background (profile: import the Shellvisor profile)
   sv settings     folder colours (prompt, lists), ls as a table, table borders, theme (also alt+s)
   sv activity     downloads & installs: progress, speed, time left, cd / open (also ctrl+] j)
@@ -96,6 +97,32 @@ pub fn run(args: &[String]) -> i32 {
             }
         }
         "flow" => crate::flowrun::run(&args[1..]),
+        "resize" => {
+            if !inside() {
+                return not_running("resize");
+            }
+            let rest: Vec<&str> = args[1..].iter().map(String::as_str).collect();
+            let ok = match rest.as_slice() {
+                [p] | [p, _] if p.ends_with('%') => {
+                    let v = p.trim_end_matches('%').parse::<f32>();
+                    let axis_ok = rest.get(1).is_none_or(|a| *a == "width" || *a == "height");
+                    v.is_ok_and(|v| (10.0..=90.0).contains(&v)) && axis_ok
+                }
+                [d] => resize_dir(d).is_some(),
+                [d, n] => resize_dir(d).is_some() && n.parse::<usize>().is_ok_and(|n| n >= 1),
+                _ => false,
+            };
+            if !ok {
+                eprintln!(
+                    "sv resize left|right|up|down [steps]   move this pane's border (5% a step)\n\
+                     sv resize 30% [width|height]           this pane's share of its split (10–90%)"
+                );
+                return 2;
+            }
+            let mut req = vec!["resize"];
+            req.extend(rest);
+            send_seq(request_sequence(&req))
+        }
         "autostart" => crate::autostart::run(&args[1..]),
         "terminal-colors" | "terminal-colours" => crate::termcolors::run(&args[1..]),
         "activity" | "downloads" => {
@@ -832,4 +859,16 @@ fn start_shellvisor() -> i32 {
     let err = std::process::Command::new(exe).arg0("shellvisor").exec();
     eprintln!("sv on: could not start Shellvisor: {err}");
     1
+}
+
+/// `left`, `right`, `up`, `down` for `sv resize`.
+pub fn resize_dir(s: &str) -> Option<crate::keys::Dir> {
+    use crate::keys::Dir;
+    Some(match s {
+        "left" | "l" => Dir::Left,
+        "right" | "r" => Dir::Right,
+        "up" | "u" => Dir::Up,
+        "down" | "d" => Dir::Down,
+        _ => return None,
+    })
 }

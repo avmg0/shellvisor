@@ -2,7 +2,7 @@
 
 1. Update `version` in the root `Cargo.toml` (`[workspace.package]`), run `cargo build` so `Cargo.lock` follows, and commit.
 2. Tag and push: `git tag v1.0.0 && git push origin main v1.0.0`.
-3. The **Release** workflow builds macOS (arm64, x86_64) and Linux (x86_64, arm64) binaries, packs each as `shellvisor-v1.0.0-<target>.tar.gz` with a `.sha256`, writes `SHA256SUMS`, attaches a signed build-provenance attestation to every archive (Sigstore, via GitHub), and publishes a GitHub release with generated notes.
+3. The **Release** workflow builds macOS (arm64 and x86_64, both on one Mac runner) and Linux (x86_64, arm64) binaries, packs each as `shellvisor-v1.0.0-<target>.tar.gz` with a `.sha256`, writes `SHA256SUMS`, attaches a signed build-provenance attestation to every archive (Sigstore, via GitHub), and publishes a GitHub release with generated notes.
 4. Homebrew: in the tap repository `github.com/avmg0/homebrew-tap`, run
    `scripts/brew-formula.sh 1.0.0 ../homebrew-tap/Formula/shellvisor.rb` (from this repo) and commit there. It refuses to write anything until the release is published. Users install with `brew install avmg0/tap/shellvisor`.
 

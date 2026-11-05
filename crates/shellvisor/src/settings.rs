@@ -66,6 +66,10 @@ pub struct Settings {
     pub progress_bar: bool,
     /// Colour depth: "auto" (what the terminal says), "24-bit" or "256".
     pub colors: String,
+    /// Who handles the mouse: "shellvisor" (click splits, drag dividers,
+    /// wheel scrollback, select, right-click menu) or "terminal" (the
+    /// terminal's own selection, right-click menu, ⌘-click links).
+    pub mouse: String,
 }
 
 impl Default for Settings {
@@ -83,6 +87,7 @@ impl Default for Settings {
             spinner: "ring".into(),
             progress_bar: true,
             colors: "auto".into(),
+            mouse: "shellvisor".into(),
         }
     }
 }
@@ -167,7 +172,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
-const ROWS: [&str; 12] = [
+const ROWS: [&str; 13] = [
     "Folder colour in the prompt",
     "Folder in the prompt bold",
     "Commands you type",
@@ -180,6 +185,7 @@ const ROWS: [&str; 12] = [
     "Loading spinner",
     "Download progress",
     "Colours",
+    "Mouse",
 ];
 
 /// The settings screen (alt+s, `sv settings`): ↑↓ pick, ←→ change.
@@ -239,6 +245,7 @@ impl Screen {
             }
             10 => s.progress_bar = !s.progress_bar,
             11 => s.colors = cycle(&["auto", "24-bit", "256"], &s.colors, by),
+            12 => s.mouse = cycle(&["shellvisor", "terminal"], &s.mouse, by),
             _ => {
                 let cur = if s.theme.is_empty() {
                     "config"
@@ -279,6 +286,12 @@ impl Screen {
                 _ if crate::palette::truecolor_terminal() => "auto · 24-bit".into(),
                 _ => "auto · 256 (no 24-bit from this terminal)".into(),
             },
+            12 => if s.mouse == "terminal" {
+                "terminal · its own selection, right-click menu, ⌘-click"
+            } else {
+                "shellvisor · click splits, drag dividers, select, right-click"
+            }
+            .to_string(),
             8 => {
                 if s.background == "terminal" {
                     "your terminal's".into()
@@ -582,7 +595,10 @@ mod tests {
         for _ in 0..10 {
             sc.key(b"\x1b[B");
         }
-        assert_eq!(sc.sel, 11, "stops at the last row");
+        assert_eq!(sc.sel, 12, "stops at the last row");
+        sc.key(b"\r");
+        assert_eq!(sc.s.mouse, "terminal");
+        sc.key(b"\x1b[A");
         sc.key(b"\x1b[A");
         sc.key(b"\x1b[A");
         sc.key(b"\x1b[C");

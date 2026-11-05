@@ -121,6 +121,37 @@ impl Node {
         self.resize_inner(target, want, dir, step)
     }
 
+    /// Give `target` this share (0–1) of its nearest enclosing split (of
+    /// `axis`, if given). Returns true if something changed.
+    pub fn set_share(&mut self, target: PaneId, share: f32, axis: Option<Axis>) -> bool {
+        let Node::Split {
+            axis: ax,
+            ratio,
+            a,
+            b,
+        } = self
+        else {
+            return false;
+        };
+        let in_a = a.contains(target);
+        if !in_a && !b.contains(target) {
+            return false;
+        }
+        let deeper = if in_a {
+            a.set_share(target, share, axis)
+        } else {
+            b.set_share(target, share, axis)
+        };
+        if deeper || axis.is_some_and(|w| w != *ax) {
+            return deeper;
+        }
+        let want = if in_a { share } else { 1.0 - share };
+        let new = want.clamp(MIN_RATIO, MAX_RATIO);
+        let changed = (new - *ratio).abs() > f32::EPSILON;
+        *ratio = new;
+        changed
+    }
+
     fn resize_inner(&mut self, target: PaneId, want: Axis, dir: Dir, step: f32) -> bool {
         let Node::Split { axis, ratio, a, b } = self else {
             return false;

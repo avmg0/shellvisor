@@ -1601,7 +1601,9 @@ impl App {
             .get(&self.input_target())
             .map(|p| p.pane.input_modes())
             .unwrap_or_default();
-        let capture = self.opts.mouse || self.view == View::Full;
+        // "Mouse: terminal" in settings: the terminal keeps it (only what the
+        // program in the pane asks for is passed on)
+        let capture = (self.opts.mouse || self.view == View::Full) && self.ui.mouse != "terminal";
         let want = focused.effective(capture);
         if want != self.outer_modes {
             term.backend_mut()
@@ -4544,6 +4546,40 @@ impl App {
                 Ok(())
             }
             ["system"] => self.show_tool("system", false),
+            ["resize", rest @ ..] => {
+                let tab = self.active;
+                let focus = self.focused();
+                let changed = match rest {
+                    [d] | [d, _] if crate::cli::resize_dir(d).is_some() => {
+                        let dir = crate::cli::resize_dir(d).unwrap();
+                        let n: usize = rest.get(1).and_then(|n| n.parse().ok()).unwrap_or(1);
+                        let mut any = false;
+                        for _ in 0..n.clamp(1, 20) {
+                            any |= self.tabs[tab].root.resize(focus, dir, 0.05);
+                        }
+                        any
+                    }
+                    [pct, more @ ..] if pct.ends_with('%') => {
+                        let share =
+                            pct.trim_end_matches('%').parse::<f32>().unwrap_or(50.0) / 100.0;
+                        let axis = match more.first().copied() {
+                            Some("width") => Some(Axis::Horizontal),
+                            Some("height") => Some(Axis::Vertical),
+                            _ => None,
+                        };
+                        self.tabs[tab].root.set_share(focus, share, axis)
+                    }
+                    _ => false,
+                };
+                if changed {
+                    self.relayout();
+                } else {
+                    self.notice(
+                        "sv resize: nothing to resize here (one pane, or already at the limit)",
+                    );
+                }
+                Ok(())
+            }
             ["activity"] => {
                 self.acts_list = Some(0);
                 self.dirty = true;

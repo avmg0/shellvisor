@@ -44,7 +44,7 @@ shellvisor --shell bash    # or pick: zsh, bash, or a full path
 | `alt+r` · `alt+w` | rename · close tab (asks if something is still running) |
 | `alt+\` · `alt+-` | split side by side · stacked |
 | `alt+arrows` · `F6` | move between splits |
-| `alt+shift+arrows` · `F5` | resize · zoom a split |
+| `alt+shift+arrows` · `F5` | resize · zoom a split (or drag the border; `sv resize left 2`, `sv resize 30%`) |
 | `F7` · `alt+l` | rearrange splits: columns → rows → main + side → grid |
 | `F2` · `sv files` | files pane: open · focus · close |
 | `F3` · `sv sys` | system pane: open · focus · close |
@@ -118,6 +118,7 @@ bash · ~/work · ◴ git clone ━━━━━━╸━━━ 62% · ETA 6s
 - these colours are your terminal's own 16 (plus orange), so the profile decides the exact shade: with the Shellvisor profile, cyan is the design's `#6cc9d6` — the same as a prompt that draws its folder in cyan
 - `ls` as a table on/off, table borders (rounded or plain), theme
 - **loading spinner** style and **download progress** as a bar or percent only
+- **mouse**: *shellvisor* (default — click splits, drag borders, wheel scrollback, select text, right-click menu) or *terminal* (the terminal keeps the mouse: its own selection, right-click menu with Mark / Bookmark, ⌘-click links; you move between splits with keys)
 - **colours**: auto, 24-bit or 256. Terminal.app shows 24-bit colour from macOS 26; before that it has 256 colours, which have no very dark blue — Shellvisor then leaves the page to the terminal's own background, and **`sv terminal-colors profile`** imports a ready-made **Shellvisor** profile for Terminal.app ([packaging/terminal/Shellvisor.terminal](packaging/terminal/Shellvisor.terminal): background `#0b0e12`, text `#d6dbe3`, the 16 ANSI colours from the design, JetBrains Mono 14) — make it the default in Terminal → Settings → Profiles. `sv terminal-colors` alone just sets your current profile's background and text (`sv terminal-colors undo` puts yours back). Typing hex values into the colour picker yourself? Set it to sRGB first, or Display P3 shifts them
 - **dark background**: *design* (default) paints Shellvisor in the design's palette — a very dark blue-grey page `#0b0e12`, panels `#11151b`, shells on `#0e1217`, borders `#262c36`, text `#d6dbe3`, amber / cyan / green / red accents — or *terminal* to keep your terminal's own background. Programs inside shells keep their own colours; basic view always looks like your plain terminal. Terminals without 24-bit colour (e.g. older Terminal.app) get the nearest 256-colour shades
 

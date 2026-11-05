@@ -1456,3 +1456,80 @@ fn mouse_selects_copies_and_right_click_menu() {
     s.run("echo still-typing");
     s.wait_for("still-typing");
 }
+
+#[test]
+fn sv_resize_moves_the_border_and_sets_a_share() {
+    let mut s = Session::start_full("resize");
+    s.wait_for("PROMPT>");
+    // the column of the second pane's top-left corner on the top border row
+    let divider = |s: &Session| -> usize {
+        let line = s.text().lines().nth(1).unwrap_or("").to_string();
+        line.chars()
+            .skip(1)
+            .position(|c| c == '╭')
+            .map(|i| i + 1)
+            .unwrap_or(0)
+    };
+    s.send("\x1b\\"); // alt+\ : split side by side, focus goes to the new (right) pane
+    s.wait_until("two panes", |t| {
+        t.lines().nth(1).unwrap_or("").matches('╭').count() == 2
+    });
+    s.wait_until("prompt in the new pane", |t| {
+        t.matches("PROMPT>").count() >= 2
+    });
+    let half = divider(&s);
+    s.run("sv resize 30%");
+    s.wait_until("right pane at 30%", |t| {
+        let line = t.lines().nth(1).unwrap_or("").to_string();
+        let d = line
+            .chars()
+            .skip(1)
+            .position(|c| c == '╭')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        d > half + 10
+    });
+    let thirty = divider(&s);
+    s.run("sv resize left 2");
+    s.wait_until("right pane grew by 10%", |t| {
+        let line = t.lines().nth(1).unwrap_or("").to_string();
+        let d = line
+            .chars()
+            .skip(1)
+            .position(|c| c == '╭')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        d + 5 < thirty
+    });
+    s.run("sv resize sideways");
+    s.wait_for("sv resize left|right|up|down");
+}
+
+#[test]
+fn mouse_setting_gives_the_mouse_back_to_the_terminal() {
+    let mut s = Session::start_full("mousemode");
+    s.wait_for("PROMPT>");
+    // Shellvisor asks the terminal for clicks and drags
+    s.pump(Duration::from_millis(300));
+    assert_eq!(
+        s.screen.screen().mouse_protocol_mode(),
+        vt100::MouseProtocolMode::ButtonMotion
+    );
+    // settings → Mouse: terminal
+    s.send("\x1bs");
+    s.wait_for("Mouse");
+    for _ in 0..12 {
+        s.send("\x1b[B");
+    }
+    s.send("\r");
+    s.wait_for("terminal · its own selection");
+    s.send("\x1b");
+    s.pump(Duration::from_millis(400));
+    assert_eq!(
+        s.screen.screen().mouse_protocol_mode(),
+        vt100::MouseProtocolMode::None,
+        "the terminal has the mouse again"
+    );
+    let saved = std::fs::read_to_string(s.dir.join("state/settings.yaml")).unwrap();
+    assert!(saved.contains("mouse: terminal"), "{saved}");
+}
