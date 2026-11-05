@@ -190,6 +190,14 @@ fn map(c: Color, fg: bool, border: bool) -> Option<(u8, u8, u8)> {
             }
         }
         Color::Indexed(n) => match n {
+            // the terminal's 16 colours (folder colours from settings)
+            1 | 9 => RED,
+            2 | 10 => GREEN,
+            3 | 11 => AMBER,
+            4 | 12 => BLUE,
+            5 | 13 => MAGENTA,
+            6 | 14 => CYAN,
+            8 => FAINT,
             179 | 178 => AMBER,
             73 | 37 => CYAN,
             108 | 35 => GREEN,

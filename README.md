@@ -113,8 +113,9 @@ bash · ~/work · ◴ git clone ━━━━━━╸━━━ 62% · ETA 6s
 `alt+s` (or `sv settings`) opens a settings screen with a live preview:
 
 - the **colour of the folder in your prompt** (and bold) — Shellvisor's hooks colour `%1~` / `%~` (zsh) or `\W` / `\w` (bash) in whatever prompt you have, no dotfile editing; prompts drawn by tools like starship are left as they are
-- the **colour of the commands you type** — light blue by default (the design's `#82aaff`), so your commands stand apart from their output, which stays in the normal text colour; `none` turns it off. With zsh-syntax-highlighting its colours win
+- the **colour of the commands you type** — blue by default, so your commands stand apart from their output, which stays in the normal text colour; `none` turns it off. With zsh-syntax-highlighting its colours win
 - the **colour of folders in lists** — the files pane and `ls` / `sv` tables
+- these colours are your terminal's own 16 (plus orange), so the profile decides the exact shade: with the Shellvisor profile, cyan is the design's `#6cc9d6` — the same as a prompt that draws its folder in cyan
 - `ls` as a table on/off, table borders (rounded or plain), theme
 - **loading spinner** style and **download progress** as a bar or percent only
 - **colours**: auto, 24-bit or 256. Terminal.app shows 24-bit colour from macOS 26; before that it has 256 colours, which have no very dark blue — Shellvisor then leaves the page to the terminal's own background, and **`sv terminal-colors`** gives your Terminal profile the design's `#0b0e12` background and `#d6dbe3` text (`sv terminal-colors undo` puts yours back)

@@ -59,7 +59,7 @@ __sv_ready() {
 # ---- Shellvisor settings (settings screen / `sv settings`), read at each
 # prompt from $SHELLVISOR_UI: the folder's colour in the prompt, the colour of
 # the commands you type, `ls` as a table
-__sv_palette="37 39 111 35 178 208 170 167 245"
+__sv_palette="6 12 2 3 5 1 8 37 39 111 35 178 208 170 167 245"
 __sv_ps1_last= ; __sv_ps1_base= ; __sv_lt=1
 __sv_style() {
   local c=- b=0 tc=- i p o e

@@ -1327,7 +1327,7 @@ fn settings_colour_the_prompt_folder_and_ls_prints_a_table() {
         s.pump(Duration::from_millis(800));
         let saved = std::fs::read_to_string(dir.join("state/settings.yaml")).unwrap();
         assert!(saved.contains("prompt_folder: cyan"), "{saved}");
-        // the folder name in the newest prompt is drawn in colour 37
+        // the folder name in the newest prompt is drawn in cyan (colour 6)
         let screen = s.screen.screen();
         let (rows, cols) = screen.size();
         let mut found = false;
@@ -1338,12 +1338,12 @@ fn settings_colour_the_prompt_folder_and_ls_prints_a_table() {
             if let Some(i) = line.find(" work > ") {
                 let col = line[..i + 1].chars().count() as u16;
                 let cell = screen.cell(r, col).unwrap();
-                found = cell.fgcolor() == vt100::Color::Idx(37);
+                found = cell.fgcolor() == vt100::Color::Idx(6);
                 break;
             }
         }
         assert!(found, "{shell}: prompt folder not coloured:\n{}", s.text());
-        // what you type is light blue (111); the output is not
+        // what you type is blue (12); the output is not
         let colour_of = |s: &Session, needle: &str| -> Option<vt100::Color> {
             let screen = s.screen.screen();
             let (rows, cols) = screen.size();
@@ -1365,7 +1365,7 @@ fn settings_colour_the_prompt_folder_and_ls_prints_a_table() {
         s.pump(Duration::from_millis(200));
         assert_eq!(
             colour_of(&s, "echo typed-"),
-            Some(vt100::Color::Idx(111)),
+            Some(vt100::Color::Idx(12)),
             "{shell}: typed command colour:\n{}",
             s.text()
         );
@@ -1374,7 +1374,7 @@ fn settings_colour_the_prompt_folder_and_ls_prints_a_table() {
         s.pump(Duration::from_millis(300));
         let out = colour_of(&s, "typed-42");
         assert!(
-            out.is_some() && out != Some(vt100::Color::Idx(111)),
+            out.is_some() && out != Some(vt100::Color::Idx(12)),
             "{shell}: output must not keep the typed colour: {out:?}\n{}",
             s.text()
         );

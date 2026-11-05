@@ -12,22 +12,26 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// Colours offered: (name, 256-colour index). "none" leaves things as they are.
-pub const COLORS: [(&str, u8); 10] = [
+/// Colours offered: (name, colour index). "none" leaves things as they are.
+/// They are the terminal's own 16 colours (its profile decides the exact
+/// shade, so folders match a prompt drawn in the same colours), except
+/// orange, which the 16 don't have.
+pub const COLORS: [(&str, u8); 9] = [
     ("none", 0),
-    ("cyan", 37),
-    ("blue", 39),
-    // the boards' soft blue (#82aaff ≈ 111): the commands you type
-    ("light blue", 111),
-    ("green", 35),
-    ("yellow", 178),
+    ("cyan", 6),
+    // bright blue: plain blue is too dark to read in many profiles
+    ("blue", 12),
+    ("green", 2),
+    ("yellow", 3),
     ("orange", 208),
-    ("magenta", 170),
-    ("red", 167),
-    ("grey", 245),
+    ("magenta", 5),
+    ("red", 1),
+    ("grey", 8),
 ];
 
 pub fn color_index(name: &str) -> Option<u8> {
+    // "light blue" was its own choice before; it is blue now
+    let name = if name == "light blue" { "blue" } else { name };
     COLORS
         .iter()
         .find(|(n, _)| *n == name)
@@ -69,7 +73,7 @@ impl Default for Settings {
         Settings {
             prompt_folder: "none".into(),
             prompt_bold: false,
-            typed: "light blue".into(),
+            typed: "blue".into(),
             list_folder: "cyan".into(),
             list_bold: true,
             ls_table: true,
@@ -532,8 +536,8 @@ mod tests {
         let mut s = Settings::default();
         assert_eq!(
             s.ui_env(),
-            "-\n0\n1\n111\n",
-            "the prompt is left alone by default; typed commands in light blue"
+            "-\n0\n1\n12\n",
+            "the prompt is left alone by default; typed commands in blue"
         );
         s.prompt_folder = "orange".into();
         s.prompt_bold = true;
@@ -542,10 +546,7 @@ mod tests {
         s.save_to(&p, &ui).unwrap();
         assert_eq!(Settings::load_from(&p), s);
         assert_eq!(std::fs::read_to_string(&ui).unwrap(), "208\n1\n0\n-\n");
-        assert_eq!(
-            Settings::default().folder_ansi().unwrap(),
-            "\x1b[1;38;5;37m"
-        );
+        assert_eq!(Settings::default().folder_ansi().unwrap(), "\x1b[1;38;5;6m");
         s.list_folder = "none".into();
         assert_eq!(s.folder_ansi(), None);
         assert_eq!(
@@ -572,7 +573,7 @@ mod tests {
         assert!(sc.s.prompt_bold);
         sc.key(b"\x1b[B");
         sc.key(b"\x1b[D");
-        assert_eq!(sc.s.typed, "blue");
+        assert_eq!(sc.s.typed, "cyan");
         for _ in 0..3 {
             sc.key(b"\x1b[B");
         }
