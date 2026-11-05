@@ -202,6 +202,30 @@ Totals: **17 boards · 111 items · 79 ✅ built · 11 ◐ partly or differently
 | Connections: CLIs, logins, MCP servers, ssh hosts | ✅ | `sv connect` |
 | API keys "in Keychain" | ◐ | presence from env and CLI logins; Keychain not read |
 
+## 17 · MCP servers (`sv mcp`, ctrl+] M)
+
+| Item | | Notes |
+|---|---|---|
+| Header with running / stopped / failing pill and clock | ✅ | |
+| SERVERS list from Claude Code, Codex, Gemini, .mcp.json | ✅ | merged by name, filter `/` |
+| Server cards: state, where configured, tools, usage | ✅ | |
+| Detail box: command, transport, configured in, secrets, used by | ✅ | secret values never shown |
+| Health: handshake ms, tools / resources / prompts, calls, context, pid | ✅ | real MCP handshake |
+| Tabs: Tools, Resources, Prompts, Traffic, Permissions, Log | ✅ | |
+| Tools table with calls, avg and per-agent permission | ✅ | columns scale with width |
+| Try a tool (fields from the input schema) and Result | ✅ | `c` copy, `s` save |
+| Key strip | ✅ | |
+
+## 18 · MCP traffic, permissions, add a server
+
+| Item | | Notes |
+|---|---|---|
+| Live traffic table, chips, pause, errors only | ✅ | from the agents' Claude Code logs |
+| Approval banner `y` / `n` / `a` | ✅ | |
+| Calls per minute, context sent back by server | ✅ | |
+| Permissions grid allow / ask / never | ✅ | `.claude/settings.local.json` per agent |
+| Add a server: templates, form, JSON / TOML previews, Add & check | ✅ | scrolls when the window is short |
+
 ## Not on any board, built anyway
 
 Thermal view, light theme, settings screen, prompt folder colour, Homebrew /

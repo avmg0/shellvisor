@@ -28,6 +28,8 @@ mod history;
 mod keys;
 mod layouted;
 mod loading;
+mod mcp;
+mod mcpscreen;
 mod mouse;
 mod osinfo;
 mod palette;

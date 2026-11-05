@@ -183,6 +183,10 @@ sv connect                                                     # installed CLIs,
 
 Each agent gets a column in the agents tab (`F9`; `shift+F9` opens the New agent form). In a git repository it works in its own worktree and branch (`.shellvisor/worktrees/<name>`, branch `agent/<name>`), so agents never edit the same checkout — or yours. The column title shows its status (working ⠋, waiting for you, ⚑ needs approval, done), the files it changed with +/− lines, and tokens used (Claude Code and Codex, read from their own session logs). Type in a column to message that agent. When two agents change the same file you get a warning, and the files pane marks files agents have touched (◆ name).
 
+### MCP servers (ctrl+] M)
+
+`sv mcp` lists the MCP servers your agents can use — from Claude Code, Codex, Gemini and the project's `.mcp.json` — and, inside Shellvisor, opens two screens. The first shows each server's state from a real handshake, its tools, resources and prompts, which secrets are set (never their values) and who uses it; `t` tries a tool with a form built from its input schema. Press `2` for live traffic (every MCP call in your agents' logs, with size and time), a permissions grid (allow / ask / never per server or tool, per agent) and *Add a server*, which checks the server before it writes it to each agent's config.
+
 ### Agents that start agents
 
 Every shell inside Shellvisor can reach it over a private socket, so an agent (or you, or a script) can run a team:

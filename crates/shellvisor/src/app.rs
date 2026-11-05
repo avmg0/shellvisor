@@ -193,6 +193,8 @@ enum Ev {
     Output(PaneId, Vec<u8>),
     PaneExit(PaneId, i32),
     Job(PaneId, Box<Done>),
+    /// The MCP screen: a check, call, traffic scan or add finished.
+    Mcp(Box<McpEv>),
     /// Remote files: a listing, upload or download finished.
     Remote(PaneId, Box<crate::remote::Done>),
     Battery(Option<bool>),
@@ -235,6 +237,14 @@ impl Selection {
         let (s, e) = self.range();
         (row, col) >= s && (row, col) <= e
     }
+}
+
+/// Results for the MCP screen.
+pub enum McpEv {
+    Checked(String, Result<crate::mcp::Health, (String, Vec<String>)>),
+    Called(crate::mcp::CallResult),
+    Traffic(Vec<crate::mcp::Call>),
+    Added(Result<Vec<String>, String>),
 }
 
 /// What a command palette entry does.
@@ -640,6 +650,9 @@ pub struct App {
     pub ctx: Option<ContextMenu>,
     /// Find in a pane's scrollback.
     pub find: Option<Find>,
+    /// The MCP screen (ctrl+] M, sv mcp).
+    pub mcp: Option<crate::mcpscreen::McpScreen>,
+    mcp_scan_at: Instant,
     /// The command palette (ctrl+] space).
     pub palette: Option<Palette>,
     /// Shells that get what you type (broadcast, per tab).
@@ -754,6 +767,8 @@ pub fn run(opts: Options) -> io::Result<i32> {
         find: None,
         sessions: None,
         palette: None,
+        mcp: None,
+        mcp_scan_at: Instant::now(),
         broadcast: std::collections::HashSet::new(),
         fail: None,
         done: std::collections::VecDeque::new(),
@@ -1298,6 +1313,26 @@ impl App {
                     Ev::Bus(req, reply) => self.on_bus(req, reply),
                     Ev::Plan(run, out) => self.on_plan(run, out),
                     Ev::Notice(msg) => self.notice(msg),
+                    Ev::Mcp(ev) => {
+                        let acts = match (self.mcp.as_mut(), *ev) {
+                            (Some(m), McpEv::Checked(n, r)) => {
+                                m.checked(n, r);
+                                Vec::new()
+                            }
+                            (Some(m), McpEv::Called(r)) => {
+                                m.called(r);
+                                Vec::new()
+                            }
+                            (Some(m), McpEv::Traffic(c)) => {
+                                m.traffic(c);
+                                Vec::new()
+                            }
+                            (Some(m), McpEv::Added(r)) => m.added(r),
+                            _ => Vec::new(),
+                        };
+                        self.mcp_acts(acts);
+                        self.dirty = true;
+                    }
                     Ev::Remote(id, done) => {
                         if let Some(Tool::Remote(r)) = self.tools.get_mut(&id) {
                             let jobs = r.done(*done);
@@ -2125,6 +2160,18 @@ impl App {
     fn on_input(&mut self, bytes: &[u8]) -> io::Result<()> {
         let mut forward: Vec<u8> = Vec::new();
         for key in keys::tokenize(bytes) {
+            if self.mcp.is_some() && self.modal == Modal::None && key != [0x1d] && key != b"\x1ba" {
+                self.flush_forward(&mut forward)?;
+                let waiting = !self.pending_approvals().is_empty();
+                let acts = self
+                    .mcp
+                    .as_mut()
+                    .map(|m| m.key(key, waiting))
+                    .unwrap_or_default();
+                self.mcp_acts(acts);
+                self.dirty = true;
+                continue;
+            }
             if self.palette.is_some() && self.modal == Modal::None {
                 self.flush_forward(&mut forward)?;
                 self.palette_key(key)?;
@@ -2470,6 +2517,152 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    /// The agents (and you) for the MCP screen: name, folder, colour.
+    fn mcp_who(&self) -> Vec<crate::mcpscreen::Who> {
+        let cwd = self.focused_cwd().unwrap_or_default();
+        let root = crate::agents::repo_head(&cwd)
+            .map(|(t, _)| t)
+            .unwrap_or(cwd);
+        let mut v = vec![crate::mcpscreen::Who {
+            name: "you".into(),
+            dir: root,
+            color: ratatui::style::Color::Indexed(252),
+        }];
+        let mut agents: Vec<&agents::Agent> = self
+            .panes
+            .values()
+            .filter_map(|p| p.agent.as_ref())
+            .collect();
+        agents.sort_by(|a, b| a.name.cmp(&b.name));
+        for a in agents {
+            let dir = a
+                .worktree
+                .clone()
+                .or_else(|| a.repo.clone())
+                .unwrap_or_default();
+            if !v.iter().any(|w| w.name == a.name) {
+                v.push(crate::mcpscreen::Who {
+                    name: a.name.clone(),
+                    dir,
+                    color: ratatui::style::Color::Indexed(a.color),
+                });
+            }
+        }
+        v
+    }
+
+    fn open_mcp(&mut self) {
+        let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+        let cwd = self.focused_cwd().unwrap_or_default();
+        let (screen, acts) = crate::mcpscreen::McpScreen::new(home, cwd, self.mcp_who());
+        self.mcp = Some(screen);
+        self.mcp_scan_at = Instant::now();
+        self.mcp_acts(acts);
+        self.dirty = true;
+    }
+
+    /// The first agent waiting for approval, as the traffic banner says it.
+    pub fn mcp_waiting(&self) -> Option<String> {
+        let id = *self.pending_approvals().first()?;
+        let p = self.panes.get(&id)?;
+        let a = p.agent.as_ref()?;
+        let ap = a.approval()?;
+        Some(format!("{} wants {}", a.name, ap.what))
+    }
+
+    fn mcp_acts(&mut self, acts: Vec<crate::mcpscreen::Act>) {
+        use crate::mcpscreen::Act;
+        for act in acts {
+            let tx = self.tx.clone();
+            match act {
+                Act::Check(s) => {
+                    let _ = spawn_thread("mcp-check".into(), move || {
+                        let r = crate::mcp::check(&s);
+                        let _ = tx.send(Ev::Mcp(Box::new(McpEv::Checked(s.name.clone(), r))));
+                    });
+                }
+                Act::Restart(s, pid) => {
+                    if pid > 0 {
+                        unsafe { libc::kill(pid, libc::SIGTERM) };
+                    }
+                    let _ = spawn_thread("mcp-check".into(), move || {
+                        let r = crate::mcp::check(&s);
+                        let _ = tx.send(Ev::Mcp(Box::new(McpEv::Checked(s.name.clone(), r))));
+                    });
+                }
+                Act::Call(s, tool, args) => {
+                    let _ = spawn_thread("mcp-call".into(), move || {
+                        let r = crate::mcp::call(&s, &tool, args);
+                        let _ = tx.send(Ev::Mcp(Box::new(McpEv::Called(r))));
+                    });
+                }
+                Act::Stop(name, pid) => {
+                    unsafe { libc::kill(pid, libc::SIGTERM) };
+                    if let Some(m) = self.mcp.as_mut() {
+                        m.running.remove(&name);
+                        m.note = Some(format!(
+                            "stopped {name} (pid {pid}) · its agent starts it again when needed"
+                        ));
+                    }
+                }
+                Act::Traffic => {
+                    let Some(m) = self.mcp.as_ref() else { continue };
+                    let keys = m.log_keys();
+                    let home = m.home.clone();
+                    let _ = spawn_thread("mcp-traffic".into(), move || {
+                        let since = std::time::SystemTime::now() - Duration::from_secs(24 * 3600);
+                        let calls = crate::mcp::traffic(&home, &keys, since);
+                        let _ = tx.send(Ev::Mcp(Box::new(McpEv::Traffic(calls))));
+                    });
+                }
+                Act::Add(s, to) => {
+                    let Some(m) = self.mcp.as_ref() else { continue };
+                    let (home, cwd) = (m.home.clone(), m.cwd.clone());
+                    let _ = spawn_thread("mcp-add".into(), move || {
+                        // the handshake first: nothing is written if it fails
+                        let r = match crate::mcp::check(&s.as_server()) {
+                            Ok(_) => crate::mcp::add(&home, &cwd, &s, to),
+                            Err((e, _)) => Err(format!(
+                                "the server didn't answer: {e} — nothing was written"
+                            )),
+                        };
+                        let _ = tx.send(Ev::Mcp(Box::new(McpEv::Added(r))));
+                    });
+                }
+                Act::Approve(c) => {
+                    if let Some(id) = self.pending_approvals().first().copied() {
+                        self.answer(
+                            id,
+                            match c {
+                                'y' => Answer::Allow,
+                                'a' => Answer::Always,
+                                _ => Answer::Deny,
+                            },
+                        );
+                    }
+                }
+                Act::Copy(t) => {
+                    self.copy(&t);
+                    if let Some(m) = self.mcp.as_mut() {
+                        m.note = Some("copied the result".into());
+                    }
+                }
+                Act::Save(t) => {
+                    let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+                    let p = home.join(format!("mcp-result-{}.txt", std::process::id()));
+                    let msg = match std::fs::write(&p, t) {
+                        Ok(()) => format!("saved to {}", p.display()),
+                        Err(e) => format!("couldn't save: {e}"),
+                    };
+                    if let Some(m) = self.mcp.as_mut() {
+                        m.note = Some(msg);
+                    }
+                }
+                Act::Close => self.mcp = None,
+            }
+        }
     }
 
     fn run_remote(&self, id: PaneId, jobs: Vec<crate::remote::Job>) {
@@ -4884,7 +5077,16 @@ impl App {
     }
 
     /// Idle detection, trailing approval checks, and git change polling.
+    /// While the MCP screen is open: new traffic and running state every 2 s.
+    fn tick_mcp(&mut self) {
+        if self.mcp.is_some() && self.mcp_scan_at.elapsed() >= Duration::from_secs(2) {
+            self.mcp_scan_at = Instant::now();
+            self.mcp_acts(vec![crate::mcpscreen::Act::Traffic]);
+        }
+    }
+
     fn tick_agents(&mut self) {
+        self.tick_mcp();
         // typed at a new shell's first prompt (sessions, duplicates, agents);
         // a shell without our hooks never says "prompt": type it anyway
         for p in self.panes.values_mut() {
@@ -5407,6 +5609,10 @@ impl App {
                 let name = dev.rsplit('/').next().unwrap_or(dev).to_string();
                 let cmd = format!("sv serial --here {} {baud}", shell_quote(dev));
                 self.open_session_tab(&format!("serial · {name}"), &cmd)
+            }
+            ["mcp"] => {
+                self.open_mcp();
+                Ok(())
             }
             ["palette"] => {
                 self.open_palette();
@@ -6091,6 +6297,7 @@ impl App {
             }
             Cmd::Sessions => self.open_sessions(),
             Cmd::Palette => self.open_palette(),
+            Cmd::Mcp => self.open_mcp(),
             Cmd::Broadcast => self.toggle_broadcast(),
             Cmd::RemoteFiles => self.open_remote()?,
             Cmd::Reconnect => {

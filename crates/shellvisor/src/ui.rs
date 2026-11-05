@@ -146,6 +146,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         || app.editor.is_some()
         || app.settings.is_some()
         || app.acts_list.is_some()
+        || app.mcp.is_some()
         || !matches!(app.modal, Modal::None);
     let mut areas = crate::palette::Areas::default();
     if !covered {
@@ -590,6 +591,13 @@ fn draw_all(f: &mut Frame, app: &App) {
     if let Some(pal) = &app.palette {
         draw_palette(f, app, pal);
     }
+    if let Some(m) = &app.mcp {
+        // the whole window, like the design boards (own header and key strip)
+        let r = app.screen;
+        f.render_widget(Clear, r);
+        let waiting = app.mcp_waiting();
+        m.render(r, f.buffer_mut(), waiting.as_deref());
+    }
     if let Some(fd) = &app.find {
         let row = status.unwrap_or(Rect::new(
             0,
@@ -626,6 +634,7 @@ fn draw_all(f: &mut Frame, app: &App) {
         f.render_widget(Paragraph::new(line).style(Style::default().bg(BAR)), row);
     }
     let overlay = app.ctx.is_some()
+        || app.mcp.is_some()
         || app.sessions.is_some()
         || app.palette.is_some()
         || app.table.is_some()

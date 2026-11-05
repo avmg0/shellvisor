@@ -54,6 +54,10 @@ pub enum Role {
     ErrBorder,
     /// Text selected with the mouse.
     Selection,
+    /// The boards' focused-pane ground (#0e1217).
+    Shell,
+    /// The dark amber behind a waiting approval (#1f1a10).
+    Warn,
 }
 
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -82,12 +86,14 @@ pub fn role(r: Role) -> Color {
         Role::ErrBg => ERR_BG,
         Role::ErrBorder => ERR_BORDER,
         Role::Selection => (0x2c, 0x40, 0x5a),
+        Role::Shell => SHELL,
+        Role::Warn => (0x1f, 0x1a, 0x10),
     };
     match MODE.load(Ordering::Relaxed) {
         2 => Color::Rgb(c.0, c.1, c.2),
         1 => match r {
             // too close to the page in 256 colours: no fill
-            Role::Card | Role::ErrBg => Color::Reset,
+            Role::Card | Role::ErrBg | Role::Shell => Color::Reset,
             _ => Color::Indexed(nearest_256(c)),
         },
         _ => match r {
@@ -98,6 +104,8 @@ pub fn role(r: Role) -> Color {
             Role::Bar => Color::Indexed(236),
             Role::ErrBorder => Color::Indexed(167),
             Role::Selection => Color::Indexed(24),
+            Role::Shell => Color::Reset,
+            Role::Warn => Color::Indexed(94),
         },
     }
 }

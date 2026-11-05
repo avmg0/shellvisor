@@ -1810,3 +1810,120 @@ fn remote_files_over_the_ssh_session() {
         "to the server\n"
     );
 }
+
+const FAKE_MCP: &str = r#"import sys, json
+for line in sys.stdin:
+    m = json.loads(line)
+    if "id" not in m:
+        continue
+    meth = m.get("method")
+    if meth == "initialize":
+        r = {"protocolVersion": m["params"]["protocolVersion"], "capabilities": {"tools": {}}, "serverInfo": {"name": "fake", "version": "1"}}
+    elif meth == "tools/list":
+        r = {"tools": [{"name": "echo", "description": "Say it back, loud", "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}]}
+    elif meth == "tools/call":
+        r = {"content": [{"type": "text", "text": m["params"]["arguments"]["text"].upper()}]}
+    else:
+        print(json.dumps({"jsonrpc": "2.0", "id": m["id"], "error": {"code": -32601, "message": "no"}}), flush=True)
+        continue
+    print(json.dumps({"jsonrpc": "2.0", "id": m["id"], "result": r}), flush=True)
+"#;
+
+#[test]
+fn mcp_screens_check_try_traffic_permissions_and_add() {
+    if !have("python3") {
+        return;
+    }
+    let dir = scratch("mcp");
+    std::fs::write(
+        dir.join("config.yaml"),
+        "start_view: full\nrestore: never\n",
+    )
+    .unwrap();
+    let server = dir.join("server.py");
+    std::fs::write(&server, FAKE_MCP).unwrap();
+    std::fs::write(
+        dir.join("home/.claude.json"),
+        format!(
+            r#"{{"mcpServers":{{"fake":{{"command":"python3","args":["{}"]}},"broken":{{"command":"no-such-mcp-cmd-here"}}}}}}"#,
+            server.display()
+        ),
+    )
+    .unwrap();
+    // one call in a Claude Code log for this project
+    let work = dir.join("work");
+    let key: String = work
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect();
+    let logdir = dir.join("home/.claude/projects").join(key);
+    std::fs::create_dir_all(&logdir).unwrap();
+    std::fs::write(
+        logdir.join("s.jsonl"),
+        "{\"type\":\"assistant\",\"timestamp\":\"2026-11-05T10:00:00.000Z\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"mcp__fake__echo\",\"input\":{\"text\":\"from-the-log\"}}]}}\n\
+         {\"type\":\"user\",\"timestamp\":\"2026-11-05T10:00:00.250Z\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"FROM-THE-LOG\"}]}}\n",
+    )
+    .unwrap();
+    let mut s = Session::launch("bash", dir.clone());
+    s.wait_for("PROMPT>");
+    s.send("sv mcp\r");
+    s.wait_until("board 17", |t| {
+        t.contains("SERVERS")
+            && t.contains("MCP · servers your agents can use")
+            && t.contains("failing")
+    });
+    // broken first (alphabetical), then fake: select it, see its health and tools
+    s.send("j");
+    s.wait_until("fake checked", |t| {
+        t.contains("✔ handshake") && t.contains("echo") && t.contains("Say it back")
+    });
+    s.send("\r");
+    s.send("t");
+    s.wait_for("Try a tool");
+    s.send("hello-mcp");
+    s.send("\r");
+    s.wait_for("HELLO-MCP");
+    // board 18: the call from the log
+    s.send("\x1b");
+    s.send("\x1b");
+    s.pump(Duration::from_millis(200));
+    s.send("2");
+    s.wait_until("board 18", |t| {
+        t.contains("LIVE TRAFFIC") && t.contains("fake · echo") && t.contains("from-the-log")
+    });
+    // permissions: allow the whole fake server for you (Claude Code's settings)
+    s.send("\t");
+    s.pump(Duration::from_millis(200));
+    s.send("j");
+    s.send(" ");
+    s.wait_for("you · mcp__fake → allow");
+    let settings = std::fs::read_to_string(work.join(".claude/settings.local.json")).unwrap();
+    assert!(settings.contains("\"mcp__fake\""), "{settings}");
+    // add a server for Claude Code and Codex (checked first)
+    s.send("\t");
+    s.send("\x1b[B"); // name
+    s.send("fake2");
+    s.send("\x1b[B"); // transport (stdio)
+    s.send("\x1b[B"); // command
+    s.send(&format!("python3 {}", server.display()));
+    s.send("\x1b[B"); // secrets
+    s.send("\x1b[B"); // add to
+    s.send("\x1b[B"); // button
+    s.send("\r");
+    s.wait_for("✔ added to Claude Code, Codex");
+    let codex = std::fs::read_to_string(dir.join("home/.codex/config.toml")).unwrap();
+    assert!(codex.contains("[mcp_servers.fake2]"), "{codex}");
+    let claude = std::fs::read_to_string(dir.join("home/.claude.json")).unwrap();
+    assert!(
+        claude.contains("\"fake2\"") && claude.contains("\"fake\""),
+        "{claude}"
+    );
+    s.send("\x1b");
+    s.wait_for("SERVERS");
+    s.pump(Duration::from_millis(300));
+    s.send("\x1b");
+    s.wait_until("closed", |t| {
+        t.contains("PROMPT>") && !t.contains("SERVERS")
+    });
+}

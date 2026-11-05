@@ -25,6 +25,7 @@ usage:
   sv resize left|right|up|down [n] · sv resize 30% [width|height]   resize this pane
   sv ssh [NAME] · sv ssh save NAME user@host [-p port] [-i key] [-L spec] · sv ssh rm NAME
                                   saved connections (like PuTTY), opened in a new tab
+  sv mcp                          MCP servers: status, tools, try a tool, traffic, permissions, add (also ctrl+] M)
   sv serial [device] [baud]       serial console (routers, boards); no device: list ports · ~. quits
   sv log start [file] · sv log stop   save everything this pane shows to a text file
   sv terminal-colors [profile|undo]  Terminal.app: the design's background (profile: import the Shellvisor profile)
@@ -128,6 +129,28 @@ pub fn run(args: &[String]) -> i32 {
             send_seq(request_sequence(&req))
         }
         "autostart" => crate::autostart::run(&args[1..]),
+        "mcp" => {
+            if !inside() {
+                // outside Shellvisor: list what's configured
+                let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
+                let cwd = std::env::current_dir().unwrap_or_default();
+                let list = crate::mcp::discover(&home, &cwd);
+                if list.is_empty() {
+                    println!("no MCP servers configured (Claude Code, Codex, Gemini, .mcp.json)");
+                }
+                for s in list {
+                    println!(
+                        "{:<18} {:<6} {}  ({})",
+                        s.name,
+                        s.transport_name(),
+                        s.target(),
+                        s.sources.join(", ")
+                    );
+                }
+                return 0;
+            }
+            send_seq(request_sequence(&["mcp"]))
+        }
         "serial" => {
             let rest: Vec<&str> = args[1..].iter().map(String::as_str).collect();
             let (here, rest) = match rest.split_first() {
