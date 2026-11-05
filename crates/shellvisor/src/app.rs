@@ -97,6 +97,8 @@ pub const MENU: &[(&str, Cmd)] = &[
     ("Zoom split", Cmd::Zoom),
     ("Close split", Cmd::ClosePane),
     ("Rename tab", Cmd::RenameTab),
+    ("Connect… (saved sessions)", Cmd::Sessions),
+    ("Duplicate session", Cmd::Duplicate),
     ("New tab", Cmd::NewTab),
     ("Close tab", Cmd::CloseTab),
     ("Low-power mode", Cmd::LowPower),
@@ -230,6 +232,48 @@ impl Selection {
     }
 }
 
+/// Find in a pane's scrollback (ctrl+] /).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Find {
+    pub pane: PaneId,
+    pub query: String,
+    /// (line in all_lines(), first column, length in characters)
+    pub matches: Vec<(usize, u16, u16)>,
+    pub cur: usize,
+}
+
+/// Matches of `query` in `lines` (smart case: case-insensitive unless the
+/// query has a capital letter).
+pub fn find_in(lines: &[String], query: &str) -> Vec<(usize, u16, u16)> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let exact = query.chars().any(char::is_uppercase);
+    let q: Vec<char> = if exact {
+        query.chars().collect()
+    } else {
+        query.to_lowercase().chars().collect()
+    };
+    let mut out = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        let l: Vec<char> = if exact {
+            line.chars().collect()
+        } else {
+            line.to_lowercase().chars().collect()
+        };
+        let mut c = 0;
+        while c + q.len() <= l.len() {
+            if l[c..c + q.len()] == q[..] {
+                out.push((i, c as u16, q.len() as u16));
+                c += q.len();
+            } else {
+                c += 1;
+            }
+        }
+    }
+    out
+}
+
 /// The right-click menu: where it opened and the highlighted item.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ContextMenu {
@@ -241,11 +285,16 @@ pub struct ContextMenu {
     pub cell: (u16, u16),
 }
 
-pub const CONTEXT_ITEMS: [&str; 6] = [
+pub const CONTEXT_ITEMS: [&str; 11] = [
     "Copy",
     "Paste",
     "Select all",
     "Open link",
+    "Find…",
+    "Clear",
+    "Log to file",
+    "Duplicate session",
+    "Reconnect",
     "Split side by side",
     "Split stacked",
 ];
@@ -342,6 +391,10 @@ pub struct PaneState {
     pub activity: Option<Activity>,
     /// A download/install a coding agent in this pane is running (from its screen).
     pub agent_act: Option<Activity>,
+    /// Everything this pane prints goes to a text file (sv log start).
+    pub log: Option<crate::sessionlog::Log>,
+    /// The ssh command that just dropped (ctrl+] R reconnects).
+    pub reconnect: Option<String>,
     /// Rows of the last table `sv` printed here (for F4).
     pub table: Option<PathBuf>,
     /// Stats file of the last `sv flow` run here.
@@ -465,6 +518,10 @@ pub struct App {
     click: Option<(Instant, PaneId, u16, u16, u8)>,
     /// The right-click menu.
     pub ctx: Option<ContextMenu>,
+    /// Find in a pane's scrollback.
+    pub find: Option<Find>,
+    /// The saved-sessions picker: selected row, (name, address, command).
+    pub sessions: Option<(usize, Vec<crate::sessions::Entry>)>,
     /// The activity list (ctrl+] j, `sv activity`), with the selected row.
     pub acts_list: Option<usize>,
     /// Downloads and installs that finished, newest first.
@@ -568,6 +625,8 @@ pub fn run(opts: Options) -> io::Result<i32> {
         sel: None,
         click: None,
         ctx: None,
+        find: None,
+        sessions: None,
         done: std::collections::VecDeque::new(),
         toast_act: None,
         ui: crate::settings::Settings::load(),
@@ -896,6 +955,8 @@ impl App {
                 bell: false,
                 activity: None,
                 agent_act: None,
+                log: None,
+                reconnect: None,
                 table: None,
                 flow: None,
                 agent: None,
@@ -1632,6 +1693,9 @@ impl App {
             return Ok(());
         };
         let fx = p.pane.feed(bytes);
+        if let Some(l) = p.log.as_mut() {
+            l.feed(bytes);
+        }
 
         if !on_screen && !p.unseen {
             p.unseen = true;
@@ -1692,6 +1756,7 @@ impl App {
                 }
             }
             ShellEvent::CommandStarted => {
+                p.reconnect = None;
                 p.started = Some(Instant::now());
                 p.running = true;
                 p.activity = activity::start(&p.command, Path::new(&p.cwd));
@@ -1734,12 +1799,20 @@ impl App {
                         a.status = agents::Status::Exited(code);
                         (a.name.clone(), a.files_summary(), a.branch.clone())
                     });
+                let first = p.command.split_whitespace().next().unwrap_or("");
+                let dropped = (first == "ssh" || first == "mosh") && code == Some(255);
+                if dropped {
+                    p.reconnect = Some(p.command.clone());
+                }
                 let done = p.activity.take();
                 p.running = false;
                 p.started = None;
                 p.last_exit = code;
                 p.command.clear();
                 self.dirty = true;
+                if dropped {
+                    self.notice("the ssh connection closed · ctrl+] R (or right-click) reconnects");
+                }
                 if let Some(a) = done {
                     let ok = matches!(code, Some(0) | None);
                     let d = Finished {
@@ -1859,6 +1932,16 @@ impl App {
     fn on_input(&mut self, bytes: &[u8]) -> io::Result<()> {
         let mut forward: Vec<u8> = Vec::new();
         for key in keys::tokenize(bytes) {
+            if self.sessions.is_some() && self.modal == Modal::None {
+                self.flush_forward(&mut forward)?;
+                self.sessions_key(key)?;
+                continue;
+            }
+            if self.find.is_some() && self.modal == Modal::None {
+                self.flush_forward(&mut forward)?;
+                self.find_key(key);
+                continue;
+            }
             if let Some(m) = self.ctx {
                 self.dirty = true;
                 match key {
@@ -2175,6 +2258,267 @@ impl App {
         Ok(())
     }
 
+    /// Start or stop logging a pane to a text file.
+    fn set_log(&mut self, pane: PaneId, on: bool, path: Option<PathBuf>) {
+        let name = match self.tab_of(pane) {
+            Some(t) => self.tabs[t]
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("tab{}", t + 1)),
+            None => "pane".into(),
+        };
+        let Some(p) = self.panes.get_mut(&pane) else {
+            self.notice("logging works in shell panes");
+            return;
+        };
+        if !on {
+            match p.log.take() {
+                Some(l) => {
+                    let msg = format!("stopped logging · saved in {}", l.path.display());
+                    drop(l);
+                    self.notice(msg);
+                }
+                None => self.notice("this pane isn't being logged"),
+            }
+            return;
+        }
+        if let Some(l) = &p.log {
+            let msg = format!("already logging to {}", l.path.display());
+            self.notice(msg);
+            return;
+        }
+        let path = path.unwrap_or_else(|| crate::sessionlog::default_path(&name));
+        match crate::sessionlog::Log::open(&path) {
+            Ok(l) => {
+                p.log = Some(l);
+                self.notice(format!(
+                    "logging this pane to {} · sv log stop",
+                    path.display()
+                ));
+            }
+            Err(e) => self.notice(format!("log: {}: {e}", path.display())),
+        }
+        self.dirty = true;
+    }
+
+    /// A new tab in the same folder; an ssh/mosh session in it runs again.
+    fn duplicate(&mut self, pane: PaneId) -> io::Result<()> {
+        let (cwd, cmd) = match self.panes.get(&pane) {
+            Some(p) => {
+                let first = p.command.split_whitespace().next().unwrap_or("");
+                let remote = p.running && (first == "ssh" || first == "mosh");
+                let again = if remote {
+                    Some(p.command.clone())
+                } else {
+                    p.reconnect.clone()
+                };
+                (Some(PathBuf::from(&p.cwd)), again)
+            }
+            None => (self.focused_cwd(), None),
+        };
+        let id = self.new_pane(cwd)?;
+        if let (Some(c), Some(p)) = (cmd, self.panes.get_mut(&id)) {
+            p.pending_input = Some((format!("{c}\r"), Instant::now()));
+        }
+        let tab = self.active;
+        self.tabs.insert(tab + 1, Tab::new(id));
+        self.switch_tab(tab + 1);
+        self.session_dirty = true;
+        Ok(())
+    }
+
+    /// Run a dropped ssh session's command again.
+    fn reconnect(&mut self, pane: PaneId) {
+        let Some(p) = self.panes.get_mut(&pane) else {
+            return;
+        };
+        match p.reconnect.take() {
+            Some(cmd) if !p.running => {
+                let _ = p.pane.write(format!("\x05\x15{cmd}\r").as_bytes());
+                self.notice(format!("reconnecting · {cmd}"));
+            }
+            Some(cmd) => {
+                p.reconnect = Some(cmd);
+                self.notice("the shell is busy — wait for the command to finish");
+            }
+            None => self.notice("nothing to reconnect here (an ssh session that dropped)"),
+        }
+    }
+
+    fn open_sessions(&mut self) {
+        let list = crate::sessions::entries();
+        if list.is_empty() {
+            self.notice(
+                "no saved sessions yet — sv ssh save NAME user@host [-p port] [-i key] [-L spec]",
+            );
+            return;
+        }
+        self.sessions = Some((0, list));
+        self.dirty = true;
+    }
+
+    /// Open a saved session (or ~/.ssh/config host) in a new tab named after it.
+    fn open_session_tab(&mut self, name: &str, cmd: &str) -> io::Result<()> {
+        let id = self.new_pane(self.focused_cwd())?;
+        if let Some(p) = self.panes.get_mut(&id) {
+            p.pending_input = Some((format!("{cmd}\r"), Instant::now()));
+        }
+        let tab = self.active;
+        let mut t = Tab::new(id);
+        t.name = Some(name.to_string());
+        self.tabs.insert(tab + 1, t);
+        self.switch_tab(tab + 1);
+        self.session_dirty = true;
+        Ok(())
+    }
+
+    fn sessions_key(&mut self, key: &[u8]) -> io::Result<()> {
+        self.dirty = true;
+        let Some((sel, list)) = self.sessions.as_mut() else {
+            return Ok(());
+        };
+        let n = list.len();
+        match key {
+            b"\x1b[A" | b"\x1bOA" | b"k" => *sel = (*sel + n - 1) % n,
+            b"\x1b[B" | b"\x1bOB" | b"j" => *sel = (*sel + 1) % n,
+            b"\r" => {
+                let (name, _, cmd) = list[*sel].clone();
+                self.sessions = None;
+                self.open_session_tab(&name, &cmd)?;
+            }
+            b"\x1b" | b"q" => self.sessions = None,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn open_find(&mut self, pane: PaneId) {
+        let query = self
+            .find
+            .as_ref()
+            .filter(|f| f.pane == pane)
+            .map(|f| f.query.clone())
+            .unwrap_or_default();
+        self.find = Some(Find {
+            pane,
+            query,
+            matches: Vec::new(),
+            cur: 0,
+        });
+        self.refind();
+        self.dirty = true;
+    }
+
+    /// Search again for the query, starting at the newest match.
+    fn refind(&mut self) {
+        let Some(f) = self.find.as_mut() else { return };
+        let Some(p) = self.panes.get(&f.pane) else {
+            self.find = None;
+            return;
+        };
+        let lines = p.pane.screen().all_lines();
+        f.matches = find_in(&lines, &f.query);
+        f.cur = f.matches.len().saturating_sub(1);
+        self.show_match();
+    }
+
+    /// Scroll the pane so the current match is in view (middle of the screen).
+    fn show_match(&mut self) {
+        let Some(f) = self.find.as_ref() else { return };
+        let Some(&(line, _, _)) = f.matches.get(f.cur) else {
+            return;
+        };
+        let pane = f.pane;
+        let Some(p) = self.panes.get_mut(&pane) else {
+            return;
+        };
+        let sb = p.pane.screen().scrollback_lines();
+        let rows = p.pane.screen().size().0 as usize;
+        let top = sb - p.pane.scroll();
+        if line >= top && line < top + rows {
+            return; // already on screen
+        }
+        let want_top = line.saturating_sub(rows / 2);
+        p.pane.scroll_to(sb.saturating_sub(want_top));
+        self.dirty = true;
+    }
+
+    fn find_key(&mut self, key: &[u8]) {
+        self.dirty = true;
+        let Some(f) = self.find.as_mut() else { return };
+        let n = f.matches.len();
+        match key {
+            b"\x1b" => {
+                self.find = None;
+                return;
+            }
+            b"\r" | b"\x1b[B" | b"\x1bOB" => {
+                if n > 0 {
+                    f.cur = (f.cur + n - 1) % n; // the one before (older)
+                }
+            }
+            b"\x1b[A" | b"\x1bOA" => {
+                if n > 0 {
+                    f.cur = (f.cur + 1) % n; // the one after (newer)
+                }
+            }
+            [0x7f] | [0x08] => {
+                f.query.pop();
+                self.refind();
+                return;
+            }
+            [0x15] => {
+                f.query.clear();
+                self.refind();
+                return;
+            }
+            k if k.first().is_some_and(|b| *b >= 0x20) && !k.starts_with(b"\x1b") => {
+                f.query.push_str(&String::from_utf8_lossy(k));
+                self.refind();
+                return;
+            }
+            _ => return,
+        }
+        self.show_match();
+    }
+
+    /// Clear a pane and its scrollback; the shell redraws its prompt.
+    fn clear_pane(&mut self, pane: PaneId) {
+        let Some(p) = self.panes.get_mut(&pane) else {
+            self.notice("clear works in shell panes");
+            return;
+        };
+        p.pane.clear_scrollback();
+        if !p.running {
+            // ctrl+L: the shell clears the screen and redraws the prompt
+            let _ = p.pane.write(b"\x0c");
+        }
+        if self.find.as_ref().is_some_and(|f| f.pane == pane) {
+            self.find = None;
+        }
+        self.sel = None;
+        self.dirty = true;
+    }
+
+    fn open_url(&mut self, url: &str) {
+        let opener = if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
+        let ok = std::process::Command::new(opener)
+            .arg(url)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .is_ok();
+        self.notice(if ok {
+            format!("opening {url}")
+        } else {
+            format!("couldn't run {opener}")
+        });
+    }
+
     /// The selected text (trailing spaces trimmed on each line).
     pub fn selection_text(&self) -> Option<String> {
         let s = self.sel?;
@@ -2227,24 +2571,7 @@ impl App {
     fn context_act_menu(&mut self, m: &ContextMenu, item: usize) -> io::Result<()> {
         if item == 3 {
             match self.context_link(m) {
-                Some(url) => {
-                    let opener = if cfg!(target_os = "macos") {
-                        "open"
-                    } else {
-                        "xdg-open"
-                    };
-                    let ok = std::process::Command::new(opener)
-                        .arg(&url)
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .spawn()
-                        .is_ok();
-                    self.notice(if ok {
-                        format!("opening {url}")
-                    } else {
-                        format!("couldn't run {opener}")
-                    });
-                }
+                Some(url) => self.open_url(&url),
                 None => self.notice("no link there — right-click on a URL to open it"),
             }
             return Ok(());
@@ -2300,9 +2627,23 @@ impl App {
                     self.notice("selected · right-click → Copy");
                 }
             }
-            4 | 5 => {
+            4 => {
                 self.focus_pane(pane);
-                self.run_cmd(if item == 4 {
+                self.open_find(pane);
+            }
+            5 => self.clear_pane(pane),
+            6 => {
+                let on = self.panes.get(&pane).is_some_and(|p| p.log.is_some());
+                self.set_log(pane, !on, None);
+            }
+            7 => {
+                self.focus_pane(pane);
+                self.duplicate(pane)?;
+            }
+            8 => self.reconnect(pane),
+            9 | 10 => {
+                self.focus_pane(pane);
+                self.run_cmd(if item == 9 {
                     Cmd::SplitRight
                 } else {
                     Cmd::SplitDown
@@ -4132,6 +4473,17 @@ impl App {
 
     /// Idle detection, trailing approval checks, and git change polling.
     fn tick_agents(&mut self) {
+        // typed at a new shell's first prompt (sessions, duplicates, agents);
+        // a shell without our hooks never says "prompt": type it anyway
+        for p in self.panes.values_mut() {
+            if p.pending_input
+                .as_ref()
+                .is_some_and(|(_, at)| at.elapsed() > Duration::from_secs(2))
+            {
+                let (text, _) = p.pending_input.take().unwrap();
+                let _ = p.pane.write(text.as_bytes());
+            }
+        }
         self.check_waiters();
         // an agent that stopped working isn't installing anything any more
         let mut cleared = false;
@@ -4423,6 +4775,36 @@ impl App {
         if inside && !program && ev.wheel().is_none() && !ev.release && !ev.is_motion() {
             let (row, col) = (ev.y - inner.y, ev.x - inner.x);
             let scroll = p.pane.scroll();
+            let cols = p.pane.screen().size().1;
+            // ctrl-click a link opens it (terminals don't report ⌘ in clicks)
+            if ev.code & 0b11 == 0 && ev.code & 16 != 0 {
+                let line = p.pane.screen().contents_between(row, 0, row, cols);
+                if let Some(url) = url_at(&line, col as usize) {
+                    self.open_url(&url);
+                    return Ok(());
+                }
+            }
+            // option-click on the line being typed moves the cursor there
+            if ev.code & 0b11 == 0
+                && ev.code & 8 != 0
+                && !p.running
+                && scroll == 0
+                && !p.pane.screen().alternate_screen()
+            {
+                let (cr, cc) = p.pane.screen().cursor_position();
+                let delta = (row as i64 - cr as i64) * cols as i64 + (col as i64 - cc as i64);
+                if delta != 0 && delta.abs() <= 4000 {
+                    let app = p.pane.screen().application_cursor();
+                    let key: &[u8] = match (delta > 0, app) {
+                        (true, false) => b"\x1b[C",
+                        (true, true) => b"\x1bOC",
+                        (false, false) => b"\x1b[D",
+                        (false, true) => b"\x1bOD",
+                    };
+                    p.pane.write(&key.repeat(delta.unsigned_abs() as usize))?;
+                }
+                return Ok(());
+            }
             match ev.code & 0b11 {
                 0 => {
                     let n = match self.click {
@@ -4460,6 +4842,16 @@ impl App {
                         }
                     }
                     self.dirty = true;
+                    return Ok(());
+                }
+                1 => {
+                    // middle-click pastes (like PuTTY and X11 terminals)
+                    self.context_act(id, 1)?;
+                    return Ok(());
+                }
+                2 if self.ui.right_click == "paste" && ev.code & 16 == 0 => {
+                    // PuTTY: right-click pastes (ctrl+right-click: the menu)
+                    self.context_act(id, 1)?;
                     return Ok(());
                 }
                 2 => {
@@ -4577,6 +4969,27 @@ impl App {
                     self.notice(
                         "sv resize: nothing to resize here (one pane, or already at the limit)",
                     );
+                }
+                Ok(())
+            }
+            ["ssh"] => {
+                self.open_sessions();
+                Ok(())
+            }
+            ["ssh", name, cmd] => self.open_session_tab(name, cmd),
+            ["log", rest @ ..] => {
+                let id = self.focused();
+                match rest {
+                    ["start"] => self.set_log(id, true, None),
+                    ["start", path] => self.set_log(id, true, Some(PathBuf::from(path))),
+                    ["stop"] => self.set_log(id, false, None),
+                    _ => {
+                        let msg = match self.panes.get(&id).and_then(|p| p.log.as_ref()) {
+                            Some(l) => format!("logging this pane to {}", l.path.display()),
+                            None => "not logging this pane (sv log start [file])".to_string(),
+                        };
+                        self.notice(msg);
+                    }
                 }
                 Ok(())
             }
@@ -5224,6 +5637,27 @@ impl App {
                 self.settings = Some(crate::settings::Screen::new());
             }
             Cmd::Activity => self.acts_list = Some(0),
+            Cmd::Find => {
+                let id = self.focused();
+                if self.panes.contains_key(&id) {
+                    self.open_find(id);
+                } else {
+                    self.notice("find works in shell panes");
+                }
+            }
+            Cmd::ClearPane => {
+                let id = self.focused();
+                self.clear_pane(id);
+            }
+            Cmd::Sessions => self.open_sessions(),
+            Cmd::Reconnect => {
+                let id = self.focused();
+                self.reconnect(id);
+            }
+            Cmd::Duplicate => {
+                let id = self.focused();
+                self.duplicate(id)?;
+            }
             Cmd::LayoutEditor => {
                 if self.view == View::Basic {
                     self.set_view(View::Full);
@@ -5399,5 +5833,20 @@ mod select_tests {
         };
         assert_eq!(s.range(), ((1, 2), (3, 5)));
         assert!(s.contains(2, 0) && s.contains(1, 2) && !s.contains(1, 1) && !s.contains(3, 6));
+        let lines = vec![
+            "Error one".to_string(),
+            "no".into(),
+            "error two ERROR".into(),
+        ];
+        assert_eq!(
+            find_in(&lines, "error"),
+            vec![(0, 0, 5), (2, 0, 5), (2, 10, 5)]
+        );
+        assert_eq!(
+            find_in(&lines, "ERROR"),
+            vec![(2, 10, 5)],
+            "a capital: exact case"
+        );
+        assert!(find_in(&lines, "").is_empty());
     }
 }

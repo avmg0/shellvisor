@@ -157,6 +157,20 @@ impl Screen {
         })
     }
 
+    /// Shellvisor: every line of the scrollback, then the screen (for
+    /// search). Line `i` is visible at row `i - (scrollback_lines() -
+    /// scrollback())` when that is within the screen.
+    #[must_use]
+    pub fn all_lines(&self) -> Vec<String> {
+        self.grid().all_lines()
+    }
+
+    /// Shellvisor: how many lines are in the scrollback.
+    #[must_use]
+    pub fn scrollback_lines(&self) -> usize {
+        self.grid().scrollback_count()
+    }
+
     /// Returns the text contents of the terminal logically between two cells.
     /// This will include the remainder of the starting row after `start_col`,
     /// followed by the entire contents of the rows between `start_row` and
@@ -1062,6 +1076,8 @@ impl Screen {
             0 => self.grid_mut().erase_all_forward(attrs),
             1 => self.grid_mut().erase_all_backward(attrs),
             2 => self.grid_mut().erase_all(attrs),
+            // Shellvisor: like xterm and Terminal.app, ED 3 clears scrollback
+            3 => self.grid_mut().clear_scrollback(),
             _ => unhandled(self),
         }
     }

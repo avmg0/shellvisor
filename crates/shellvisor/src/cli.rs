@@ -23,6 +23,9 @@ usage:
   sv theme light|dark|auto        colours of Shellvisor's own frames and panes
   sv autostart on|off|status      start Shellvisor when a terminal opens (zsh, bash)
   sv resize left|right|up|down [n] · sv resize 30% [width|height]   resize this pane
+  sv ssh [NAME] · sv ssh save NAME user@host [-p port] [-i key] [-L spec] · sv ssh rm NAME
+                                  saved connections (like PuTTY), opened in a new tab
+  sv log start [file] · sv log stop   save everything this pane shows to a text file
   sv terminal-colors [profile|undo]  Terminal.app: the design's background (profile: import the Shellvisor profile)
   sv settings     folder colours (prompt, lists), ls as a table, table borders, theme (also alt+s)
   sv activity     downloads & installs: progress, speed, time left, cd / open (also ctrl+] j)
@@ -124,6 +127,58 @@ pub fn run(args: &[String]) -> i32 {
             send_seq(request_sequence(&req))
         }
         "autostart" => crate::autostart::run(&args[1..]),
+        "ssh" => {
+            let rest = &args[1..];
+            // inside Shellvisor, plain `sv ssh` opens the picker
+            if rest.is_empty() && inside() {
+                return send_seq(request_sequence(&["ssh"]));
+            }
+            match crate::sessions::cli(rest) {
+                Err(code) => code,
+                Ok(Some((name, cmd))) => {
+                    if inside() {
+                        send_seq(request_sequence(&["ssh", &name, &cmd]))
+                    } else {
+                        // outside: just run it here
+                        std::process::Command::new("sh")
+                            .arg("-c")
+                            .arg(&cmd)
+                            .status()
+                            .map(|s| s.code().unwrap_or(1))
+                            .unwrap_or(1)
+                    }
+                }
+                Ok(None) => 0,
+            }
+        }
+        "log" => {
+            if !inside() {
+                return not_running("log");
+            }
+            let rest: Vec<String> = match args.get(1).map(String::as_str) {
+                None | Some("status") => vec![],
+                Some("stop") => vec!["stop".into()],
+                Some("start") => match args.get(2) {
+                    Some(f) => {
+                        let p = std::path::Path::new(f);
+                        let abs = if p.is_absolute() {
+                            p.to_path_buf()
+                        } else {
+                            std::env::current_dir().unwrap_or_default().join(p)
+                        };
+                        vec!["start".into(), abs.display().to_string()]
+                    }
+                    None => vec!["start".into()],
+                },
+                Some(other) => {
+                    eprintln!("sv log: `{other}` — start [file], stop or status");
+                    return 2;
+                }
+            };
+            let mut req = vec!["log"];
+            req.extend(rest.iter().map(String::as_str));
+            send_seq(request_sequence(&req))
+        }
         "terminal-colors" | "terminal-colours" => crate::termcolors::run(&args[1..]),
         "activity" | "downloads" => {
             if !inside() {

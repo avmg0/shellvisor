@@ -90,6 +90,19 @@ CPU (history and per core), memory, swap, disks, network, disk I/O, load, temper
 
 **Selecting text and right-click:** drag in a pane to select its text (only that pane's, even with splits) — it's copied to the clipboard when you let go; double-click selects a word, triple-click a line. Right-click opens a menu: Copy, Paste, Select all, Open link (on a URL), Split side by side, Split stacked. When the program in a pane uses the mouse itself (vim with `mouse=a`, htop…), hold **shift** to select. Your terminal's own selection still works too: hold **fn** while dragging (Terminal.app) or **Option** (iTerm2), or set `mouse: false` in the config.
 
+**More of what a terminal does, per pane:**
+- **Find** (`ctrl+]` `/`, or right-click → Find…): searches the pane's whole scrollback, highlights the matches, `⏎`/`↓` older, `↑` newer, `esc` closes. Lower-case searches ignore case.
+- **Clear** (`ctrl+]` `k`, or right-click → Clear): clears the pane and its scrollback; the shell redraws its prompt. `clear` itself now empties the scrollback too, like Terminal.
+- **Option-click** on the line you're typing moves the cursor there; **ctrl-click** a link opens it (terminals don't pass ⌘ with clicks).
+- **Hints when you might be stuck**, on the pane's border: an unclosed quote (`quote>`), an unfinished command, vim (`Esc then :q!`), less / man (`q`), nano, top, a Python or Node prompt, ssh.
+
+**Saved sessions, logging and more (like PuTTY):**
+- `sv ssh save prod deploy@10.0.0.5 -p 2222 -i ~/.ssh/prod -L 8080:localhost:80` saves a connection (keepalive every 30 s unless `-k 0`; `-- cmd` runs a command instead of a shell); `sv ssh prod` opens it in a new tab named after it; `sv ssh` (or `ctrl+]` `S`, or the tab menu) lists your saved sessions and the hosts in `~/.ssh/config`; `sv ssh rm prod`. Your own `ssh`, keys and config are used.
+- When an ssh session drops, `ctrl+]` `R` (or right-click → Reconnect) runs it again.
+- **Duplicate session** (right-click, tab menu): a new tab in the same folder, reconnecting to the same server.
+- **Log to file** (`sv log start [file]`, `sv log stop`, right-click): everything the pane shows, as plain text (colours and progress-bar redraws taken out), in `~/shellvisor-logs/` by default. The pane title shows `⏺ logging`.
+- **Right-click pastes** like PuTTY if you set *Right-click: paste* in settings (ctrl+right-click still opens the menu); middle-click always pastes.
+
 ### `ls` as a table
 
 Inside Shellvisor, `ls` (and `ls <folder>`, `ls -a`) prints a table like nushell's — name, type, size, modified — with folders in your folder colour, and `F4` explores it. `ls -l` and any other flag, `ls` in a pipe or script, and `command ls` are the real ls. Turn it off in settings (`alt+s`).
@@ -118,6 +131,7 @@ bash · ~/work · ◴ git clone ━━━━━━╸━━━ 62% · ETA 6s
 - these colours are your terminal's own 16 (plus orange), so the profile decides the exact shade: with the Shellvisor profile, cyan is the design's `#6cc9d6` — the same as a prompt that draws its folder in cyan
 - `ls` as a table on/off, table borders (rounded or plain), theme
 - **loading spinner** style and **download progress** as a bar or percent only
+- **right-click**: *menu* (default) or *paste* (like PuTTY)
 - **mouse**: *shellvisor* (default — click splits, drag borders, wheel scrollback, select text, right-click menu) or *terminal* (the terminal keeps the mouse: its own selection, right-click menu with Mark / Bookmark, ⌘-click links; you move between splits with keys)
 - **colours**: auto, 24-bit or 256. Terminal.app shows 24-bit colour from macOS 26; before that it has 256 colours, which have no very dark blue — Shellvisor then leaves the page to the terminal's own background, and **`sv terminal-colors profile`** imports a ready-made **Shellvisor** profile for Terminal.app ([packaging/terminal/Shellvisor.terminal](packaging/terminal/Shellvisor.terminal): background `#0b0e12`, text `#d6dbe3`, the 16 ANSI colours from the design, JetBrains Mono 14) — make it the default in Terminal → Settings → Profiles. `sv terminal-colors` alone just sets your current profile's background and text (`sv terminal-colors undo` puts yours back). Typing hex values into the colour picker yourself? Set it to sRGB first, or Display P3 shifts them
 - **dark background**: *design* (default) paints Shellvisor in the design's palette — a very dark blue-grey page `#0b0e12`, panels `#11151b`, shells on `#0e1217`, borders `#262c36`, text `#d6dbe3`, amber / cyan / green / red accents — or *terminal* to keep your terminal's own background. Programs inside shells keep their own colours; basic view always looks like your plain terminal. Terminals without 24-bit colour (e.g. older Terminal.app) get the nearest 256-colour shades

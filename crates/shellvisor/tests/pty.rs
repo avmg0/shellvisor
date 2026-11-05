@@ -1533,3 +1533,131 @@ fn mouse_setting_gives_the_mouse_back_to_the_terminal() {
     let saved = std::fs::read_to_string(s.dir.join("state/settings.yaml")).unwrap();
     assert!(saved.contains("mouse: terminal"), "{saved}");
 }
+
+#[test]
+fn find_clear_hints_and_option_click() {
+    if !have("zsh") {
+        return;
+    }
+    let dir = scratch("findclear");
+    std::fs::write(
+        dir.join("config.yaml"),
+        "start_view: full\nrestore: never\n",
+    )
+    .unwrap();
+    let mut s = Session::launch("zsh", dir.clone());
+    s.wait_for("PROMPT>");
+    s.send("echo needle-old; seq 1 120\r");
+    s.wait_until("output done, needle scrolled off", |t| {
+        t.contains("120") && t.contains("PROMPT>") && !t.contains("needle-old")
+    });
+    // ctrl+] / : find in the pane's scrollback
+    s.send("\x1d");
+    s.send("/");
+    s.wait_for("type to search");
+    s.send("needle");
+    s.wait_until("found and scrolled to", |t| {
+        t.contains("1 of 2") && t.contains("needle-old")
+    });
+    s.send("\x1b");
+    s.wait_until("find closed", |t| !t.contains("1 of 2"));
+    // ctrl+] k : clear the pane and its scrollback
+    s.send("\x1d");
+    s.send("k");
+    s.pump(Duration::from_millis(500));
+    s.send("\x1d");
+    s.send("/");
+    s.send("needle");
+    s.wait_for("no matches");
+    s.send("\x1b");
+    s.wait_until("find closed", |t| !t.contains("no matches"));
+    // an unclosed quote: the hint on the pane's border
+    s.send("echo \"abc\r");
+    s.wait_for("unclosed quote · type it, or ctrl+C to cancel");
+    s.send("\x03");
+    s.wait_until("hint gone", |t| !t.contains("unclosed quote"));
+    // less: how to quit
+    std::fs::write(dir.join("work/notes.txt"), "hello\n").unwrap();
+    s.send("less notes.txt\r");
+    s.wait_for("q quits");
+    s.send("q");
+    s.wait_until("less closed", |t| !t.contains("q quits"));
+    // option-click moves the cursor on the line being typed
+    s.send("clear\r");
+    s.pump(Duration::from_millis(300));
+    s.send("echo abcdef");
+    s.wait_for("echo abcdef");
+    let screen = s.screen.screen();
+    let (rows, cols) = screen.size();
+    let mut pos = None;
+    for r in 0..rows {
+        let line: String = (0..cols)
+            .map(|c| screen.cell(r, c).map(|x| x.contents()).unwrap_or_default())
+            .collect();
+        if let Some(i) = line.find("abcdef") {
+            pos = Some((line[..i].chars().count() as u16 + 1, r + 1));
+        }
+    }
+    let (x, y) = pos.unwrap();
+    s.send(&format!("\x1b[<8;{x};{y}M"));
+    s.send(&format!("\x1b[<8;{x};{y}m"));
+    s.pump(Duration::from_millis(300));
+    s.send("X\r");
+    s.wait_for("Xabcdef");
+}
+
+#[test]
+fn saved_sessions_reconnect_and_logging() {
+    let dir = scratch("putty");
+    std::fs::write(
+        dir.join("config.yaml"),
+        "start_view: full\nrestore: never\n",
+    )
+    .unwrap();
+    // a stand-in ssh that "drops" the connection (exit 255)
+    std::fs::create_dir_all(dir.join("home/bin")).unwrap();
+    let fake = dir.join("home/bin/ssh");
+    std::fs::write(&fake, "#!/bin/sh\necho \"fake-ssh $*\"\nexit 255\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(
+        dir.join("home/.bash_profile"),
+        "PS1='PROMPT> '\nexport PATH=\"$HOME/bin:$PATH\"\n",
+    )
+    .unwrap();
+    let mut s = Session::launch("bash", dir.clone());
+    s.wait_for("PROMPT>");
+    s.run("sv ssh save prod deploy@10.0.0.5 -p 2222");
+    s.wait_for("saved prod");
+    s.send("sv ssh prod\r");
+    s.wait_for("fake-ssh -o ServerAliveInterval=30 -p 2222 deploy@10.0.0.5");
+    assert!(
+        s.text().lines().next().unwrap_or("").contains("prod"),
+        "tab named prod"
+    );
+    s.wait_for("the ssh connection closed");
+    s.send("\x1d");
+    s.send("R");
+    s.wait_until("reconnected", |t| t.matches("fake-ssh -o").count() >= 2);
+    // logging a pane to a file: text only
+    s.run("sv log start session.log");
+    s.wait_for("logging this pane to");
+    s.run("printf '\\033[1;32mgreen-text\\033[0m\\n'");
+    s.wait_for("green-text");
+    s.run("sv log stop");
+    s.wait_for("stopped logging");
+    let log = std::fs::read_to_string(dir.join("home/session.log"))
+        .or_else(|_| std::fs::read_to_string(dir.join("work/session.log")))
+        .unwrap_or_default();
+    assert!(
+        log.contains("green-text") && !log.contains('\x1b'),
+        "{log:?}"
+    );
+    // the saved-sessions picker
+    s.run("sv ssh");
+    s.wait_until("picker", |t| {
+        t.contains("saved sessions") && t.contains("deploy@10.0.0.5:2222")
+    });
+    s.send("\x1b");
+    s.wait_until("picker closed", |t| !t.contains("saved sessions"));
+}

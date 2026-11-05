@@ -9,3 +9,8 @@ Upstream: https://github.com/doy/vt100-rust (MIT, see LICENSE).
    line in a wide terminal used to cost several KB; most of that is gone.
    Rows always keep at least one cell, and every reader already treats a
    missing cell as blank (`Row::get` returns `None`, contents iterate `cells()`).
+
+2. **Scrollback access** (`src/grid.rs`, `src/screen.rs`): `Screen::all_lines()`
+   and `Screen::scrollback_lines()` for searching a pane's history, and ED 3
+   (`ESC [ 3 J`, what `clear` sends) clears the scrollback like xterm and
+   Terminal.app.

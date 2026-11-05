@@ -308,9 +308,40 @@ fn draw_all(f: &mut Frame, app: &App) {
             if zoomed {
                 rest.push(Span::styled("· zoomed ", Style::default().fg(DIM)));
             }
-            f.render_widget(pane_block_line(title, rest, is_focus), outer);
+            if p.log.is_some() {
+                rest.push(Span::styled("· ⏺ logging ", Style::default().fg(RED)));
+            }
+            let mut block = pane_block_line(title, rest, is_focus);
+            if let Some(h) = stuck_hint(p) {
+                block = block.title_bottom(Span::styled(
+                    format!(" {h} "),
+                    Style::default().fg(INK).bg(AMBER),
+                ));
+            }
+            f.render_widget(block, outer);
         }
         f.render_widget(TermView(p.pane.screen()), inner);
+        // find matches: the current one amber, the others tinted
+        if let Some(fd) = app.find.as_ref().filter(|f| f.pane == id) {
+            let sb = p.pane.screen().scrollback_lines();
+            let top = sb - p.pane.scroll();
+            let rows = inner.height as usize;
+            let buf = f.buffer_mut();
+            for (i, &(line, col, len)) in fd.matches.iter().enumerate() {
+                if line < top || line >= top + rows {
+                    continue;
+                }
+                let y = inner.y + (line - top) as u16;
+                for c in col..(col + len).min(inner.width) {
+                    let cell = &mut buf[(inner.x + c, y)];
+                    if i == fd.cur {
+                        cell.set_bg(AMBER).set_fg(INK);
+                    } else {
+                        cell.set_bg(Color::Indexed(94));
+                    }
+                }
+            }
+        }
         // text selected with the mouse
         if let Some(sel) = app
             .sel
@@ -364,7 +395,7 @@ fn draw_all(f: &mut Frame, app: &App) {
     if let Some(sc) = &app.settings {
         let (_, content, _) = app.regions();
         let w = content.width.min(96);
-        let h = content.height.min(30);
+        let h = content.height.min(33);
         let r = Rect::new(
             content.x + (content.width - w) / 2,
             content.y + (content.height - h) / 2,
@@ -527,7 +558,46 @@ fn draw_all(f: &mut Frame, app: &App) {
     if let Some(m) = &app.ctx {
         draw_context_menu(f, app, m);
     }
+    if let Some((sel, list)) = &app.sessions {
+        draw_sessions(f, app, *sel, list);
+    }
+    if let Some(fd) = &app.find {
+        let row = status.unwrap_or(Rect::new(
+            0,
+            app.screen.height.saturating_sub(1),
+            app.screen.width,
+            1,
+        ));
+        f.render_widget(Clear, row);
+        let count = if fd.query.is_empty() {
+            "type to search this pane's scrollback".to_string()
+        } else if fd.matches.is_empty() {
+            "no matches".to_string()
+        } else {
+            format!("{} of {}", fd.matches.len() - fd.cur, fd.matches.len())
+        };
+        let line = Line::from(vec![
+            Span::styled(
+                " find ",
+                Style::default()
+                    .bg(AMBER)
+                    .fg(INK)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" {}▏ ", fd.query),
+                Style::default().fg(TEXT).bg(BAR),
+            ),
+            Span::styled(format!(" {count} "), Style::default().fg(AMBER).bg(BAR)),
+            Span::styled(
+                " ⏎/↓ older · ↑ newer · esc close ",
+                Style::default().fg(DIM).bg(BAR),
+            ),
+        ]);
+        f.render_widget(Paragraph::new(line).style(Style::default().bg(BAR)), row);
+    }
     let overlay = app.ctx.is_some()
+        || app.sessions.is_some()
         || app.table.is_some()
         || app.board.is_some()
         || app.settings.is_some()
@@ -1517,6 +1587,118 @@ fn draw_activity(f: &mut Frame, app: &App, sel: usize) {
     );
 }
 
+/// A hint for a shell that is waiting on something you may not know how
+/// to leave: an unclosed quote, vim, less, a REPL…
+pub fn stuck_hint(p: &PaneState) -> Option<&'static str> {
+    let screen = p.pane.screen();
+    if !p.running {
+        // zsh's continuation prompt says what it waits for ("quote> ")
+        let (row, _) = screen.cursor_position();
+        let cols = screen.size().1;
+        let line = screen.contents_between(row, 0, row, cols);
+        let (head, _) = line.split_once("> ")?;
+        let words: Vec<&str> = head.split_whitespace().collect();
+        if words.is_empty() {
+            return None;
+        }
+        if words.iter().all(|w| w.ends_with("quote")) {
+            return Some("unclosed quote · type it, or ctrl+C to cancel");
+        }
+        if words.contains(&"heredoc") {
+            return Some("here-document · type its end word, or ctrl+C");
+        }
+        let cont = [
+            "pipe",
+            "cmdand",
+            "cmdor",
+            "for",
+            "while",
+            "until",
+            "if",
+            "then",
+            "else",
+            "elif",
+            "function",
+            "cursh",
+            "subsh",
+            "cmdsubst",
+            "case",
+            "select",
+            "foreach",
+            "repeat",
+            "braceparam",
+            "math",
+            "mathsubst",
+            "quote",
+            "dquote",
+            "bquote",
+        ];
+        if words.iter().all(|w| cont.contains(w)) {
+            return Some("command not finished · keep typing, or ctrl+C to cancel");
+        }
+        return None;
+    }
+    let cmd = p.command.trim();
+    let first = cmd
+        .split_whitespace()
+        .find(|w| !w.contains('=') && *w != "sudo")
+        .unwrap_or("");
+    let prog = first.rsplit('/').next().unwrap_or(first);
+    Some(match prog {
+        "vi" | "vim" | "nvim" | "view" | "vimdiff" => "vim · Esc then :q! quits · :wq saves",
+        "less" | "more" | "man" | "most" => "q quits · / searches",
+        "nano" | "pico" => "ctrl+X quits",
+        "emacs" if cmd.contains("-nw") => "ctrl+X ctrl+C quits",
+        "top" | "htop" | "btop" | "watch" => "q quits",
+        "python" | "python3" | "node" | "irb" | "ghci" | "lua"
+            if cmd.split_whitespace().count() == 1 =>
+        {
+            "ctrl+D quits"
+        }
+        "ssh" | "mosh" => "type exit to leave · Enter ~ . if it hangs",
+        "tail" if cmd.contains(" -f") || cmd.contains(" -F") => "ctrl+C stops",
+        _ => return None,
+    })
+}
+
+/// The saved-sessions picker (like PuTTY's Saved Sessions list).
+fn draw_sessions(f: &mut Frame, app: &App, sel: usize, list: &[(String, String, String)]) {
+    let (_, content, _) = app.regions();
+    let h = (list.len() as u16 + 5).min(content.height);
+    let r = centered(content, 72, h);
+    f.render_widget(Clear, r);
+    let block = pane_block(" ⇄ connect · saved sessions ".to_string(), true);
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    let rows = inner.height.saturating_sub(2) as usize;
+    let first = sel.saturating_sub(rows.saturating_sub(1));
+    let mut lines: Vec<Line> = list
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(rows)
+        .map(|(i, (name, addr, _))| {
+            let st = if i == sel {
+                Style::default()
+                    .bg(AMBER)
+                    .fg(INK)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(TEXT)
+            };
+            let w = inner.width as usize;
+            let text = format!(" {name:<22} {addr}");
+            Line::styled(format!("{text:<w$}"), st)
+        })
+        .collect();
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        " ⏎ open in a new tab · esc close · save one: sv ssh save NAME user@host",
+        Style::default().fg(FAINT),
+    ));
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
 /// The right-click menu: Copy, Paste, Select all, Open link, splits.
 fn draw_context_menu(f: &mut Frame, app: &App, m: &crate::app::ContextMenu) {
     use crate::palette::{Role, role};
@@ -1530,6 +1712,9 @@ fn draw_context_menu(f: &mut Frame, app: &App, m: &crate::app::ContextMenu) {
     f.render_widget(block, r);
     let has_sel = app.selection_text().is_some();
     let has_link = app.context_link(m).is_some();
+    let pane = app.panes.get(&m.pane);
+    let logging = pane.is_some_and(|p| p.log.is_some());
+    let can_reconnect = pane.is_some_and(|p| p.reconnect.is_some());
     let lines: Vec<Line> = crate::app::CONTEXT_ITEMS
         .iter()
         .enumerate()
@@ -1537,7 +1722,13 @@ fn draw_context_menu(f: &mut Frame, app: &App, m: &crate::app::ContextMenu) {
             let enabled = match i {
                 0 => has_sel,
                 3 => has_link,
+                8 => can_reconnect,
                 _ => true,
+            };
+            let item = if i == 6 && logging {
+                &"Stop logging"
+            } else {
+                item
             };
             let st = if i == m.sel {
                 Style::default()

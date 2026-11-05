@@ -308,6 +308,17 @@ impl Pane {
         self.scroll = self.parser.screen().scrollback();
     }
 
+    /// Scroll so that `lines` of scrollback are above the screen's top (0 = live).
+    pub fn scroll_to(&mut self, lines: usize) {
+        self.set_scroll(lines);
+    }
+
+    /// Forget this pane's scrollback (its screen stays).
+    pub fn clear_scrollback(&mut self) {
+        self.parser.process(b"\x1b[3J");
+        self.scroll = 0;
+    }
+
     pub fn screen(&self) -> &vt100::Screen {
         self.parser.screen()
     }

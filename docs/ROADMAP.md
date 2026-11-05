@@ -188,6 +188,9 @@ Deliverables
 
 - Mouse setting (done): *shellvisor* (default) or *terminal*, which gives the terminal its own selection, right-click menu and ⌘-click back.
 
+- Terminal features per pane (done): find in scrollback with highlights (`ctrl+] /`), clear pane + scrollback (`ctrl+] k`; ED 3 now clears scrollback), option-click moves the cursor, ctrl-click opens links, hints on the border when stuck (unclosed quote, unfinished command, vim, less, nano, top, REPLs, ssh).
+- PuTTY-style (done): saved sessions (`sv ssh save|rm|NAME`, picker `ctrl+] S`, ~/.ssh/config hosts, keepalive), reconnect a dropped ssh (`ctrl+] R`), duplicate session, session logging to plain text (`sv log start|stop`), right-click pastes (setting) and middle-click paste.
+
 Exit criteria: `sv resize` covered by an end-to-end test; a `v1.0.1` tag releases with one macOS job; CI and Release runs show no deprecation warnings.
 
 ---

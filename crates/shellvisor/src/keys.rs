@@ -113,6 +113,11 @@ pub enum Cmd {
     Settings,
     AttachAgent,
     Activity,
+    Find,
+    ClearPane,
+    Sessions,
+    Reconnect,
+    Duplicate,
 }
 
 /// Ready-made layouts for a tab.
@@ -286,6 +291,36 @@ pub const ACTIONS: &[(&str, Cmd, &[&str], &str)] = &[
         Cmd::Settings,
         &["alt+s"],
         "settings: folder colours (prompt, lists), ls as a table, table borders, theme",
+    ),
+    (
+        "find",
+        Cmd::Find,
+        &[],
+        "find in this pane's scrollback: ↓/⏎ next · ↑ previous · esc close (also: ctrl+] /, right-click)",
+    ),
+    (
+        "clear_pane",
+        Cmd::ClearPane,
+        &[],
+        "clear this pane and its scrollback (also: ctrl+] k, right-click)",
+    ),
+    (
+        "sessions",
+        Cmd::Sessions,
+        &[],
+        "saved connections (like PuTTY): open one in a new tab (also: ctrl+] S, sv ssh)",
+    ),
+    (
+        "reconnect",
+        Cmd::Reconnect,
+        &[],
+        "reconnect a dropped ssh session (also: ctrl+] R, right-click)",
+    ),
+    (
+        "duplicate",
+        Cmd::Duplicate,
+        &[],
+        "duplicate this session in a new tab (same folder, same ssh)",
     ),
     (
         "activity",
@@ -576,6 +611,10 @@ pub fn after_leader(key: &[u8]) -> Option<Cmd> {
         b"E" => LayoutEditor,
         b"," => Settings,
         b"j" => Activity,
+        b"/" => Find,
+        b"k" => ClearPane,
+        b"S" => Sessions,
+        b"R" => Reconnect,
         b"\x1b[A" => Focus(Dir::Up),
         b"\x1b[B" => Focus(Dir::Down),
         b"\x1b[C" => Focus(Dir::Right),
@@ -585,7 +624,7 @@ pub fn after_leader(key: &[u8]) -> Option<Cmd> {
     })
 }
 
-pub const LEADER_HINT: &str = " ctrl+] → t tab · w close tab · x close split · \\ split │ · - split ─ · o next split · z zoom · l layout · m menu · f files · s system · d flow · g agents · + new agent · a approvals · e agent board · E layout editor · , settings · j downloads · ; command bar · v table · b basic view · r rename · 1-9 tab · ? help · ctrl+] send ctrl+] ";
+pub const LEADER_HINT: &str = " ctrl+] → t tab · w close tab · x close split · \\ split │ · - split ─ · o next split · z zoom · l layout · m menu · f files · s system · d flow · g agents · + new agent · a approvals · e agent board · E layout editor · , settings · j downloads · / find · k clear · S sessions · R reconnect · ; command bar · v table · b basic view · r rename · 1-9 tab · ? help · ctrl+] send ctrl+] ";
 
 /// On macOS, Option+key types these characters unless the terminal is set to
 /// send Option as Alt/Meta. Seeing one alone means alt shortcuts can't work.
@@ -752,7 +791,8 @@ mod tests {
         assert_eq!(after_leader(b"2"), Some(Cmd::GoTab(1)));
         assert_eq!(after_leader(b"\x1b[C"), Some(Cmd::Focus(Dir::Right)));
         assert_eq!(after_leader(b"l"), Some(Cmd::NextLayout));
-        assert_eq!(after_leader(b"k"), None);
+        assert_eq!(after_leader(b"/"), Some(Cmd::Find));
+        assert_eq!(after_leader(b"y"), None);
     }
 
     #[test]

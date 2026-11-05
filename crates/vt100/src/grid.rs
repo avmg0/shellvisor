@@ -187,6 +187,31 @@ impl Grid {
             .and_then(|r| r.get_mut(pos.col))
     }
 
+    /// Shellvisor: forget the scrollback (ED 3, "clear").
+    pub fn clear_scrollback(&mut self) {
+        self.scrollback.clear();
+        self.scrollback_offset = 0;
+    }
+
+    /// Shellvisor: how many lines the scrollback holds right now.
+    pub fn scrollback_count(&self) -> usize {
+        self.scrollback.len()
+    }
+
+    /// Shellvisor: every line, oldest scrollback first, then the screen.
+    pub fn all_lines(&self) -> Vec<String> {
+        let cols = self.size().cols;
+        self.scrollback
+            .iter()
+            .chain(self.rows.iter())
+            .map(|r| {
+                let mut s = String::new();
+                r.write_contents(&mut s, 0, cols, false);
+                s
+            })
+            .collect()
+    }
+
     pub fn scrollback_len(&self) -> usize {
         self.scrollback_len
     }

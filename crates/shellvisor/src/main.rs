@@ -33,6 +33,8 @@ mod osinfo;
 mod palette;
 mod paths;
 mod session;
+mod sessionlog;
+mod sessions;
 mod settings;
 mod shell;
 mod sysmon;

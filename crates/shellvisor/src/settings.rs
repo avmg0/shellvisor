@@ -70,6 +70,9 @@ pub struct Settings {
     /// wheel scrollback, select, right-click menu) or "terminal" (the
     /// terminal's own selection, right-click menu, ⌘-click links).
     pub mouse: String,
+    /// Right-click: "menu" (Copy, Paste, Find…) or "paste" (like PuTTY;
+    /// ctrl+right-click still opens the menu).
+    pub right_click: String,
 }
 
 impl Default for Settings {
@@ -88,6 +91,7 @@ impl Default for Settings {
             progress_bar: true,
             colors: "auto".into(),
             mouse: "shellvisor".into(),
+            right_click: "menu".into(),
         }
     }
 }
@@ -172,7 +176,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
-const ROWS: [&str; 13] = [
+const ROWS: [&str; 14] = [
     "Folder colour in the prompt",
     "Folder in the prompt bold",
     "Commands you type",
@@ -186,6 +190,7 @@ const ROWS: [&str; 13] = [
     "Download progress",
     "Colours",
     "Mouse",
+    "Right-click",
 ];
 
 /// The settings screen (alt+s, `sv settings`): ↑↓ pick, ←→ change.
@@ -246,6 +251,7 @@ impl Screen {
             10 => s.progress_bar = !s.progress_bar,
             11 => s.colors = cycle(&["auto", "24-bit", "256"], &s.colors, by),
             12 => s.mouse = cycle(&["shellvisor", "terminal"], &s.mouse, by),
+            13 => s.right_click = cycle(&["menu", "paste"], &s.right_click, by),
             _ => {
                 let cur = if s.theme.is_empty() {
                     "config"
@@ -286,6 +292,12 @@ impl Screen {
                 _ if crate::palette::truecolor_terminal() => "auto · 24-bit".into(),
                 _ => "auto · 256 (no 24-bit from this terminal)".into(),
             },
+            13 => if s.right_click == "paste" {
+                "paste (like PuTTY) · ctrl+right-click for the menu"
+            } else {
+                "menu · copy, paste, find, log, split…"
+            }
+            .to_string(),
             12 => if s.mouse == "terminal" {
                 "terminal · its own selection, right-click menu, ⌘-click"
             } else {
@@ -370,6 +382,20 @@ impl Screen {
             }
             y += 1;
         }
+        // drawn first: on a short screen the preview goes over them
+        if !self.s.true_color() && std::env::var("TERM_PROGRAM").as_deref() == Ok("Apple_Terminal")
+        {
+            put(
+                buf,
+                x0,
+                area.bottom().saturating_sub(2),
+                "Terminal.app before macOS 26 has 256 colours: run `sv terminal-colors` for the design's dark blue",
+                Style::default().fg(amber),
+            );
+        }
+        let hint =
+            "↑↓ setting · ←→ change · esc close  ·  `ls -l` and other flags always run the real ls";
+        put(buf, x0, area.bottom().saturating_sub(1), hint, faint);
         y += 1;
         put(buf, x0, y, "Preview", dim);
         y += 1;
@@ -516,19 +542,6 @@ impl Screen {
                 put(buf, x0 + 30, y, when, text);
             }
         }
-        if !self.s.true_color() && std::env::var("TERM_PROGRAM").as_deref() == Ok("Apple_Terminal")
-        {
-            put(
-                buf,
-                x0,
-                area.bottom().saturating_sub(2),
-                "Terminal.app before macOS 26 has 256 colours: run `sv terminal-colors` for the design's dark blue",
-                Style::default().fg(amber),
-            );
-        }
-        let hint =
-            "↑↓ setting · ←→ change · esc close  ·  `ls -l` and other flags always run the real ls";
-        put(buf, x0, area.bottom().saturating_sub(1), hint, faint);
     }
 }
 
@@ -595,7 +608,10 @@ mod tests {
         for _ in 0..10 {
             sc.key(b"\x1b[B");
         }
-        assert_eq!(sc.sel, 12, "stops at the last row");
+        assert_eq!(sc.sel, 13, "stops at the last row");
+        sc.key(b"\r");
+        assert_eq!(sc.s.right_click, "paste");
+        sc.key(b"\x1b[A");
         sc.key(b"\r");
         assert_eq!(sc.s.mouse, "terminal");
         sc.key(b"\x1b[A");
