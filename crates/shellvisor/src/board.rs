@@ -1650,6 +1650,11 @@ fn fill(buf: &mut Buffer, r: Rect, style: Style) {
     }
 }
 
+/// Words into lines of at most `w` characters (for other screens).
+pub fn wrap_text(s: &str, w: usize) -> Vec<String> {
+    wrap(s, w)
+}
+
 fn wrap(s: &str, w: usize) -> Vec<String> {
     let w = w.max(10);
     let mut out = Vec::new();

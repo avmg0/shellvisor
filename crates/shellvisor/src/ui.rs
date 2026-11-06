@@ -209,6 +209,12 @@ fn draw_all(f: &mut Frame, app: &App) {
     let focused = app.input_target();
     let zoomed = app.tabs[app.active].zoomed;
 
+    if let Some((orch, bus)) = app.agents_regions(app.regions().1) {
+        draw_orchestrator(f, app, orch);
+        if let Some(b) = bus {
+            draw_bus(f, app, b);
+        }
+    }
     for (id, outer, inner) in app.visible() {
         let is_focus = id == focused;
         if let Some(t) = app.tools.get(&id) {
@@ -250,6 +256,7 @@ fn draw_all(f: &mut Frame, app: &App) {
             continue;
         };
         if let (true, Some(a)) = (full, p.agent.as_ref()) {
+            let rows = inner.y > outer.y + 1;
             let mut title = match &a.parent {
                 Some(parent) => format!(" ● {} ← {parent} · {} ", a.name, a.cli.name()),
                 None => format!(" ● {} · {} ", a.name, a.cli.name()),
@@ -284,6 +291,10 @@ fn draw_all(f: &mut Frame, app: &App) {
             let mins = a.started.elapsed().as_secs() / 60;
             if mins > 0 {
                 title.push_str(&format!("· {mins}m "));
+            }
+            if rows {
+                // board 5: the facts are inside the column, the frame stays quiet
+                title = String::new();
             }
             let wants = a.approval().is_some();
             let color = Color::Indexed(a.color);
@@ -320,6 +331,9 @@ fn draw_all(f: &mut Frame, app: &App) {
                 None => block,
             };
             f.render_widget(block, outer);
+            if rows {
+                draw_agent_rows(f, app, a, p, inner, is_focus);
+            }
         } else if full {
             let shells_here = app.tabs[app.active]
                 .root
@@ -633,6 +647,24 @@ fn draw_all(f: &mut Frame, app: &App) {
         }
         Modal::CloseTab { tab, detail, sel } => {
             draw_close_tab(f, app, *tab, detail, *sel);
+            return;
+        }
+        Modal::Tell(text) => {
+            let row = status.unwrap_or(Rect::new(
+                0,
+                app.screen.height.saturating_sub(1),
+                app.screen.width,
+                1,
+            ));
+            f.render_widget(Clear, row);
+            let line = Line::from(vec![
+                Span::styled(" Tell all agents: ", Style::default().bg(AMBER).fg(INK)),
+                Span::raw(format!(" {text}")),
+                Span::styled("   ⏎ send · esc cancel", Style::default().fg(DIM)),
+            ]);
+            f.render_widget(Paragraph::new(line), row);
+            let x = row.x + 19 + text.chars().count() as u16;
+            f.set_cursor_position(Position::new(x.min(row.right().saturating_sub(1)), row.y));
             return;
         }
         Modal::Restore {
@@ -1077,7 +1109,37 @@ fn draw_header(f: &mut Frame, app: &App, r: Rect) {
             .bg(BAR)
             .add_modifier(Modifier::BOLD),
     )];
-    if app.tabs[app.active].focus_mode {
+    let on_agents = app.agents_tab() == Some(app.active);
+    if on_agents {
+        // board 5: "F9 · AGENTS  Manual Auto-plan  session … · 3 agents"
+        let chip = role(Role::TabChip);
+        left.push(Span::styled("  ", Style::default().bg(BAR)));
+        left.push(Span::styled(
+            format!(" {} · AGENTS ", key_label(app, "agents")),
+            Style::default().bg(chip).fg(AMBER),
+        ));
+        left.push(Span::styled("  ", Style::default().bg(BAR)));
+        left.push(Span::styled(
+            " Manual ",
+            Style::default()
+                .bg(AMBER)
+                .fg(INK)
+                .add_modifier(Modifier::BOLD),
+        ));
+        left.push(Span::styled(
+            " Auto-plan ",
+            Style::default().bg(chip).fg(DIM),
+        ));
+        let n = app.agent_ids().len();
+        let session = app
+            .team_name()
+            .map(|t| format!("  session \"{t}\" ·"))
+            .unwrap_or_default();
+        left.push(Span::styled(
+            format!("{session}  {n} agent{}", if n == 1 { "" } else { "s" }),
+            Style::default().fg(DIM).bg(BAR),
+        ));
+    } else if app.tabs[app.active].focus_mode {
         left.push(Span::styled(
             "  layout: focus",
             Style::default().fg(DIM).bg(BAR),
@@ -1329,9 +1391,12 @@ fn draw_keys(f: &mut Frame, app: &App, r: Rect) {
         None if app.panes.get(&target).is_some_and(|p| p.agent.is_some()) => vec![
             (k("agents", "F9"), "Agents ⇄ Workspace"),
             (k("approvals", "alt+a"), "Approvals"),
-            (k("agent_board", "alt+g"), "Agent board"),
-            ("^] D".into(), "Review"),
             (k("zoom", "F5"), "Zoom agent"),
+            ("^] D".into(), "Diff view"),
+            ("^] T".into(), "Tell all"),
+            ("^] Z".into(), "Pause all"),
+            (k("new_agent", "^] +"), "Spawn agent"),
+            (k("agent_board", "alt+g"), "Plan · tree"),
             (k("quit", "^Q"), "Quit"),
         ],
         None => vec![
@@ -1872,6 +1937,329 @@ fn draw_menu(f: &mut Frame, app: &App, sel: usize) {
             Style::default().fg(DIM),
         ));
     f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// Board 5: an agent column's facts above its terminal (name and state;
+/// CLI, worktree, time and tokens; task) and its changes below it.
+fn draw_agent_rows(
+    f: &mut Frame,
+    app: &App,
+    a: &agents::Agent,
+    p: &PaneState,
+    inner: Rect,
+    focus: bool,
+) {
+    let buf = f.buffer_mut();
+    let w = inner.width as usize;
+    let x = inner.x;
+    let color = Color::Indexed(a.color);
+    let line = |buf: &mut ratatui::buffer::Buffer,
+                y: u16,
+                l: Vec<(String, Style)>,
+                r: Vec<(String, Style)>| {
+        let rw: usize = r.iter().map(|(t, _)| t.chars().count()).sum();
+        let mut cx = x;
+        let lim = x + w.saturating_sub(rw + 1) as u16;
+        for (t, st) in l {
+            if cx >= lim {
+                break;
+            }
+            let (nx, _) = buf.set_stringn(cx, y, &t, (lim - cx) as usize, st);
+            cx = nx;
+        }
+        let mut rx = x + w.saturating_sub(rw) as u16;
+        for (t, st) in r {
+            let (nx, _) = buf.set_stringn(rx, y, &t, rw, st);
+            rx = nx;
+        }
+    };
+    let (state, sc) = match &a.status {
+        _ if a.paused => ("⏸ paused".to_string(), DIM),
+        agents::Status::Working => (format!("{} working", spinner(app)), AMBER),
+        agents::Status::NeedsApproval(_) => ("⚑ approval".to_string(), AMBER),
+        agents::Status::Idle if a.worked => ("✔ finished".to_string(), GREEN),
+        agents::Status::Idle => ("● idle".to_string(), DIM),
+        agents::Status::Starting => (format!("{} starting", spinner(app)), DIM),
+        agents::Status::Exited(Some(0)) | agents::Status::Exited(None) => {
+            ("✔ done".to_string(), GREEN)
+        }
+        agents::Status::Exited(Some(c)) => (format!("✖ exit {c}"), RED),
+    };
+    let d = Style::default().fg(DIM);
+    let mut st = Style::default().fg(color);
+    if focus {
+        st = st.add_modifier(Modifier::BOLD);
+    }
+    let name = match &a.parent {
+        Some(par) => format!("● {} ← {par}", a.name),
+        None => format!("● {}", a.name),
+    };
+    line(
+        buf,
+        inner.y - 3,
+        vec![(name, st)],
+        vec![(state, Style::default().fg(sc))],
+    );
+    let place = match (&a.worktree, &a.branch) {
+        (Some(_), Some(b)) => format!("{} · worktree {b}", a.cli.label().to_lowercase()),
+        _ => format!("{} · shared folder", a.cli.label().to_lowercase()),
+    };
+    let secs = a.started.elapsed().as_secs();
+    let mut facts = fmt_secs(secs);
+    if let Some(t) = a.tokens {
+        facts.push_str(&format!(
+            " · {} tok",
+            agents::fmt_tokens(t).trim_end_matches(" tok")
+        ));
+    }
+    line(buf, inner.y - 2, vec![(place, d)], vec![(facts, d)]);
+    match a.approval() {
+        Some(ap) => line(
+            buf,
+            inner.y - 1,
+            vec![
+                ("⚑ ".into(), Style::default().fg(AMBER)),
+                (ap.what.clone(), Style::default().fg(AMBER)),
+            ],
+            vec![],
+        ),
+        None => {
+            let task = if a.task.is_empty() {
+                "—".to_string()
+            } else {
+                a.task.clone()
+            };
+            line(
+                buf,
+                inner.y - 1,
+                vec![("task ".into(), d), (task, Style::default().fg(TEXT))],
+                vec![],
+            )
+        }
+    }
+    let files = a.files_summary();
+    let files = if files.is_empty() {
+        "no changes yet".to_string()
+    } else {
+        files
+    };
+    let act = p
+        .agent_act
+        .as_ref()
+        .map(|x| format!("  {} {}", circle(app), x.label))
+        .unwrap_or_default();
+    line(
+        buf,
+        inner.bottom(),
+        vec![(files, d), (act, Style::default().fg(AMBER))],
+        vec![("type to message".into(), Style::default().fg(FAINT))],
+    );
+}
+
+/// Board 5's left column: the goal, the task graph, what needs you
+/// (approvals, files two agents touched), and the all-agents controls.
+fn draw_orchestrator(f: &mut Frame, app: &App, r: Rect) {
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Indexed(238)))
+        .title(Span::styled(
+            " ORCHESTRATOR ",
+            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    let w = inner.width as usize;
+    let d = Style::default().fg(DIM);
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::styled("goal", d));
+    let goal = app
+        .team_goal()
+        .unwrap_or_else(|| "none set · alt+g plans one from a goal".into());
+    for l in crate::board::wrap_text(&goal, w).into_iter().take(3) {
+        lines.push(Line::styled(l, Style::default().fg(TEXT)));
+    }
+    lines.push(Line::styled(
+        "─".repeat(w),
+        Style::default().fg(Color::Indexed(238)),
+    ));
+    lines.push(Line::styled("task graph", d));
+    let ids = app.agent_ids();
+    for (k, id) in ids.iter().enumerate() {
+        let Some(a) = app.panes.get(id).and_then(|p| p.agent.as_ref()) else {
+            continue;
+        };
+        let (icon, c) = match &a.status {
+            _ if a.paused => ("⏸", DIM),
+            agents::Status::NeedsApproval(_) => ("◆", AMBER),
+            agents::Status::Working | agents::Status::Starting => (spinner(app), AMBER),
+            agents::Status::Idle if a.worked => ("✔", GREEN),
+            agents::Status::Exited(Some(0)) | agents::Status::Exited(None) => ("✔", GREEN),
+            agents::Status::Exited(_) => ("✖", RED),
+            agents::Status::Idle => ("○", DIM),
+        };
+        let indent = "  ".repeat(a.depth.saturating_sub(1) as usize);
+        let task = if a.task.is_empty() {
+            "(no task)".to_string()
+        } else {
+            a.task.clone()
+        };
+        let head = format!("{indent}{icon} {} ", k + 1);
+        let room = w.saturating_sub(head.chars().count() + a.name.chars().count() + 1);
+        let task: String = if task.chars().count() > room {
+            task.chars()
+                .take(room.saturating_sub(1))
+                .chain(['…'])
+                .collect()
+        } else {
+            task
+        };
+        lines.push(Line::from(vec![
+            Span::styled(head, Style::default().fg(c)),
+            Span::styled(format!("{task} "), Style::default().fg(TEXT)),
+            Span::styled(a.name.clone(), Style::default().fg(Color::Indexed(a.color))),
+        ]));
+    }
+    // what needs you
+    let pending = app.pending_approvals();
+    let first = pending
+        .first()
+        .and_then(|id| app.panes.get(id))
+        .and_then(|p| p.agent.as_ref())
+        .and_then(|a| a.approval().map(|ap| (a.name.clone(), ap)));
+    if let Some((who, ap)) = first {
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
+            "⚑ Approval needed",
+            Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+        ));
+        lines.push(Line::from(vec![
+            Span::styled(who, Style::default().fg(CYAN)),
+            Span::styled(" wants to run:", Style::default().fg(TEXT)),
+        ]));
+        let what: String = ap.what.chars().take(w.saturating_sub(2)).collect();
+        lines.push(Line::styled(
+            format!(" {what}"),
+            Style::default().fg(TEXT).bg(Color::Indexed(235)),
+        ));
+        lines.push(Line::from(vec![
+            Span::styled(" y allow ", Style::default().bg(GREEN).fg(INK)),
+            Span::raw(" "),
+            Span::styled(
+                " n deny ",
+                Style::default().bg(Color::Indexed(237)).fg(TEXT),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                " a always ",
+                Style::default().bg(Color::Indexed(237)).fg(DIM),
+            ),
+        ]));
+        lines.push(Line::styled(
+            format!("{} answers", key_label(app, "approvals")),
+            Style::default().fg(FAINT),
+        ));
+    }
+    let overlap = app.agent_overlap();
+    if let Some((file, who)) = overlap.first() {
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
+            "⚠ File overlap",
+            Style::default().fg(RED).add_modifier(Modifier::BOLD),
+        ));
+        lines.push(Line::styled(
+            format!("{} both touched", who.join(" and ")),
+            Style::default().fg(TEXT),
+        ));
+        lines.push(Line::styled(file.clone(), d));
+    }
+    let top = lines.len() as u16;
+    f.render_widget(
+        Paragraph::new(lines),
+        Rect::new(
+            inner.x,
+            inner.y,
+            inner.width,
+            inner.height.saturating_sub(4),
+        ),
+    );
+    // bottom: broadcast and the all-agents keys
+    if inner.height >= top + 5 {
+        let y = inner.bottom() - 4;
+        let buf = f.buffer_mut();
+        buf.set_stringn(inner.x, y, "broadcast to all agents", w, d);
+        let boxed = format!(" {:<width$}", "^] T then type", width = w.saturating_sub(2));
+        buf.set_stringn(
+            inner.x,
+            y + 1,
+            &boxed,
+            w,
+            Style::default().fg(FAINT).bg(Color::Indexed(235)),
+        );
+        let (x, _) = buf.set_stringn(inner.x, y + 3, "^]Z", w, Style::default().fg(AMBER));
+        let (x, _) = buf.set_stringn(x, y + 3, " pause all  ", w, d);
+        let (x, _) = buf.set_stringn(x, y + 3, "^]U", w, Style::default().fg(AMBER));
+        buf.set_stringn(x, y + 3, " resume", w, d);
+    }
+}
+
+/// Board 5's MESSAGE BUS: who handed what to whom, newest last.
+fn draw_bus(f: &mut Frame, app: &App, r: Rect) {
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Indexed(238)))
+        .title(Span::styled(
+            " MESSAGE BUS · handoffs ",
+            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    let n = inner.height as usize;
+    let rows: Vec<&(i64, String)> = app.bus_log.iter().rev().take(n).collect();
+    if rows.is_empty() {
+        f.render_widget(
+            Paragraph::new(Line::styled(
+                "nothing yet · agents' messages, spawns and approvals show here (sv agent send)",
+                Style::default().fg(DIM),
+            )),
+            inner,
+        );
+        return;
+    }
+    let colors: std::collections::HashMap<String, u8> = app
+        .agent_ids()
+        .iter()
+        .filter_map(|id| app.panes.get(id).and_then(|p| p.agent.as_ref()))
+        .map(|a| (a.name.clone(), a.color))
+        .collect();
+    let lines: Vec<Line> = rows
+        .into_iter()
+        .rev()
+        .map(|(t, e)| {
+            let mut spans = vec![Span::styled(
+                format!("{} ", crate::mcpscreen::hms(*t)),
+                Style::default().fg(DIM),
+            )];
+            // "a → b: text" with the names in their colours
+            match e.split_once(": ") {
+                Some((who, rest)) if who.contains(" → ") => {
+                    for (k, part) in who.split(" → ").enumerate() {
+                        if k > 0 {
+                            spans.push(Span::styled(" → ", Style::default().fg(DIM)));
+                        }
+                        let c = colors
+                            .get(part)
+                            .map(|c| Color::Indexed(*c))
+                            .unwrap_or(AMBER);
+                        spans.push(Span::styled(part.to_string(), Style::default().fg(c)));
+                    }
+                    spans.push(Span::styled(format!("  {rest}"), Style::default().fg(TEXT)));
+                }
+                _ => spans.push(Span::styled(e.clone(), Style::default().fg(TEXT))),
+            }
+            Line::from(spans)
+        })
+        .collect();
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 /// Board 12 "Restore last session?": a tick per saved tab and two buttons.

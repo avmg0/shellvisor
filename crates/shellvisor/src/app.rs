@@ -726,6 +726,8 @@ pub enum Modal {
     Confirm(Pending, String),
     /// Tab menu, with the highlighted row.
     Menu(usize),
+    /// Board 5 "broadcast to all agents": the message typed so far.
+    Tell(String),
     /// Board 12 "Restore last session?": a tick per saved tab, the row the
     /// cursor is on (one past the tabs: the buttons).
     Restore {
@@ -1460,10 +1462,42 @@ impl App {
     /// Where the panes go: the content area, less the rail in focus layout.
     pub fn pane_area(&self, content: Rect) -> Rect {
         if self.tabs[self.active].focus_mode && content.width > 40 {
-            Rect::new(content.x, content.y, content.width - RAIL, content.height)
-        } else {
-            content
+            return Rect::new(content.x, content.y, content.width - RAIL, content.height);
         }
+        match self.agents_regions(content) {
+            Some((orch, bus)) => Rect::new(
+                orch.right() + 1,
+                content.y,
+                content.right().saturating_sub(orch.right() + 1),
+                content.height - bus.map(|b| b.height).unwrap_or(0),
+            ),
+            None => content,
+        }
+    }
+
+    /// Board 5 on the agents tab: the orchestrator column on the left and
+    /// the message bus under the columns, when there is room for them.
+    pub fn agents_regions(&self, content: Rect) -> Option<(Rect, Option<Rect>)> {
+        if self.view != View::Full
+            || self.tabs[self.active].zoomed
+            || content.width < 120
+            || content.height < 16
+            || self.agents_tab() != Some(self.active)
+        {
+            return None;
+        }
+        let w = (content.width * 22 / 100).clamp(30, 44);
+        let orch = Rect::new(content.x, content.y, w, content.height);
+        let bus = (content.height >= 30).then(|| {
+            let h = 7;
+            Rect::new(
+                content.x + w + 1,
+                content.bottom() - h,
+                content.width - w - 1,
+                h,
+            )
+        });
+        Some((orch, bus))
     }
 
     /// The git branch of a folder and how many files changed (cached 5 s).
@@ -1506,7 +1540,16 @@ impl App {
             View::Full => self.tabs[self.active]
                 .layout(self.pane_area(content))
                 .into_iter()
-                .map(|(id, r)| (id, r, shrink(r)))
+                .map(|(id, r)| {
+                    let mut inner = shrink(r);
+                    // board 5: an agent column has 3 rows of facts on top and
+                    // its changes at the bottom
+                    if inner.height >= 20 && self.panes.get(&id).is_some_and(|p| p.agent.is_some())
+                    {
+                        inner = Rect::new(inner.x, inner.y + 3, inner.width, inner.height - 4);
+                    }
+                    (id, r, inner)
+                })
                 .collect(),
         }
     }
@@ -2863,6 +2906,45 @@ impl App {
                         self.flush_forward(&mut forward)?;
                         self.run_cmd(cmd)?;
                     }
+                    continue;
+                }
+                Modal::Tell(mut text) => {
+                    match key {
+                        b"\r" => {
+                            self.modal = Modal::None;
+                            let t = text.trim().to_string();
+                            if !t.is_empty() {
+                                let names: Vec<String> = self
+                                    .panes
+                                    .values()
+                                    .filter_map(|p| p.agent.as_ref())
+                                    .filter(|a| !matches!(a.status, agents::Status::Exited(_)))
+                                    .map(|a| a.name.clone())
+                                    .collect();
+                                let sent = names
+                                    .iter()
+                                    .filter(|n| self.send_to_agent(n, &t, "you").is_ok())
+                                    .count();
+                                self.notice(format!(
+                                    "sent to {sent} agent{}",
+                                    if sent == 1 { "" } else { "s" }
+                                ));
+                            }
+                        }
+                        b"\x1b" | [0x03] => self.modal = Modal::None,
+                        [0x7f] | [0x08] => {
+                            text.pop();
+                            self.modal = Modal::Tell(text);
+                        }
+                        k if !k.is_empty() && k[0] >= 0x20 && k[0] != 0x7f && k[0] != 0x1b => {
+                            if text.chars().count() < 400 {
+                                text.push_str(&String::from_utf8_lossy(k));
+                            }
+                            self.modal = Modal::Tell(text);
+                        }
+                        _ => {}
+                    }
+                    self.dirty = true;
                     continue;
                 }
                 Modal::Rename(mut name) => {
@@ -4236,6 +4318,36 @@ impl App {
                 .iter()
                 .any(|id| self.panes.get(id).is_some_and(|p| p.agent.is_some()))
         })
+    }
+
+    /// The running team's name (board 5's "session").
+    pub fn team_name(&self) -> Option<String> {
+        self.team
+            .as_ref()
+            .map(|t| t.team.name.clone())
+            .filter(|n| !n.is_empty())
+    }
+
+    /// The goal agents are working towards: the team's, else the plan's.
+    pub fn team_goal(&self) -> Option<String> {
+        self.team
+            .as_ref()
+            .map(|t| t.goal.clone())
+            .or_else(|| self.board.as_ref().map(|b| b.plan.goal.clone()))
+            .filter(|g| !g.trim().is_empty())
+    }
+
+    /// Files more than one agent changed: (file, agents).
+    pub fn agent_overlap(&self) -> Vec<(String, Vec<String>)> {
+        let mut by: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        for id in self.agent_ids() {
+            if let Some(a) = self.panes.get(&id).and_then(|p| p.agent.as_ref()) {
+                for f in &a.files {
+                    by.entry(f.path.clone()).or_default().push(a.name.clone());
+                }
+            }
+        }
+        by.into_iter().filter(|(_, v)| v.len() > 1).collect()
     }
 
     /// Agent panes, oldest first.
@@ -7989,6 +8101,23 @@ impl App {
                 });
             }
             Cmd::ChangeShell => self.change_shell()?,
+            Cmd::AgentsTell => {
+                if self.agent_ids().is_empty() {
+                    self.notice("no agents running");
+                } else {
+                    self.modal = Modal::Tell(String::new());
+                }
+            }
+            Cmd::AgentsPause | Cmd::AgentsResume => {
+                let op = if cmd == Cmd::AgentsPause {
+                    "pause"
+                } else {
+                    "resume"
+                };
+                let v = self.bus_signal_all(op);
+                let n = v["agents"].as_array().map(|a| a.len()).unwrap_or(0);
+                self.notice(format!("{op}d {n} agent{}", if n == 1 { "" } else { "s" }));
+            }
             Cmd::MoveToWindow => self.notice(
                 "a terminal can't open windows for a program: open a new window and run sv there (alt+w closes this tab)",
             ),
