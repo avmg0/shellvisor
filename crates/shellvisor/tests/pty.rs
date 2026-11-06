@@ -521,6 +521,13 @@ fn closing_a_busy_tab_asks_first() {
         "tab must survive 'n': {:?}",
         s.line(1)
     );
+    // board 12: "Keep in background" takes it off the bar, alt+2 brings it back
+    s.send("\x1bw");
+    s.wait_for("Keep in background");
+    s.send("k");
+    s.wait_until("background chip", |t| top(t).contains("◌ 1 in background"));
+    s.send("\x1b2");
+    s.wait_until("back on the bar", |t| top(t).contains("2 bash · sleep"));
     s.send("\x1bw");
     s.wait_for("is still running");
     s.send("y");
@@ -603,7 +610,8 @@ fn session_is_restored_after_quitting() {
 
     let mut s = Session::launch("bash", dir);
     s.wait_for("Restore last session");
-    s.wait_for("2 tabs: main, /usr");
+    s.wait_for("Restore 2 tabs");
+    s.wait_until("one row per tab", |t| t.contains("▣ 1 · main") && t.contains("▣ 2 · /usr"));
     s.send("y");
     s.wait_until("two tabs back", |t| {
         top(t).contains("1 bash · main") && top(t).contains("2 bash · usr ⊞2")
@@ -696,13 +704,19 @@ fn tab_menu() {
     let mut s = Session::start_full("menu");
     s.wait_for("PROMPT>");
     s.send("\x1bm"); // alt+m
-    s.wait_for("Split side by side");
-    s.send("\x1b[B\x1b[B\r"); // down twice to "Split side by side", enter
+    s.wait_for("Tab menu");
+    s.wait_for("Split right");
+    s.send("\x1b[B\r"); // down a row: "Split right", enter
     s.wait_until("split", |t| top(t).contains("⊞2"));
     s.send("\x1bm");
-    s.wait_for("Rename tab");
+    s.wait_for("Duplicate here");
+    s.send("7"); // Pin / unpin
+    s.wait_for("tab pinned");
+    s.wait_until("icon-only", |t| top(t).contains("⚑ 1"));
+    s.send("\x1bm");
+    s.wait_for("Mute alerts");
     s.send("\x1b"); // esc closes
-    s.wait_until("menu closed", |t| !t.contains("Rename tab"));
+    s.wait_until("menu closed", |t| !t.contains("Duplicate here"));
 }
 
 // ------------------------------------------------------------------ P2 panes
@@ -1269,7 +1283,7 @@ fn agent_runs_in_a_worktree_asks_for_approval_and_takes_messages() {
         fake.display()
     ));
     s.wait_until("agent column", |t| {
-        top(t).contains("2 agents · 1") && t.contains("● api")
+        top(t).contains("2 agent · api") && t.contains("● api")
     });
     s.wait_for("fake agent: go");
     s.wait_for("agent/api"); // its own branch

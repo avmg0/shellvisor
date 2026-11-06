@@ -29,6 +29,10 @@ pub struct SavedTab {
     /// Index of the focused split, in reading order.
     #[serde(default)]
     pub focus: usize,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub muted: bool,
     pub layout: SavedNode,
 }
 
@@ -110,6 +114,14 @@ impl SavedNode {
         })
     }
 
+    /// Holds a pane of this tool ("remote" for an ssh files pane).
+    pub fn has_tool(&self, name: &str) -> bool {
+        match self {
+            SavedNode::Pane { tool, .. } => tool.as_deref() == Some(name),
+            SavedNode::Split { a, b, .. } => a.has_tool(name) || b.has_tool(name),
+        }
+    }
+
     pub fn folders(&self) -> Vec<&str> {
         match self {
             SavedNode::Pane { cwd, .. } if cwd.is_empty() => vec![],
@@ -149,6 +161,7 @@ impl Session {
     }
 
     /// "3 tabs: ~/api, ~/web, /tmp"
+    #[cfg(test)]
     pub fn summary(&self, short: impl Fn(&str) -> String) -> String {
         let folders: Vec<String> = self
             .tabs
@@ -247,6 +260,8 @@ mod tests {
                     name: Some("api".into()),
                     zoomed: false,
                     focus: 2,
+                    pinned: true,
+                    muted: false,
                     layout: SavedNode::capture(&sample_tree(), &|id| Leaf {
                         cwd: format!("/p/{id}"),
                         tool: (id == 2).then(|| "system".to_string()),
@@ -256,6 +271,8 @@ mod tests {
                     name: None,
                     zoomed: true,
                     focus: 0,
+                    pinned: false,
+                    muted: true,
                     layout: SavedNode::Pane {
                         cwd: "/tmp".into(),
                         tool: None,
@@ -302,6 +319,8 @@ mod tests {
                 name: None,
                 zoomed: false,
                 focus: 0,
+                pinned: false,
+                muted: false,
                 layout: SavedNode::Pane {
                     cwd: "/home/a".into(),
                     tool: None,

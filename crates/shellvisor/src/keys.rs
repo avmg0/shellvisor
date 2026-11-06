@@ -126,6 +126,16 @@ pub enum Cmd {
     Review,
     /// Board 20: ssh port forwards.
     Forwards,
+    /// Board 12 tab menu: pin / unpin (icon-only, kept left).
+    PinTab,
+    /// Board 12 tab menu: mute this tab's alerts.
+    MuteTab,
+    /// Board 12 tab menu: run another shell in this split (same folder).
+    ChangeShell,
+    /// Board 12 tab menu: a terminal can't open windows; says how instead.
+    MoveToWindow,
+    /// Bring back a tab kept in the background.
+    BackgroundTabs,
 }
 
 /// Ready-made layouts for a tab.
@@ -326,6 +336,30 @@ pub const ACTIONS: &[(&str, Cmd, &[&str], &str)] = &[
         Cmd::Forwards,
         &[],
         "ssh port forwards: local, remote and SOCKS tunnels for your sessions (also: ctrl+] P, sv ssh forward)",
+    ),
+    (
+        "pin_tab",
+        Cmd::PinTab,
+        &[],
+        "pin or unpin this tab: icon-only, kept at the left (tab menu, alt+m)",
+    ),
+    (
+        "mute_tab",
+        Cmd::MuteTab,
+        &[],
+        "mute or unmute this tab's alerts",
+    ),
+    (
+        "change_shell",
+        Cmd::ChangeShell,
+        &[],
+        "run another shell (zsh, bash, fish…) in this split, same folder",
+    ),
+    (
+        "background_tabs",
+        Cmd::BackgroundTabs,
+        &[],
+        "bring back a tab you kept running in the background",
     ),
     (
         "review",

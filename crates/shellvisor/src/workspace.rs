@@ -383,6 +383,12 @@ pub struct Tab {
     pub arrangement: Option<Arrangement>,
     /// Focus layout (board 3): one shell, a rail of the other panes, a status strip.
     pub focus_mode: bool,
+    /// Pinned (board 12): icon-only, kept at the left.
+    pub pinned: bool,
+    /// Alerts muted: no bell, new-output or finished marks, no toasts.
+    pub muted: bool,
+    /// Closed with "Keep in background": still running, off the tab bar.
+    pub background: bool,
 }
 
 impl Tab {
@@ -394,6 +400,9 @@ impl Tab {
             name: None,
             arrangement: None,
             focus_mode: false,
+            pinned: false,
+            muted: false,
+            background: false,
         }
     }
 

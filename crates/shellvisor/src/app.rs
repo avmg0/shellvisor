@@ -82,31 +82,41 @@ pub struct Options {
 }
 
 /// The tab menu (alt+m).
+/// The tab menu (alt+m). The first nine are board 12's grid, in its order;
+/// the rest follow below them.
 pub const MENU: &[(&str, Cmd)] = &[
+    ("Rename", Cmd::RenameTab),
+    ("Duplicate here", Cmd::Duplicate),
+    ("Change shell ▸", Cmd::ChangeShell),
+    ("Split right", Cmd::SplitRight),
+    ("Split down", Cmd::SplitDown),
+    ("Move to new window", Cmd::MoveToWindow),
+    ("Pin / unpin", Cmd::PinTab),
+    ("Mute alerts", Cmd::MuteTab),
+    ("Close", Cmd::CloseTab),
     ("Files pane", Cmd::ToggleFiles),
     ("System pane", Cmd::ToggleSystem),
-    ("Split side by side", Cmd::SplitRight),
-    ("Split stacked", Cmd::SplitDown),
+    ("Flow pane", Cmd::ToggleFlow),
     ("Layout: dev", Cmd::Preset(Preset::Dev)),
     ("Layout: monitor", Cmd::Preset(Preset::Monitor)),
     ("Layout: files", Cmd::Preset(Preset::Files)),
     ("Layout: data", Cmd::Preset(Preset::Data)),
     ("Layout: focus", Cmd::Preset(Preset::Focus)),
-    ("Flow pane", Cmd::ToggleFlow),
+    ("Rearrange splits", Cmd::NextLayout),
     ("New agent", Cmd::NewAgent),
     ("Make this an agent column", Cmd::AttachAgent),
-    ("Rearrange splits", Cmd::NextLayout),
     ("Zoom split", Cmd::Zoom),
     ("Close split", Cmd::ClosePane),
-    ("Rename tab", Cmd::RenameTab),
     ("Connect… (saved sessions)", Cmd::Sessions),
-    ("Duplicate session", Cmd::Duplicate),
     ("New tab", Cmd::NewTab),
-    ("Close tab", Cmd::CloseTab),
+    ("Background tabs", Cmd::BackgroundTabs),
     ("Low-power mode", Cmd::LowPower),
     ("Basic view", Cmd::ToggleView),
     ("All keys", Cmd::Help),
 ];
+
+/// Columns in the tab menu grid.
+pub const MENU_COLS: usize = 3;
 
 /// A pane that isn't a shell.
 #[allow(clippy::large_enum_variant)] // a handful per window
@@ -702,7 +712,6 @@ pub struct PaneState {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pending {
     Quit,
-    CloseTab(usize),
     ClosePane(PaneId),
     Restore(Box<Session>),
 }
@@ -717,6 +726,20 @@ pub enum Modal {
     Confirm(Pending, String),
     /// Tab menu, with the highlighted row.
     Menu(usize),
+    /// Board 12 "Restore last session?": a tick per saved tab, the row the
+    /// cursor is on (one past the tabs: the buttons).
+    Restore {
+        saved: Box<Session>,
+        checked: Vec<bool>,
+        sel: usize,
+    },
+    /// Board 12 "Close tab N?": what's running, and the highlighted button
+    /// (0 Stop & close · 1 Keep in background · 2 Cancel).
+    CloseTab {
+        tab: usize,
+        detail: String,
+        sel: usize,
+    },
     /// The command bar (alt+;), with what's typed so far.
     Bar(String),
     /// The New agent dialog.
@@ -985,7 +1008,7 @@ pub fn run(opts: Options) -> io::Result<i32> {
     app.tabs.push(Tab::new(first));
     app.offer_restore()?;
     // a fresh start (nothing restored or asked): the folder's or default layout
-    if !matches!(app.modal, Modal::Confirm(..))
+    if !matches!(app.modal, Modal::Confirm(..) | Modal::Restore { .. })
         && app.tabs.len() == 1
         && app.tabs[0].root.panes().len() == 1
     {
@@ -998,7 +1021,7 @@ pub fn run(opts: Options) -> io::Result<i32> {
     }
     // the first-run tour, once (sv tour shows it again)
     if app.view == View::Full
-        && !matches!(app.modal, Modal::Confirm(..))
+        && !matches!(app.modal, Modal::Confirm(..) | Modal::Restore { .. })
         && std::env::var("SHELLVISOR_TOUR").as_deref() != Ok("0")
         && std::fs::read_to_string(crate::paths::state_dir().join("tour.done"))
             .map(|v| v.trim() != TOUR_VERSION)
@@ -1124,12 +1147,18 @@ impl App {
         match self.opts.restore {
             Restore::Always => self.restore(saved)?,
             _ => {
-                let msg = format!(
-                    "Restore last session — {}? (y / n)",
-                    saved.summary(ui::short_path)
-                );
+                // board 12: every saved tab with a tick; ssh tabs start unticked
+                let checked = saved
+                    .tabs
+                    .iter()
+                    .map(|t| !t.layout.has_tool("remote"))
+                    .collect();
                 self.session_locked = true;
-                self.modal = Modal::Confirm(Pending::Restore(Box::new(saved)), msg);
+                self.modal = Modal::Restore {
+                    saved: Box::new(saved),
+                    checked,
+                    sel: 0,
+                };
             }
         }
         Ok(())
@@ -1148,6 +1177,9 @@ impl App {
                 name: t.name.clone(),
                 arrangement: None,
                 focus_mode: false,
+                pinned: t.pinned,
+                muted: t.muted,
+                background: false,
                 root,
             });
         }
@@ -1199,6 +1231,8 @@ impl App {
                 .map(|t| SavedTab {
                     name: t.name.clone(),
                     zoomed: t.zoomed,
+                    pinned: t.pinned,
+                    muted: t.muted,
                     focus: t
                         .root
                         .panes()
@@ -2450,7 +2484,9 @@ impl App {
                 if dropped {
                     self.notice("the ssh connection closed · ctrl+] R (or right-click) reconnects");
                 }
-                if let Some(c) = card.filter(|_| self.ui.fail_card) {
+                // a muted tab (board 12 tab menu) shows no cards or toasts
+                let muted = self.tab_of(id).is_some_and(|t| self.tabs[t].muted);
+                if let Some(c) = card.filter(|_| self.ui.fail_card && !muted) {
                     self.fail = Some((c, Instant::now()));
                 }
                 if let Some(a) = done {
@@ -2488,7 +2524,9 @@ impl App {
                         },
                     );
                     // the finish toast (ui draws it; ctrl+] c / o while it shows)
-                    self.toast_act = Some((d, Instant::now()));
+                    if !muted {
+                        self.toast_act = Some((d, Instant::now()));
+                    }
                     self.dirty = true;
                     self.update_loading_marks();
                 }
@@ -2873,12 +2911,126 @@ impl App {
                     }
                     continue;
                 }
+                Modal::Restore {
+                    saved,
+                    mut checked,
+                    mut sel,
+                } => {
+                    self.dirty = true;
+                    let n = checked.len();
+                    let mut answer = None;
+                    match key {
+                        b"\x1b[A" | b"\x1bOA" | b"k" => sel = sel.saturating_sub(1),
+                        b"\x1b[B" | b"\x1bOB" | b"j" => sel = (sel + 1).min(n.saturating_sub(1)),
+                        b" " | b"x" => {
+                            if let Some(c) = checked.get_mut(sel) {
+                                *c = !*c;
+                            }
+                        }
+                        b"a" => {
+                            let all = checked.iter().all(|c| *c);
+                            checked.iter_mut().for_each(|c| *c = !all);
+                        }
+                        b"y" | b"Y" | b"\r" | b"r" => answer = Some(true),
+                        b"n" | b"N" | b"\x1b" | [0x03] | b"f" => answer = Some(false),
+                        _ => {}
+                    }
+                    match answer {
+                        Some(true) if checked.iter().any(|c| *c) => {
+                            self.modal = Modal::None;
+                            let mut s = *saved;
+                            let keep: Vec<bool> = checked.clone();
+                            let active_was = s.active;
+                            let mut new_active = 0;
+                            let mut k = 0;
+                            s.tabs = s
+                                .tabs
+                                .into_iter()
+                                .enumerate()
+                                .filter_map(|(i, t)| {
+                                    if keep.get(i).copied().unwrap_or(true) {
+                                        if i <= active_was {
+                                            new_active = k;
+                                        }
+                                        k += 1;
+                                        Some(t)
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+                            s.active = new_active;
+                            self.confirmed(Pending::Restore(Box::new(s)))?;
+                        }
+                        Some(_) => {
+                            // "Start fresh" (or nothing ticked): save the new session from now on
+                            self.modal = Modal::None;
+                            self.session_locked = false;
+                            self.session_dirty = true;
+                        }
+                        None => {
+                            self.modal = Modal::Restore {
+                                saved,
+                                checked,
+                                sel,
+                            }
+                        }
+                    }
+                    continue;
+                }
+                Modal::CloseTab { tab, detail, sel } => {
+                    self.dirty = true;
+                    let pick = match key {
+                        b"\x1b[D" | b"\x1bOD" | b"h" | b"\x1b[Z" => {
+                            self.modal = Modal::CloseTab {
+                                tab,
+                                detail,
+                                sel: (sel + 2) % 3,
+                            };
+                            None
+                        }
+                        b"\x1b[C" | b"\x1bOC" | b"l" | b"\t" => {
+                            self.modal = Modal::CloseTab {
+                                tab,
+                                detail,
+                                sel: (sel + 1) % 3,
+                            };
+                            None
+                        }
+                        b"\r" | b" " => Some(sel),
+                        b"y" | b"Y" | b"s" | b"S" | [0x11] => Some(0),
+                        b"k" | b"K" | b"b" | b"B" => Some(1),
+                        _ => Some(2), // n, c, esc, anything else: cancel
+                    };
+                    match pick {
+                        Some(0) => {
+                            self.modal = Modal::None;
+                            self.close_tab(tab);
+                        }
+                        Some(1) => {
+                            self.modal = Modal::None;
+                            self.keep_in_background(tab);
+                        }
+                        Some(_) => self.modal = Modal::None,
+                        None => {}
+                    }
+                    if self.quit.is_some() {
+                        return Ok(());
+                    }
+                    continue;
+                }
                 Modal::Menu(i) => {
                     let n = MENU.len();
+                    let c = MENU_COLS;
                     self.dirty = true;
                     match key {
-                        b"\x1b[A" | b"\x1bOA" | b"k" => self.modal = Modal::Menu((i + n - 1) % n),
-                        b"\x1b[B" | b"\x1bOB" | b"j" => self.modal = Modal::Menu((i + 1) % n),
+                        // a grid: ↑↓ a row, ←→ a column
+                        b"\x1b[A" | b"\x1bOA" | b"k" => self.modal = Modal::Menu((i + n - c) % n),
+                        b"\x1b[B" | b"\x1bOB" | b"j" => self.modal = Modal::Menu((i + c) % n),
+                        b"\x1b[D" | b"\x1bOD" | b"h" => self.modal = Modal::Menu((i + n - 1) % n),
+                        b"\x1b[C" | b"\x1bOC" | b"l" | b"\t" => {
+                            self.modal = Modal::Menu((i + 1) % n)
+                        }
                         b"\r" | b" " => {
                             self.modal = Modal::None;
                             self.flush_forward(&mut forward)?;
@@ -2890,10 +3042,6 @@ impl App {
                         [d @ b'1'..=b'9'] if ((d - b'1') as usize) < n => {
                             self.modal = Modal::None;
                             self.run_cmd(MENU[(d - b'1') as usize].1)?;
-                        }
-                        b"0" if n >= 10 => {
-                            self.modal = Modal::None;
-                            self.run_cmd(MENU[9].1)?;
                         }
                         _ => self.modal = Modal::None, // esc, q, alt+m, anything else closes
                     }
@@ -6753,6 +6901,12 @@ impl App {
                 if ev.is_left_press() {
                     if let Some(i) = ui::tab_at(self, ev.x) {
                         self.switch_tab(i);
+                    } else if let Some(what) = ui::strip_extra_at(self, ev.x) {
+                        self.run_cmd(if what == "new" {
+                            Cmd::NewTab
+                        } else {
+                            Cmd::BackgroundTabs
+                        })?;
                     } else if ev.x > bar.x + bar.width / 2 && !self.activities().is_empty() {
                         self.acts_list = Some(0);
                         self.dirty = true;
@@ -7560,6 +7714,108 @@ impl App {
         Ok(())
     }
 
+    /// "Keep in background": the tab keeps running, off the bar (◌ chip).
+    fn keep_in_background(&mut self, tab: usize) {
+        let others = (0..self.tabs.len()).find(|i| *i != tab && !self.tabs[*i].background);
+        let Some(other) = others else {
+            self.notice("it's the only tab on the bar — Stop & close, or Cancel");
+            return;
+        };
+        self.tabs[tab].background = true;
+        if self.active == tab {
+            self.switch_tab(other);
+        }
+        self.notice(format!(
+            "tab {} keeps running in the background · ◌ on the tab bar brings it back",
+            tab + 1
+        ));
+    }
+
+    /// Move a tab to another place on the bar, keeping the same one active.
+    fn move_tab(&mut self, from: usize, to: usize) {
+        if from == to || from >= self.tabs.len() {
+            return;
+        }
+        let active = self.active;
+        let t = self.tabs.remove(from);
+        let to = to.min(self.tabs.len());
+        self.tabs.insert(to, t);
+        self.active = if active == from {
+            to
+        } else {
+            let mut a = active;
+            if from < a {
+                a -= 1;
+            }
+            if to <= a {
+                a += 1;
+            }
+            a
+        };
+        self.relayout();
+    }
+
+    /// Board 12 "Change shell": the next installed shell, same folder, in
+    /// place of the focused one.
+    fn change_shell(&mut self) -> io::Result<()> {
+        let id = self.focused();
+        let Some(p) = self.panes.get(&id) else {
+            self.notice("pick a shell split first");
+            return Ok(());
+        };
+        if p.running {
+            self.notice("the shell is busy — wait for the command to finish");
+            return Ok(());
+        }
+        let (current, cwd) = (p.shell.clone(), PathBuf::from(&p.cwd));
+        let order = ["zsh", "bash", "fish", "sh"];
+        let have: Vec<&str> = order
+            .iter()
+            .copied()
+            .filter(|s| crate::shell::find_in_path(s).is_some())
+            .collect();
+        let at = have
+            .iter()
+            .position(|s| *s == current)
+            .unwrap_or(have.len() - 1);
+        let Some(next) = have
+            .iter()
+            .cycle()
+            .skip(at + 1)
+            .take(have.len())
+            .find(|s| **s != current)
+        else {
+            self.notice("no other shell installed");
+            return Ok(());
+        };
+        let launch = match crate::shell::build(
+            Some(next),
+            self.opts.launch.integrated,
+            &crate::paths::cache_dir(),
+        ) {
+            Ok(l) => l,
+            Err(e) => {
+                self.notice(format!("{next}: {e}"));
+                return Ok(());
+            }
+        };
+        let saved = std::mem::replace(&mut self.opts.launch, launch);
+        let made = self.new_pane(Some(cwd));
+        self.opts.launch = saved;
+        let new = made?;
+        let tab = self.active;
+        self.tabs[tab].root.split(id, Axis::Horizontal, new);
+        let root = std::mem::replace(&mut self.tabs[tab].root, Node::Leaf(new));
+        self.tabs[tab].root = root.remove(id).unwrap_or(Node::Leaf(new));
+        self.tabs[tab].focus = new;
+        if let Some(mut old) = self.panes.remove(&id) {
+            old.pane.kill();
+        }
+        self.relayout();
+        self.notice(format!("{current} → {next}"));
+        Ok(())
+    }
+
     fn switch_tab(&mut self, i: usize) {
         if i < self.tabs.len() && i != self.active {
             self.active = i;
@@ -7587,7 +7843,6 @@ impl App {
     fn confirmed(&mut self, p: Pending) -> io::Result<()> {
         match p {
             Pending::Quit => self.quit = Some(0),
-            Pending::CloseTab(i) => self.close_tab(i),
             Pending::ClosePane(id) => self.close_pane(id),
             Pending::Restore(saved) => self.restore(*saved)?,
         }
@@ -7654,8 +7909,35 @@ impl App {
                 if busy.is_empty() {
                     self.close_tab(tab);
                 } else {
-                    let msg = format!("Close tab {}? {}. (y / n)", tab + 1, Self::describe(&busy));
-                    self.modal = Modal::Confirm(Pending::CloseTab(tab), msg);
+                    // board 12: "npm run dev is still running (pid 51200 · 12m)"
+                    let first = self.tabs[tab]
+                        .root
+                        .panes()
+                        .into_iter()
+                        .filter_map(|id| self.panes.get(&id))
+                        .find(|p| p.running);
+                    let extra = first
+                        .map(|p| {
+                            let mut v = Vec::new();
+                            if let Some(pid) = p.pane.pid() {
+                                v.push(format!("pid {pid}"));
+                            }
+                            if let Some(s) = p.started {
+                                v.push(ui::fmt_secs(s.elapsed().as_secs()));
+                            }
+                            if v.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" ({})", v.join(" · "))
+                            }
+                        })
+                        .unwrap_or_default();
+                    let detail = format!("{}{extra}", Self::describe(&busy));
+                    self.modal = Modal::CloseTab {
+                        tab,
+                        detail,
+                        sel: 0,
+                    };
                 }
             }
             Cmd::ClosePane => {
@@ -7668,13 +7950,55 @@ impl App {
                     self.modal = Modal::Confirm(Pending::ClosePane(id), msg);
                 }
             }
-            Cmd::NextTab => self.switch_tab((tab + 1) % self.tabs.len()),
-            Cmd::PrevTab => self.switch_tab((tab + self.tabs.len() - 1) % self.tabs.len()),
+            Cmd::NextTab | Cmd::PrevTab => {
+                // background tabs are off the bar: step over them
+                let n = self.tabs.len();
+                let step = if cmd == Cmd::NextTab { 1 } else { n - 1 };
+                let mut i = tab;
+                for _ in 0..n {
+                    i = (i + step) % n;
+                    if !self.tabs[i].background {
+                        break;
+                    }
+                }
+                self.switch_tab(i);
+            }
             Cmd::GoTab(i) => {
                 if i < self.tabs.len() {
+                    self.tabs[i].background = false;
                     self.switch_tab(i);
                 }
             }
+            Cmd::PinTab => {
+                let pin = !self.tabs[tab].pinned;
+                self.tabs[tab].pinned = pin;
+                // pinned tabs sit together at the left
+                let to = self.tabs.iter().filter(|t| t.pinned).count() - usize::from(pin);
+                self.move_tab(tab, to);
+                self.session_dirty = true;
+                self.notice(if pin { "tab pinned" } else { "tab unpinned" });
+            }
+            Cmd::MuteTab => {
+                let mute = !self.tabs[tab].muted;
+                self.tabs[tab].muted = mute;
+                self.session_dirty = true;
+                self.notice(if mute {
+                    "alerts muted for this tab"
+                } else {
+                    "alerts back on for this tab"
+                });
+            }
+            Cmd::ChangeShell => self.change_shell()?,
+            Cmd::MoveToWindow => self.notice(
+                "a terminal can't open windows for a program: open a new window and run sv there (alt+w closes this tab)",
+            ),
+            Cmd::BackgroundTabs => match self.tabs.iter().position(|t| t.background) {
+                Some(i) => {
+                    self.tabs[i].background = false;
+                    self.switch_tab(i);
+                }
+                None => self.notice("no tabs are running in the background"),
+            },
             Cmd::RenameTab => {
                 let current = self.tabs[tab].name.clone().unwrap_or_default();
                 self.modal = Modal::Rename(current);

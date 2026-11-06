@@ -631,6 +631,18 @@ fn draw_all(f: &mut Frame, app: &App) {
             f.set_cursor_position(Position::new(x.min(row.right().saturating_sub(1)), row.y));
             return;
         }
+        Modal::CloseTab { tab, detail, sel } => {
+            draw_close_tab(f, app, *tab, detail, *sel);
+            return;
+        }
+        Modal::Restore {
+            saved,
+            checked,
+            sel,
+        } => {
+            draw_restore(f, app, saved, checked, *sel);
+            return;
+        }
         Modal::Confirm(_, msg) => {
             let w = (msg.chars().count() as u16 + 6).min(app.screen.width);
             let area = centered(app.screen, w, 5);
@@ -924,16 +936,35 @@ fn tab_label(app: &App, i: usize) -> (String, Option<(String, Color)>) {
         } else {
             Some(("◆".to_string(), Color::Indexed(176)))
         };
-        return (format!("{} agents · {n}", i + 1), icon);
+        if tab.pinned {
+            return (format!("{}", i + 1), icon);
+        }
+        // board 12: "◆ 5 agent · api"
+        let label = match agents_here.as_slice() {
+            [one] => format!("{} agent · {}", i + 1, one.name),
+            _ => format!("{} agents · {n}", i + 1),
+        };
+        return (label, icon);
     }
     let ids = tab.root.panes();
     let just_done = app
         .done
         .iter()
         .find(|d| d.at.elapsed() < std::time::Duration::from_secs(5) && ids.contains(&d.pane));
-    let icon = if panes.iter().any(|p| p.activity.is_some()) {
-        Some((circle(app).to_string(), AMBER))
-    } else if let Some(d) = just_done {
+    let muted = tab.muted;
+    let download = panes
+        .iter()
+        .find_map(|p| p.activity.as_ref())
+        .map(|a| a.progress);
+    let icon = if let Some(pct) = download {
+        // a download: the loading circle and how far it is
+        Some(match pct {
+            Some(p) => (format!("{} {p}%", circle(app)), AMBER),
+            None => (circle(app).to_string(), AMBER),
+        })
+    } else if panes.iter().any(|p| waiting_input(p)) {
+        Some(("?".to_string(), AMBER))
+    } else if let (Some(d), false) = (just_done, muted) {
         Some(if d.ok {
             ("✔".to_string(), GREEN)
         } else {
@@ -943,13 +974,17 @@ fn tab_label(app: &App, i: usize) -> (String, Option<(String, Color)>) {
         Some((spinner(app).to_string(), AMBER))
     } else if let Some(code) = panes.iter().filter_map(|p| p.last_exit).find(|c| *c != 0) {
         Some((format!("✖ {code}"), RED))
-    } else if panes.iter().any(|p| p.bell) {
+    } else if !muted && panes.iter().any(|p| p.bell) {
         Some(("!".to_string(), AMBER))
-    } else if panes.iter().any(|p| p.unseen) {
+    } else if !muted && panes.iter().any(|p| p.unseen) {
         Some(("•".to_string(), CYAN))
     } else {
         None
     };
+    if tab.pinned {
+        // icon-only: the pin, or the state when there is one
+        return (format!("{}", i + 1), icon.or(Some(("⚑".to_string(), DIM))));
+    }
     let cast = if ids.iter().any(|id| app.broadcast.contains(id)) {
         " ⇶"
     } else {
@@ -959,10 +994,17 @@ fn tab_label(app: &App, i: usize) -> (String, Option<(String, Color)>) {
 }
 
 /// Tab index under screen column `x` (for mouse clicks).
+/// The tabs on the bar: all but the ones kept in the background.
+fn shown_tabs(app: &App) -> Vec<usize> {
+    (0..app.tabs.len())
+        .filter(|i| !app.tabs[*i].background)
+        .collect()
+}
+
 pub fn tab_at(app: &App, x: u16) -> Option<usize> {
     let mut col = 0u16;
     let compact = tabs_compact(app, app.screen.width);
-    for i in 0..app.tabs.len() {
+    for i in shown_tabs(app) {
         let w = tab_width_in(app, i, compact);
         if x >= col && x < col + w {
             return Some(i);
@@ -970,6 +1012,25 @@ pub fn tab_at(app: &App, x: u16) -> Option<usize> {
         col += w + 1;
     }
     None
+}
+
+/// What's after the tabs at column `x`: the background chip or "+ new".
+pub fn strip_extra_at(app: &App, x: u16) -> Option<&'static str> {
+    let compact = tabs_compact(app, app.screen.width);
+    let shown = shown_tabs(app);
+    let mut col: u16 = shown
+        .iter()
+        .map(|i| tab_width_in(app, *i, compact) + 1)
+        .sum();
+    let bg = app.tabs.len() - shown.len();
+    if bg > 0 {
+        let w = format!(" ◌ {bg} in background ").chars().count() as u16;
+        if x >= col && x < col + w {
+            return Some("background");
+        }
+        col += w + 1;
+    }
+    (x >= col && x < col + 8).then_some("new")
 }
 
 fn tab_width(app: &App, i: usize) -> u16 {
@@ -1148,7 +1209,8 @@ fn draw_tabs(f: &mut Frame, app: &App, r: Rect) {
     let chip = role(Role::TabChip);
     let mut spans = Vec::new();
     let compact = tabs_compact(app, r.width);
-    for i in 0..app.tabs.len() {
+    let shown = shown_tabs(app);
+    for &i in &shown {
         let (label, icon) = tab_label(app, i);
         let label = if compact { (i + 1).to_string() } else { label };
         let active = i == app.active;
@@ -1170,6 +1232,14 @@ fn draw_tabs(f: &mut Frame, app: &App, r: Rect) {
         spans.push(Span::styled(format!("{label} "), base));
         spans.push(Span::styled(" ", Style::default().bg(BAR)));
     }
+    let bg = app.tabs.len() - shown.len();
+    if bg > 0 {
+        spans.push(Span::styled(
+            format!(" ◌ {bg} in background "),
+            Style::default().bg(chip).fg(DIM),
+        ));
+        spans.push(Span::styled(" ", Style::default().bg(BAR)));
+    }
     spans.push(Span::styled(" + new ▾", Style::default().bg(BAR).fg(DIM)));
     f.render_widget(Paragraph::new(Line::from(spans)), r);
     let n = app.tabs.len();
@@ -1179,10 +1249,12 @@ fn draw_tabs(f: &mut Frame, app: &App, r: Rect) {
         crate::osinfo::self_memory()
     );
     let w = right.chars().count() as u16;
-    let used: u16 = (0..n)
-        .map(|i| tab_width_in(app, i, compact) + 1)
+    let used: u16 = shown
+        .iter()
+        .map(|i| tab_width_in(app, *i, compact) + 1)
         .sum::<u16>()
-        + 9;
+        + 9
+        + if bg > 0 { 20 } else { 0 };
     if used + w + 2 <= r.width {
         f.buffer_mut()
             .set_string(r.right() - w, r.y, &right, Style::default().fg(DIM).bg(BAR));
@@ -1191,7 +1263,8 @@ fn draw_tabs(f: &mut Frame, app: &App, r: Rect) {
 
 /// Many tabs: the strip shows numbers only.
 fn tabs_compact(app: &App, width: u16) -> bool {
-    let full: u16 = (0..app.tabs.len())
+    let full: u16 = shown_tabs(app)
+        .into_iter()
         .map(|i| tab_width_in(app, i, false) + 1)
         .sum::<u16>()
         + 9;
@@ -1714,27 +1787,78 @@ fn draw_approvals(f: &mut Frame, app: &App, sel: usize) {
 }
 
 fn draw_menu(f: &mut Frame, app: &App, sel: usize) {
-    let area = centered(app.screen, 34, MENU.len() as u16 + 4);
+    use crate::app::MENU_COLS;
+    // board 12: "Tab menu · alt+m or right-click", the tab's nine in a grid,
+    // everything else below them
+    let cell = 26usize;
+    let w = ((cell * MENU_COLS) as u16 + 4).min(app.screen.width);
+    let rows = MENU.len().div_ceil(MENU_COLS) as u16;
+    let area = centered(app.screen, w, rows + 6);
     f.render_widget(Clear, area);
-    let mut lines = vec![Line::raw("")];
-    for (i, (label, _)) in MENU.iter().enumerate() {
-        let num = match i {
-            0..9 => (i + 1).to_string(),
-            9 => "0".into(),
-            _ => " ".into(),
-        };
-        let text = format!(" {num}  {label:<26}");
-        lines.push(if i == sel {
-            Line::styled(
-                text,
-                Style::default()
+    let keys_for = |c: crate::keys::Cmd| -> String {
+        crate::keys::ACTIONS
+            .iter()
+            .find(|a| a.1 == c)
+            .map(|a| key_label(app, a.0))
+            .unwrap_or_default()
+    };
+    let mut lines = vec![Line::from(vec![
+        Span::styled(" Tab menu", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!(" · {} or right-click", key_label(app, "tab_menu")),
+            Style::default().fg(DIM),
+        ),
+    ])];
+    lines.push(Line::raw(""));
+    for r in 0..rows as usize {
+        if r * MENU_COLS == 9 {
+            lines.push(Line::styled(
+                format!(" {}", "─".repeat(cell * MENU_COLS - 2)),
+                Style::default().fg(Color::Indexed(238)),
+            ));
+        }
+        let mut spans = vec![Span::raw(" ")];
+        for c in 0..MENU_COLS {
+            let i = r * MENU_COLS + c;
+            let Some((label, cmd)) = MENU.get(i) else {
+                break;
+            };
+            let keys = keys_for(*cmd);
+            let num = if i < 9 {
+                format!("{} ", i + 1)
+            } else {
+                "  ".into()
+            };
+            let close = *cmd == crate::keys::Cmd::CloseTab;
+            let mut st = if close {
+                Style::default().fg(RED)
+            } else {
+                Style::default().fg(TEXT)
+            };
+            let mut kst = Style::default().fg(DIM);
+            if i == sel {
+                st = Style::default()
                     .bg(AMBER)
                     .fg(INK)
-                    .add_modifier(Modifier::BOLD),
-            )
-        } else {
-            Line::raw(text)
-        });
+                    .add_modifier(Modifier::BOLD);
+                kst = st;
+            }
+            let room = cell - 1;
+            let body = format!("{num}{label}");
+            let kw = keys.chars().count();
+            let pad = room.saturating_sub(body.chars().count() + kw + 1);
+            if body.chars().count() + kw + 1 > room {
+                spans.push(Span::styled(
+                    format!("{:<room$}", truncate_str(&body, room)),
+                    st,
+                ));
+            } else {
+                spans.push(Span::styled(body, st));
+                spans.push(Span::styled(format!(" {keys}{}", " ".repeat(pad)), kst));
+            }
+            spans.push(Span::raw(" "));
+        }
+        lines.push(Line::from(spans));
     }
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
@@ -1743,8 +1867,169 @@ fn draw_menu(f: &mut Frame, app: &App, sel: usize) {
             format!(" tab {} ", app.active + 1),
             Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
         ))
-        .title_bottom(Span::styled(" ↑↓ ⏎ · esc ", Style::default().fg(DIM)));
+        .title_bottom(Span::styled(
+            " ←↑↓→ ⏎ · 1-9 · esc ",
+            Style::default().fg(DIM),
+        ));
     f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// Board 12 "Restore last session?": a tick per saved tab and two buttons.
+fn draw_restore(
+    f: &mut Frame,
+    app: &App,
+    saved: &crate::session::Session,
+    checked: &[bool],
+    sel: usize,
+) {
+    let n = saved.tabs.len();
+    let h = (n as u16 + 9).min(app.screen.height);
+    let w = 66u16.min(app.screen.width);
+    let area = centered(app.screen, w, h);
+    f.render_widget(Clear, area);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(AMBER));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let mut lines = vec![Line::styled(
+        " Restore last session?",
+        Style::default().add_modifier(Modifier::BOLD),
+    )];
+    let room = inner.width.saturating_sub(8) as usize;
+    for (i, t) in saved.tabs.iter().enumerate() {
+        let on = checked.get(i).copied().unwrap_or(true);
+        let folder = t
+            .layout
+            .folders()
+            .first()
+            .map(|f| short_path(f))
+            .unwrap_or_default();
+        let what = match &t.name {
+            Some(n) => format!("{} · {n} · {folder}", i + 1),
+            None => format!("{} · {folder}", i + 1),
+        };
+        let remote = t.layout.has_tool("remote");
+        let what = if remote && !on {
+            format!("{what} (not restored)")
+        } else {
+            what
+        };
+        let mut st = if on {
+            Style::default().fg(TEXT)
+        } else {
+            Style::default().fg(DIM)
+        };
+        if i == sel {
+            st = st.bg(Color::Indexed(237)).add_modifier(Modifier::BOLD);
+        }
+        lines.push(Line::from(vec![
+            Span::styled(
+                if on { " ▣ " } else { " ▢ " },
+                Style::default().fg(if on { AMBER } else { DIM }),
+            ),
+            Span::styled(truncate_str(&what, room), st),
+        ]));
+    }
+    let picked = checked.iter().filter(|c| **c).count();
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        " Restores folder, shell, splits and names. Commands are not re-run.",
+        Style::default().fg(DIM),
+    ));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::raw(" "),
+        Span::styled(
+            format!(
+                " ⏎ Restore {picked} tab{} ",
+                if picked == 1 { "" } else { "s" }
+            ),
+            Style::default()
+                .bg(AMBER)
+                .fg(INK)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            " n Start fresh ",
+            Style::default()
+                .bg(crate::palette::role(crate::palette::Role::TabChip))
+                .fg(TEXT),
+        ),
+    ]));
+    lines.push(Line::styled(
+        " ↑↓ · space tick · a all",
+        Style::default().fg(FAINT),
+    ));
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Board 12 "Close tab 2?": what is running, three buttons.
+fn draw_close_tab(f: &mut Frame, app: &App, tab: usize, detail: &str, sel: usize) {
+    use crate::palette::{Role, role};
+    let w = 62u16.min(app.screen.width);
+    let area = centered(app.screen, w, 10);
+    f.render_widget(Clear, area);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(AMBER));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let chip = role(Role::TabChip);
+    let btn = |i: usize, label: &str, danger: bool| -> Span<'static> {
+        let st = match (i == sel, danger) {
+            (true, true) => Style::default()
+                .bg(RED)
+                .fg(INK)
+                .add_modifier(Modifier::BOLD),
+            (true, false) => Style::default()
+                .bg(AMBER)
+                .fg(INK)
+                .add_modifier(Modifier::BOLD),
+            (false, true) => Style::default().bg(chip).fg(RED),
+            (false, false) => Style::default().bg(chip).fg(TEXT),
+        };
+        Span::styled(format!(" {label} "), st)
+    };
+    let lines = vec![
+        Line::styled(
+            format!(" Close tab {}?", tab + 1),
+            Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+        ),
+        Line::from(vec![
+            Span::styled(format!(" {} ", spinner(app)), Style::default().fg(AMBER)),
+            Span::styled(detail.to_string(), Style::default().fg(TEXT)),
+        ]),
+        Line::raw(""),
+        Line::from(vec![
+            Span::raw(" "),
+            btn(0, "s Stop & close", true),
+            Span::raw("  "),
+            btn(1, "k Keep in background", false),
+            Span::raw("  "),
+            btn(2, "esc Cancel", false),
+        ]),
+        Line::raw(""),
+        Line::styled(
+            " \"Keep in background\" keeps it running off the tab bar;",
+            Style::default().fg(DIM),
+        ),
+        Line::styled(
+            " the ◌ chip there brings it back. Cancel keeps the tab.",
+            Style::default().fg(DIM),
+        ),
+        Line::styled(" ←→ pick · ⏎", Style::default().fg(FAINT)),
+    ];
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Cut to `w` characters with an ellipsis.
+fn truncate_str(s: &str, w: usize) -> String {
+    if s.chars().count() <= w {
+        return s.to_string();
+    }
+    s.chars().take(w.saturating_sub(1)).chain(['…']).collect()
 }
 
 /// The boards' toast on finish: "✔ git clone finished · 412 MB in 38s",
@@ -2103,6 +2388,33 @@ pub fn stuck_hint(p: &PaneState) -> Option<&'static str> {
         "tail" if cmd.contains(" -f") || cmd.contains(" -F") => "ctrl+C stops",
         _ => return None,
     })
+}
+
+/// A running command asking for a password or a yes / no (board 12's "?").
+pub fn waiting_input(p: &PaneState) -> bool {
+    if !p.running {
+        return false;
+    }
+    let screen = p.pane.screen();
+    let (row, _) = screen.cursor_position();
+    let cols = screen.size().1;
+    let line = screen.contents_between(row, 0, row, cols).to_lowercase();
+    let line = line.trim_end();
+    line.contains("password")
+        || line.contains("passphrase")
+        || [
+            "[y/n]",
+            "(y/n)",
+            "[y/n]:",
+            "(y/n):",
+            "(yes/no)",
+            "(yes/no)?",
+            "[yes/no]",
+            "y/n?",
+            "continue?",
+        ]
+        .iter()
+        .any(|e| line.ends_with(e))
 }
 
 /// The saved-sessions picker (like PuTTY's Saved Sessions list).
