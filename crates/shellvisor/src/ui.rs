@@ -209,6 +209,23 @@ fn draw_all(f: &mut Frame, app: &App) {
     let focused = app.input_target();
     let zoomed = app.tabs[app.active].zoomed;
 
+    // board 14: basic view says so for 3 s, then gets out of the way
+    if !full
+        && app
+            .basic_since
+            .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(3))
+    {
+        let hint = format!(" basic · sv on or {} ", key_label(app, "toggle_view"));
+        let w = hint.chars().count() as u16;
+        if app.screen.width > w + 2 {
+            f.buffer_mut().set_string(
+                app.screen.width - w - 1,
+                0,
+                &hint,
+                Style::default().fg(DIM).bg(Color::Indexed(235)),
+            );
+        }
+    }
     if let Some((orch, bus)) = app.agents_regions(app.regions().1) {
         draw_orchestrator(f, app, orch);
         if let Some(b) = bus {
@@ -647,6 +664,14 @@ fn draw_all(f: &mut Frame, app: &App) {
         }
         Modal::CloseTab { tab, detail, sel } => {
             draw_close_tab(f, app, *tab, detail, *sel);
+            return;
+        }
+        Modal::OptionHelp {
+            sent,
+            testing,
+            works,
+        } => {
+            draw_option_help(f, app, sent, *testing, *works);
             return;
         }
         Modal::Tell(text) => {
@@ -2735,6 +2760,85 @@ fn draw_restore(
         " ↑↓ · space tick · a all",
         Style::default().fg(FAINT),
     ));
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Board 4b: Option is typing characters instead of acting as Alt.
+fn draw_option_help(f: &mut Frame, app: &App, sent: &str, testing: bool, works: Option<bool>) {
+    let w = 64u16.min(app.screen.width);
+    let area = centered(app.screen, w, 17.min(app.screen.height));
+    f.render_widget(Clear, area);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(AMBER));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let term = match std::env::var("TERM_PROGRAM").as_deref().unwrap_or("") {
+        "Apple_Terminal" => "Terminal.app".to_string(),
+        "iTerm.app" => "iTerm2".to_string(),
+        "" => "your terminal".to_string(),
+        o => o.to_string(),
+    };
+    let d = Style::default().fg(DIM);
+    let t = Style::default().fg(TEXT);
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(
+                " ⚑ Alt keys aren't reaching Shellvisor",
+                Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  shown once", d),
+        ]),
+        Line::from(vec![
+            Span::styled(" You pressed an alt shortcut but the terminal sent ", t),
+            Span::styled(sent.to_string(), Style::default().fg(AMBER)),
+            Span::styled(".", t),
+        ]),
+        Line::styled(
+            " Option is typing special characters instead of acting as Alt.",
+            t,
+        ),
+        Line::raw(""),
+        Line::from(vec![Span::styled(" detected: ", d), Span::styled(term, t)]),
+        Line::styled(
+            format!(" {}", crate::keys::option_fix_hint()),
+            Style::default().fg(TEXT).bg(Color::Indexed(235)),
+        ),
+        Line::raw(""),
+        Line::styled(" iTerm2: Profiles → Keys → Left Option key → Esc+", d),
+        Line::styled(" Ghostty: macos-option-as-alt = true", d),
+        Line::styled(" WezTerm / Kitty: works by default", d),
+        Line::raw(""),
+    ];
+    match (testing, works) {
+        (true, _) => lines.push(Line::styled(
+            " press alt+1 now…",
+            Style::default().fg(AMBER),
+        )),
+        (false, Some(true)) => {
+            lines.push(Line::styled(" ✔ alt works now", Style::default().fg(GREEN)))
+        }
+        (false, Some(false)) => lines.push(Line::styled(
+            " ✖ still a character — change the setting, then Test again",
+            Style::default().fg(RED),
+        )),
+        (false, None) => lines.push(Line::raw("")),
+    }
+    let chip = crate::palette::role(crate::palette::Role::TabChip);
+    lines.push(Line::from(vec![
+        Span::raw(" "),
+        Span::styled(
+            " t Test again ",
+            Style::default()
+                .bg(AMBER)
+                .fg(INK)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(" l Use leader key ", Style::default().bg(chip).fg(TEXT)),
+        Span::raw("  "),
+        Span::styled(" esc Later ", Style::default().bg(chip).fg(DIM)),
+    ]));
     f.render_widget(Paragraph::new(lines), inner);
 }
 

@@ -611,7 +611,9 @@ fn session_is_restored_after_quitting() {
     let mut s = Session::launch("bash", dir);
     s.wait_for("Restore last session");
     s.wait_for("Restore 2 tabs");
-    s.wait_until("one row per tab", |t| t.contains("▣ 1 · main") && t.contains("▣ 2 · /usr"));
+    s.wait_until("one row per tab", |t| {
+        t.contains("▣ 1 · main") && t.contains("▣ 2 · /usr")
+    });
     s.send("y");
     s.wait_until("two tabs back", |t| {
         top(t).contains("1 bash · main") && top(t).contains("2 bash · usr ⊞2")
@@ -717,6 +719,23 @@ fn tab_menu() {
     s.wait_for("Mute alerts");
     s.send("\x1b"); // esc closes
     s.wait_until("menu closed", |t| !t.contains("Duplicate here"));
+}
+
+#[test]
+fn option_typing_characters_opens_the_alt_help_once() {
+    let mut s = Session::start_full("optionhelp");
+    s.wait_for("PROMPT>");
+    s.send("¡"); // what macOS Option+1 types when Option isn't Alt
+    s.wait_for("Alt keys aren't reaching Shellvisor");
+    s.send("t");
+    s.wait_for("press alt+1 now");
+    s.send("\x1b1");
+    s.wait_for("alt works now");
+    s.send("\x1b");
+    s.wait_until("closed", |t| !t.contains("aren't reaching"));
+    s.send("¡"); // only once
+    s.pump(Duration::from_millis(300));
+    assert!(!s.text().contains("aren't reaching"));
 }
 
 // ------------------------------------------------------------------ P2 panes

@@ -41,7 +41,7 @@ shellvisor --shell bash    # or pick: zsh, bash, or a full path
 | `F1` | all keys |
 | `alt+t` · `F10` | new tab (same folder) |
 | `alt+1…9` · `alt+[` / `alt+]` | go to tab · previous / next |
-| `alt+r` · `alt+w` | rename · close tab (asks if something is still running) |
+| `alt+r` · `alt+w` | rename · close tab (if something still runs: Stop & close, Keep in background, or Cancel) |
 | `alt+\` · `alt+-` | split side by side · stacked |
 | `alt+arrows` · `F6` | move between splits |
 | `alt+shift+arrows` · `F5` | resize · zoom a split (or drag the border; `sv resize left 2`, `sv resize 30%`) |
@@ -57,7 +57,7 @@ shellvisor --shell bash    # or pick: zsh, bash, or a full path
 | `alt+e` | layout editor: start from a preset or a saved layout, add shell / files / git / system / thermals / flow panes, remove, resize (keys or mouse), undo; nothing changes until ⏎, esc puts it back. Save by name, as the default, or for this folder (`sv layout <name>` opens a saved one) |
 | `ctrl+]` `j` · `sv activity` | downloads & installs: progress bar, speed, time left; finished ones with `c` cd into it · `o` open in files (or click the download in the status bar) |
 | `alt+s` · `sv settings` | settings: colour of the folder in your prompt, of the commands you type and of folders in lists, `ls` as a table, table borders, theme |
-| `alt+m` | tab menu |
+| `alt+m` | tab menu: Rename, Duplicate here, Change shell, Split right / down, Move to new window, Pin / unpin, Mute alerts, Close — then panes, layouts and the rest |
 | ``alt+` `` · `sv off` / `sv on` | basic view ⇄ full view |
 | `ctrl+]` then a letter | leader key — every shortcut, in every terminal (`ctrl+] ?` lists them) |
 | mouse | click a tab or split to focus it · drag the border between splits to resize · wheel scrolls back |
@@ -66,9 +66,15 @@ shellvisor --shell bash    # or pick: zsh, bash, or a full path
 | `sv power on\|off\|auto` | low-power mode (auto: on while on battery) |
 | `sv theme light\|dark\|auto` | Shellvisor's own colours for a light or dark terminal |
 
+### The window
+
+The top row says where you are and how the machine is doing: the folder, shell and pid on the left; downloads, agents, approvals waiting, live / low power, CPU, memory and a clock on the right. Under it, the tabs: each says what it's doing — a spinner while a command runs (with a download's %), `✔` when a long one finished, `✖ 1` when one failed, `?` when a command asks for a password or yes / no, `•` new output, `!` a bell, `◆` an agent. Pinned tabs are just an icon and stay at the left; muted tabs show no marks or toasts. A tab kept in the background leaves the bar for a `◌ 1 in background` chip (click it, or `alt+N`, to bring it back). The bottom row lists the keys for the pane you're in. `sv layout focus` is one shell with a rail of the other panes and a strip for the folder, branch, job, CPU and memory.
+
+On start, *Restore last session?* lists the saved tabs with a tick each (ssh panes start unticked): `space` ticks, ⏎ restores them, `n` starts fresh.
+
 ### Files pane
 
-Eight views — `1` tree · `2` list · `3` columns (parent | folder | preview) · `4` grid · `5` git changes · `6` find · `7` size (what takes the space, as bars) · `8` recent (newest changed files anywhere below); `tab` cycles. It follows the folder your shell is in, and refreshes after every command.
+Eight views, numbered as in the header — `1` Tree · `2` Columns (parent | folder | preview) · `3` List (NAME, SIZE, MODIFIED, GIT, TYPE; `s` sorts, `space` marks files, `y` copies their paths, `m` puts `mv -i …` at your prompt) · `4` Grid (a card per entry: item count, image size or file size, coloured by type) · `5` Size (a treemap and bars of what takes the space; `x` asks, then moves it to the Trash) · `6` Git (staged, changes, untracked and by agent, with the diff beside them) · `7` Find (names or text inside files, with a preview at the line) · `8` Recent (time, who changed it — you or an agent — and what happened); `tab` cycles. It follows the folder your shell is in, and refreshes after every command. In the dev layout the preview sits in its own box under the tree.
 
 | Key | |
 |---|---|
@@ -82,11 +88,11 @@ In **find**, type part of a name; `tab` switches to searching inside files (`⏎
 
 ### System pane
 
-CPU (history and per core), memory, swap, disks, network, disk I/O, load, temperatures (whatever sensors the machine exposes), Shellvisor's own usage, and the busiest processes (`c` / `m` sort by CPU / memory). It reads nothing while it's hidden, and refreshes every 2 s (5 s in low-power mode).
+CPU (a history chart and a cell per core), memory, swap, disk and temperature gauges, a Therm row with the temperature history, network, disk I/O, load, Shellvisor's own usage, and the busiest processes with CPU% and MEM% (`c` / `m` sort by CPU / memory). It reads nothing while it's hidden, and refreshes every 2 s (5 s in low-power mode).
 
 `t` switches to the **thermal view**: every sensor with its critical temperature, a temperature history per group (cpu, gpu, battery, disk), and whether the CPU is being slowed by heat — the clock against its top speed on Linux, macOS's CPU speed limit on a Mac. When the machine gets hot enough to slow down, Shellvisor tells you once (at most every 10 minutes).
 
-**Mac users:** `alt` shortcuts need your terminal to send Option as Alt — Terminal.app: *Settings → Profiles → Keyboard → Use Option as Meta key*; iTerm2: *Profiles → Keys → Left Option key → Esc+*. Shellvisor tells you if it's off. The leader key `ctrl+]` always works.
+**Mac users:** `alt` shortcuts need your terminal to send Option as Alt — Terminal.app: *Settings → Profiles → Keyboard → Use Option as Meta key*; iTerm2: *Profiles → Keys → Left Option key → Esc+*. The first time Option types a character instead, Shellvisor shows how to fix it for your terminal, with *Test again* to check. The leader key `ctrl+]` always works.
 
 **Selecting text and right-click:** drag in a pane to select its text (only that pane's, even with splits) — it's copied to the clipboard when you let go; double-click selects a word, triple-click a line. Right-click opens a menu: Copy, Paste, Select all, Open link (on a URL), Split side by side, Split stacked. When the program in a pane uses the mouse itself (vim with `mouse=a`, htop…), hold **shift** to select. Your terminal's own selection still works too: hold **fn** while dragging (Terminal.app) or **Option** (iTerm2), or set `mouse: false` in the config.
 
@@ -183,7 +189,9 @@ sv agents                                                      # all agents as a
 sv connect                                                     # installed CLIs, logins, MCP servers, ssh hosts
 ```
 
-Each agent gets a column in the agents tab (`F9`; `shift+F9` opens the New agent form). In a git repository it works in its own worktree and branch (`.shellvisor/worktrees/<name>`, branch `agent/<name>`), so agents never edit the same checkout — or yours. The column title shows its status (working ⠋, waiting for you, ⚑ needs approval, done), the files it changed with +/− lines, and tokens used (Claude Code and Codex, read from their own session logs). Type in a column to message that agent. When two agents change the same file you get a warning, and the files pane marks files agents have touched (◆ name).
+Each agent gets a column in the agents tab (`F9`). In a git repository it works in its own worktree and branch (`.shellvisor/worktrees/<name>`, branch `agent/<name>`), so agents never edit the same checkout — or yours. The top of each column shows its state (working ⠋, ⚑ approval, finished, paused), its CLI and worktree, how long it has run and its tokens (Claude Code and Codex, read from their own session logs), and its task; the bottom shows the files it changed with +/− lines. Type in a column to message that agent. On a wide screen the tab also has an **orchestrator** column on the left — the goal, the task graph, the first approval waiting (allow / deny / always), files two agents both touched — and a **message bus** of who handed what to whom underneath. `ctrl+]` `T` tells every agent the same thing; `ctrl+]` `Z` / `U` pause and resume them all. The files pane marks files agents have touched (◆ name).
+
+The **New agent** form (`shift+F9`) has a card per CLI (the ones not installed are dimmed), the name and folder, its own worktree or the shared folder, which shell it runs in, the first instruction, approvals (ask for installs, network and push, or full auto) and a *stop after N minutes* limit that pauses it. If you already started `claude` (or another CLI) in a shell, it offers *Attach as column*.
 
 ### MCP servers (ctrl+] M)
 

@@ -202,6 +202,21 @@ Exit criteria: `sv resize` covered by an end-to-end test; a `v1.0.1` tag release
 
 ---
 
+## v1.0.4 · board-matching pass — ✅ done 2026-11-07
+**Goal:** every built screen looks like its board, adding what the boards show and taking nothing away.
+
+Deliverables
+- Window frame, boards 1, 3, 12 (done): two-row header (folder, shell, pid · downloads, agents, approvals, live, CPU, MEM, clock), tab strip in the boards' chip style, a key strip that follows the focused pane, `F2 · FILES` style pane titles, the shell's size in its title; `sv layout focus` with a side rail and a status strip.
+- System and Flow panes, board 1 (done): CPU history chart, a cell per core, Mem / Swap / Disk / Temp gauges, Therm row with history, Net, I/O, PID / NAME / CPU% / MEM%; Live job / sv flow tabs, a card per process, the pipeline note.
+- File views, boards 9 and 10 (done): 1–8 in the boards' order; List columns, sort, marks, copy and move; Grid cards; Size treemap and move-to-Trash; Git groups with the diff beside; Find and Git previews when wide; Recent who and what; PREVIEW box under the tree in the dev layout.
+- Tabs, board 12 (done): `?`, download %, single-agent names, pin, mute, background tabs; the tab menu's grid; Stop & close / Keep in background / Cancel; Restore with a tick per tab.
+- Agents, boards 5 and 8 (done): facts inside each column, orchestrator column, message bus, tell / pause / resume all; the New agent form with CLI cards, folder, shell, approvals, stop-after and Attach as column.
+- Option-as-Alt dialog with Test again (board 4b) and the fading basic-view hint (board 14) (done).
+
+Next: the agent tree's fold / promote / spawn / message box (board 15), layout editor drop zones (board 4), sync scroll, undo an agent's edit from Recent.
+
+---
+
 ## Cross-cutting, every phase
 - Budget checks in CI (size, idle RSS, idle CPU).
 - Snapshot tests for every new pane against the wireframes.

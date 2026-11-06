@@ -1,17 +1,18 @@
 # Design boards vs. what is built
 
-Checked 2026-11-05 against Shellvisor 1.0.0 plus the v1.0.1 work in `main`
-(layout editor screen, settings screen, `ls` as a table). One row per thing a
+Checked 2026-11-07 against `main` after the board-matching pass on top of
+1.0.3 (window frame, system and flow panes, file views, tabs, agents tab,
+New agent form, Option-as-Alt dialog, basic-view hint). One row per thing a
 board shows. ✅ built · ◐ built differently or in part · ✗ not built.
 
-Totals: **17 boards · 111 items · 79 ✅ built · 11 ◐ partly or differently · 21 ✗ not built**.
+Totals: **21 boards · 140 items · 126 ✅ built · 7 ◐ partly or differently · 7 ✗ not built**.
 
 ## 1 · Default workspace (`sv layout dev`)
 
 | Item | | Notes |
 |---|---|---|
 | Files │ shell │ system over flow, four panes | ✅ | ratios 22 / 62 / 60 |
-| Header: folder, shell, downloads %, agents count, CPU / MEM | ◐ | tab bar shows downloads and agents; CPU and memory are in the system pane, the status bar shows Shellvisor's own memory |
+| Header: folder, shell, downloads %, agents count, CPU / MEM | ✅ | two-row header: folder, shell, pid; downloads, agents, approvals, live, CPU, MEM, clock |
 | Files pane follows the shell's folder (⇅ synced) | ✅ | `f` stops following |
 | Preview with syntax colours, `i` / `c` / `e` | ✅ | |
 | Shell with git prompt, commands, output | ✅ | your real shell |
@@ -36,7 +37,7 @@ Totals: **17 boards · 111 items · 79 ✅ built · 11 ◐ partly or differently
 |---|---|---|
 | Shell full screen, apps like vim render normally | ✅ | basic view |
 | Toast when a long command finishes | ✅ | |
-| Bottom status strip (folder, branch, job, CPU spark, net) | ✗ | basic view has no strip |
+| Bottom status strip (folder, branch, job, CPU spark, net) | ✅ | `sv layout focus`: SHELL chip, folder, branch, job, CPU, MEM; a rail of the other panes |
 
 ## 4 · Layouts
 
@@ -55,7 +56,7 @@ Totals: **17 boards · 111 items · 79 ✅ built · 11 ◐ partly or differently
 |---|---|---|
 | Keymap, editable in config.yaml, F1 lists it | ✅ | |
 | Leader `ctrl+]` with hint bar | ✅ | |
-| Option-as-Alt detection with setup steps | ◐ | detected and explained in a notice; no dialog with "Test again" |
+| Option-as-Alt detection with setup steps | ✅ | a dialog the first time, with the fix for your terminal, Test again, Use leader key, Later |
 | Shell keys left alone (ctrl+r, ctrl+t, alt+b …) | ✅ | |
 
 ## 5 · Agents side by side (F9)
@@ -68,9 +69,9 @@ Totals: **17 boards · 111 items · 79 ✅ built · 11 ◐ partly or differently
 | File-overlap warning | ✅ | |
 | Orchestrator with task graph | ✅ | agent board (`alt+g`) Plan |
 | Message bus / handoffs log | ✅ | agent board Log, `sv agent log` |
-| Pause all / resume / kill | ◐ | `sv agent pause|resume|stop --all`, board Tree; no single keys in the agents tab |
-| Broadcast a message to all agents | ✗ | |
-| `d` diff view, `s` sync scroll | ✗ | |
+| Pause all / resume / kill | ✅ | `ctrl+] Z` / `ctrl+] U` and the orchestrator column; `sv agent pause|resume|stop --all` |
+| Broadcast a message to all agents | ✅ | `ctrl+] T` |
+| `d` diff view, `s` sync scroll | ◐ | diff view is `ctrl+] D` (typing in a column goes to the agent); no sync scroll |
 | `1-9` focus agent, `F5` zoom | ✅ | |
 
 ## 6 · Downloads & loading states
@@ -103,10 +104,10 @@ Totals: **17 boards · 111 items · 79 ✅ built · 11 ◐ partly or differently
 |---|---|---|
 | New agent form: CLI, name, first instruction | ✅ | `shift+F9` |
 | Own worktree or share the folder | ✅ | |
-| Runs in zsh / bash choice | ✗ | uses your shell |
-| Approvals choice in the form | ◐ | config `agents.approvals` |
-| Limits: budget, stop after N minutes | ◐ | token budget via team.yaml; no time limit |
-| Detect an agent already running and attach | ◐ | `sv agent attach`; no automatic offer |
+| Runs in zsh / bash choice | ✅ | |
+| Approvals choice in the form | ✅ | ask, or full auto |
+| Limits: budget, stop after N minutes | ✅ | stop after N minutes pauses it; token budget via team.yaml (no dollar costs) |
+| Detect an agent already running and attach | ✅ | offered in the form as Attach as column |
 
 ## 9 · File views — tree, columns, list, grid
 
@@ -117,22 +118,22 @@ Totals: **17 boards · 111 items · 79 ✅ built · 11 ◐ partly or differently
 | Columns (parent │ folder │ preview) | ✅ | v1.0 P6 |
 | Columns: type to jump | ✗ | `/` filters |
 | List with size and modified | ✅ | |
-| List: sortable columns, multi-select, copy / move | ✗ | |
+| List: sortable columns, multi-select, copy / move | ✅ | `s` sorts, `space` marks, `y` copies paths, `m` types `mv -i` at the prompt |
 | Grid coloured by type | ✅ | icons by type |
-| Grid: image size and dimensions, `+/−` density | ✗ | |
-| View numbers 1 Tree 2 Columns 3 List 4 Grid 5 Size 6 Git 7 Find 8 Recent | ◐ | built as 1 tree 2 list 3 columns 4 grid 5 git 6 find 7 size 8 recent |
+| Grid: image size and dimensions, `+/−` density | ◐ | cards with item count, PNG dimensions or size; no density keys |
+| View numbers 1 Tree 2 Columns 3 List 4 Grid 5 Size 6 Git 7 Find 8 Recent | ✅ | |
 
 ## 10 · File views — size, git, find, recent
 
 | Item | | Notes |
 |---|---|---|
 | Size map: biggest first, drill in, background scan | ✅ | bars |
-| Size: `x` delete (asks first) | ✗ | |
+| Size: `x` delete (asks first) | ✅ | moves it to the Trash after `y` |
 | Git: changed files + diff preview | ✅ | |
-| Git: staged / changes / untracked groups, by agent | ✗ | one list |
+| Git: staged / changes / untracked groups, by agent | ✅ | |
 | Find: fuzzy names and text in files, open at line | ✅ | |
 | Recent: newest changes anywhere below | ✅ | |
-| Recent: who changed it (you / agents / downloads), `u` undo agent edit | ✗ | |
+| Recent: who changed it (you / agents / downloads), `u` undo agent edit | ◐ | who (you or the agent) and what happened; no undo |
 
 ## 11 · Performance budget
 
@@ -151,15 +152,15 @@ Totals: **17 boards · 111 items · 79 ✅ built · 11 ◐ partly or differently
 |---|---|---|
 | Label: number · shell · what it's doing | ✅ | |
 | States: running, ✖ exit, • new output, ! bell, ◆ agent, ⚑ approval | ✅ | |
-| ✔ for 5 s after a long command | ◐ | toast, not a tab mark |
-| ? waiting for input, pinned tabs | ✗ | |
-| Compact bar with many tabs | ✗ | |
+| ✔ for 5 s after a long command | ✅ | tab mark and toast |
+| ? waiting for input, pinned tabs | ✅ | |
+| Compact bar with many tabs | ✅ | numbers only when they don't fit |
 | Splits, alt+arrows move, F5 zoom | ✅ | |
 | Drag the divider or alt+shift+arrows to resize | ✅ | |
 | Tab menu: rename, split, close | ✅ | |
-| Tab menu: duplicate, change shell, move to window, pin, mute | ✗ | |
+| Tab menu: duplicate, change shell, move to window, pin, mute | ✅ | the board's grid; Move to new window explains why a terminal can't |
 | Close dialog for a running command | ✅ | |
-| "Keep in background" | ✗ | |
+| "Keep in background" | ✅ | off the bar, a ◌ chip brings it back |
 | Restore last session | ✅ | |
 
 ## 13 · sv data commands, table viewer, command bar
@@ -178,7 +179,7 @@ Totals: **17 boards · 111 items · 79 ✅ built · 11 ◐ partly or differently
 | sv on / off / exit / status, alt+` | ✅ | |
 | sv autostart | ✅ | |
 | Basic view sleeps panes | ✅ | |
-| "basic · sv on" hint that fades | ✗ | |
+| "basic · sv on" hint that fades | ✅ | 3 s |
 
 ## 15 · Agent tree & sub-agents
 
@@ -263,7 +264,14 @@ install script / signed releases, `sv agent emit|usage|budget`.
 
 ## Suggested next (biggest gaps first)
 
-1. File views: view numbers as on the boards; list sorting and multi-select; git groups (staged / untracked / by agent); size `x` delete.
-2. Tabs: ✔ mark, `?` waiting for input, pinned tabs, compact bar, more tab-menu items.
-3. Agents: broadcast, diff view, keys for pause-all in the agents tab, promote / spawn from the tree.
-4. Focus status strip, basic-view hint.
+1. Agent tree (board 15): fold a branch, `c` promote a sub-agent to a column, `+` spawn a child of the selected one, a message box for the selected agent.
+2. Layout editor (board 4): drag a pane kind from the palette onto a drop zone.
+3. Agents tab: sync scroll across columns; Recent `u` to undo an agent's edit to one file.
+4. File views: indent guides in Tree, type-to-jump in Columns, `+/−` density in Grid.
+
+## What a terminal can't do (noted, not faked)
+
+- Move a tab to a new window: a program inside a terminal can't open windows; the tab menu says so.
+- Fan speed: needs root on macOS.
+- Keychain lookups for API keys: Shellvisor checks the environment and the CLIs' own logins instead.
+- Dollar costs: the CLIs report tokens, not prices; budgets are in tokens.

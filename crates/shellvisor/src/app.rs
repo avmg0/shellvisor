@@ -728,6 +728,13 @@ pub enum Modal {
     Menu(usize),
     /// Board 5 "broadcast to all agents": the message typed so far.
     Tell(String),
+    /// Board 4b "Alt keys aren't reaching Shellvisor": what arrived; after
+    /// Test again, whether alt now works.
+    OptionHelp {
+        sent: String,
+        testing: bool,
+        works: Option<bool>,
+    },
     /// Board 12 "Restore last session?": a tick per saved tab, the row the
     /// cursor is on (one past the tabs: the buttons).
     Restore {
@@ -907,6 +914,8 @@ pub struct App {
     opts: Options,
     tx: Sender<Ev>,
     option_hint_shown: bool,
+    /// When basic view was turned on (board 14's fading "basic · sv on").
+    pub basic_since: Option<Instant>,
     quit: Option<i32>,
     dirty: bool,
     session_dirty: bool,
@@ -1018,6 +1027,7 @@ pub fn run(opts: Options) -> io::Result<i32> {
         opts,
         tx: tx.clone(),
         option_hint_shown: false,
+        basic_since: None,
         quit: None,
         dirty: true,
         session_dirty: false,
@@ -2302,6 +2312,13 @@ impl App {
             };
             t = t.min(self.usage.due_in(every).max(Duration::from_millis(5)));
         }
+        if let Some(at) = self.basic_since {
+            // redraw once when the basic-view hint fades
+            let left = Duration::from_secs(3).saturating_sub(at.elapsed());
+            if !left.is_zero() {
+                t = t.min(left + Duration::from_millis(20));
+            }
+        }
         if self.spinning() {
             t = t.min(
                 self.spin_every()
@@ -2929,6 +2946,54 @@ impl App {
                     }
                     continue;
                 }
+                Modal::OptionHelp {
+                    sent,
+                    testing,
+                    works,
+                } => {
+                    self.dirty = true;
+                    if testing {
+                        // the next key decides: an alt sequence, or Option's character again
+                        let ok =
+                            key.len() == 2 && key[0] == 0x1b && key[1] != b'[' && key[1] != b'O';
+                        let still = keys::is_option_char(key);
+                        if ok || still {
+                            self.modal = Modal::OptionHelp {
+                                sent: if still {
+                                    String::from_utf8_lossy(key).into_owned()
+                                } else {
+                                    sent
+                                },
+                                testing: false,
+                                works: Some(ok),
+                            };
+                        } else if key == b"\x1b" {
+                            self.modal = Modal::None;
+                        } else {
+                            self.modal = Modal::OptionHelp {
+                                sent,
+                                testing,
+                                works,
+                            };
+                        }
+                        continue;
+                    }
+                    match key {
+                        b"t" | b"T" | b"\r" => {
+                            self.modal = Modal::OptionHelp {
+                                sent,
+                                testing: true,
+                                works: None,
+                            }
+                        }
+                        b"l" | b"L" => {
+                            self.modal = Modal::None;
+                            self.notice(keys::LEADER_HINT.trim().to_string());
+                        }
+                        _ => self.modal = Modal::None, // Later
+                    }
+                    continue;
+                }
                 Modal::Tell(mut text) => {
                     match key {
                         b"\r" => {
@@ -3173,11 +3238,16 @@ impl App {
                 continue;
             }
             if keys::is_option_char(key) && !self.option_hint_shown {
+                // board 4b: say what happened and how to fix it, once
                 self.option_hint_shown = true;
-                self.notice(format!(
-                    "Alt shortcuts need Option as Alt: {}",
-                    keys::option_fix_hint()
-                ));
+                self.flush_forward(&mut forward)?;
+                self.modal = Modal::OptionHelp {
+                    sent: String::from_utf8_lossy(key).into_owned(),
+                    testing: false,
+                    works: None,
+                };
+                self.dirty = true;
+                continue;
             }
             forward.extend_from_slice(key);
         }
@@ -7378,6 +7448,7 @@ impl App {
 
     fn set_view(&mut self, v: View) {
         if self.view != v {
+            self.basic_since = (v == View::Basic).then(Instant::now);
             if v == View::Basic {
                 // basic view shows a shell; leave focus on it
                 let b = self.basic_pane();
