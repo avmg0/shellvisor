@@ -132,6 +132,17 @@ pub enum Action {
 }
 
 impl Action {
+    pub const ALL: [Action; 9] = [
+        Action::Read,
+        Action::Edit,
+        Action::Test,
+        Action::Lint,
+        Action::Install,
+        Action::Network,
+        Action::Push,
+        Action::Delete,
+        Action::Command,
+    ];
     pub fn name(self) -> &'static str {
         match self {
             Action::Read => "read",
@@ -395,6 +406,8 @@ pub struct Agent {
     /// Approvals answered by themselves for a while (review board): until
     /// when (None: until its task is done), and which kinds.
     pub approve_for: Option<(Option<Instant>, Vec<Action>)>,
+    /// Pause it after this long (New agent "stop after").
+    pub stop_after: Option<std::time::Duration>,
 }
 
 /// How big an agent tree may grow (config `agents.limits`, or team.yaml).
@@ -541,6 +554,7 @@ impl Agent {
             team: None,
             reported: "",
             history: Vec::new(),
+            stop_after: None,
         }
     }
 

@@ -753,31 +753,52 @@ pub enum Modal {
 /// The New agent dialog's fields.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewAgentForm {
+    /// Every CLI the board shows (Claude Code, Codex, Gemini, Aider, Custom).
     pub clis: Vec<Cli>,
+    /// Installed on PATH, per CLI (Custom always is).
+    pub installed: Vec<bool>,
     pub cli: usize,
     pub name: String,
     pub prompt: String,
     /// The command line, for a custom agent.
     pub custom: String,
     pub worktree: bool,
-    /// 0 CLI · 1 name · 2 instruction / command · 3 worktree
+    /// Where it will run (editable).
+    pub folder: String,
+    /// Shells it can run in, and the one picked.
+    pub shells: Vec<String>,
+    pub shell: usize,
+    /// Answers its approvals itself.
+    pub full_auto: bool,
+    /// Minutes until it is paused ("" for no limit).
+    pub stop_after: String,
+    /// An agent CLI already running in a shell split: (pane, "claude in shell tab 2 (bash) pid 50122").
+    pub detected: Option<(PaneId, String)>,
+    /// 0 CLI · 1 name · 2 folder · 3 isolation · 4 runs in · 5 instruction /
+    /// command · 6 approvals · 7 stop after · 8 attach (when detected)
     pub field: usize,
     pub error: Option<String>,
-    /// Where it will run.
-    pub folder: String,
 }
 
 impl NewAgentForm {
+    pub const FIELDS: usize = 8;
+
     pub fn cli(&self) -> Cli {
         self.clis[self.cli]
+    }
+
+    pub fn fields(&self) -> usize {
+        Self::FIELDS + usize::from(self.detected.is_some())
     }
 
     fn text_field(&mut self) -> Option<&mut String> {
         let generic = self.cli() == Cli::Generic;
         match self.field {
             1 => Some(&mut self.name),
-            2 if generic => Some(&mut self.custom),
-            2 => Some(&mut self.prompt),
+            2 => Some(&mut self.folder),
+            5 if generic => Some(&mut self.custom),
+            5 => Some(&mut self.prompt),
+            7 => Some(&mut self.stop_after),
             _ => None,
         }
     }
@@ -6277,24 +6298,67 @@ impl App {
     }
 
     fn open_new_agent(&mut self) {
-        let mut clis: Vec<Cli> = agents::detect().into_iter().map(|(c, _)| c).collect();
-        let none = clis.is_empty();
+        // board 8: every CLI as a card; the ones not installed are dimmed
+        let found: Vec<Cli> = agents::detect().into_iter().map(|(c, _)| c).collect();
+        let none = found.is_empty();
+        let mut clis: Vec<Cli> = Cli::KNOWN.to_vec();
         clis.push(Cli::Generic);
+        let installed: Vec<bool> = clis
+            .iter()
+            .map(|c| *c == Cli::Generic || found.contains(c))
+            .collect();
+        let first = installed.iter().position(|i| *i).unwrap_or(clis.len() - 1);
         let folder = self
             .focused_cwd()
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_default();
         let in_repo = agents::repo_head(&folder).is_some();
+        let shells: Vec<String> = ["zsh", "bash", "fish"]
+            .iter()
+            .filter(|s| crate::shell::find_in_path(s).is_some())
+            .map(|s| s.to_string())
+            .collect();
+        let current = self.opts.launch.name.clone();
+        let shell = shells.iter().position(|s| *s == current).unwrap_or(0);
+        // an agent CLI already running in a shell split can become a column
+        let detected = self.panes.iter().find_map(|(id, p)| {
+            if p.agent.is_some() || !p.running {
+                return None;
+            }
+            let first = p.command.split_whitespace().next()?;
+            let prog = first.rsplit('/').next().unwrap_or(first);
+            let cli = Cli::KNOWN.iter().find(|c| c.name() == prog)?;
+            let tab = self.tab_of(*id)? + 1;
+            let pid = p
+                .pane
+                .pid()
+                .map(|n| format!(" pid {n}"))
+                .unwrap_or_default();
+            Some((
+                *id,
+                format!(
+                    "{} already running in shell tab {tab} ({}){pid}",
+                    cli.name(),
+                    p.shell
+                ),
+            ))
+        });
         let mut form = NewAgentForm {
             clis,
-            cli: 0,
+            installed,
+            cli: first,
             name: String::new(),
             prompt: String::new(),
             custom: String::new(),
             worktree: self.opts.agent_worktree && in_repo,
-            field: 2,
-            error: none.then(|| "no agent CLI found on PATH (claude, codex, gemini, aider) — run any command as a custom agent".to_string()),
             folder: ui::short_path(&folder.to_string_lossy()),
+            shells,
+            shell,
+            full_auto: false,
+            stop_after: String::new(),
+            detected,
+            field: 5,
+            error: none.then(|| "no agent CLI found on PATH (claude, codex, gemini, aider) — run any command as a custom agent".to_string()),
         };
         form.name = self.default_agent_name(form.cli());
         self.modal = Modal::NewAgent(Box::new(form));
@@ -6320,27 +6384,107 @@ impl App {
     }
 
     fn new_agent_key(&mut self, mut f: NewAgentForm, key: &[u8]) {
+        let n = f.fields();
+        let left = key.ends_with(b"D");
+        let arrow = matches!(key, b"\x1b[C" | b"\x1bOC" | b"\x1b[D" | b"\x1bOD");
         match key {
             b"\x1b" | [0x03] => {
                 self.modal = Modal::None;
                 return;
             }
-            b"\t" | b"\x1b[B" | b"\x1bOB" => f.field = (f.field + 1) % 4,
-            b"\x1b[Z" | b"\x1b[A" | b"\x1bOA" => f.field = (f.field + 3) % 4,
-            b"\x1b[C" | b"\x1bOC" | b"\x1b[D" | b"\x1bOD" if f.field == 0 => {
-                let n = f.clis.len();
+            b"\t" | b"\x1b[B" | b"\x1bOB" => f.field = (f.field + 1) % n,
+            b"\x1b[Z" | b"\x1b[A" | b"\x1bOA" => f.field = (f.field + n - 1) % n,
+            _ if arrow && f.field == 0 => {
+                let k = f.clis.len();
                 let old_default = self.default_agent_name(f.cli());
-                f.cli = if key.ends_with(b"C") {
-                    (f.cli + 1) % n
+                f.cli = if left {
+                    (f.cli + k - 1) % k
                 } else {
-                    (f.cli + n - 1) % n
+                    (f.cli + 1) % k
                 };
                 if f.name == old_default || f.name.is_empty() {
                     f.name = self.default_agent_name(f.cli());
                 }
             }
-            b" " | b"\x1b[C" | b"\x1b[D" if f.field == 3 => f.worktree = !f.worktree,
+            b" " if f.field == 3 => f.worktree = !f.worktree,
+            _ if arrow && f.field == 3 => f.worktree = !f.worktree,
+            b" " if f.field == 4 => f.shell = (f.shell + 1) % f.shells.len().max(1),
+            _ if arrow && f.field == 4 && !f.shells.is_empty() => {
+                let k = f.shells.len();
+                f.shell = if left {
+                    (f.shell + k - 1) % k
+                } else {
+                    (f.shell + 1) % k
+                };
+            }
+            b" " if f.field == 6 => f.full_auto = !f.full_auto,
+            _ if arrow && f.field == 6 => f.full_auto = !f.full_auto,
+            b"\r" if f.field == 8 => {
+                // "Attach as column": the CLI already running in that split
+                if let Some((id, _)) = f.detected {
+                    self.modal = Modal::None;
+                    self.focus_pane(id);
+                    self.attach_agent();
+                    return;
+                }
+            }
             b"\r" => {
+                if !f.installed[f.cli] {
+                    f.error = Some(format!(
+                        "{} isn't installed (no `{}` on PATH) — pick another, or Custom",
+                        f.cli().label(),
+                        f.cli().name()
+                    ));
+                    self.modal = Modal::NewAgent(Box::new(f));
+                    return;
+                }
+                let folder = {
+                    let t = f.folder.trim();
+                    let home = std::env::var("HOME").unwrap_or_default();
+                    let p = match t.strip_prefix("~") {
+                        Some(rest) => PathBuf::from(format!("{home}{rest}")),
+                        None => PathBuf::from(t),
+                    };
+                    // "/…/x" is the short form shown: keep the folder we started from
+                    (!t.is_empty() && !t.contains('…')).then_some(p)
+                };
+                if let Some(p) = &folder {
+                    if !p.is_dir() {
+                        f.error = Some(format!("no folder {}", p.display()));
+                        self.modal = Modal::NewAgent(Box::new(f));
+                        return;
+                    }
+                }
+                let stop = f.stop_after.trim();
+                let stop_after = if stop.is_empty() {
+                    None
+                } else {
+                    match stop
+                        .trim_end_matches(" min")
+                        .trim_end_matches('m')
+                        .parse::<u64>()
+                    {
+                        Ok(m) if m > 0 => Some(Duration::from_secs(m * 60)),
+                        _ => {
+                            f.error = Some("stop after: minutes, like 30".into());
+                            self.modal = Modal::NewAgent(Box::new(f));
+                            return;
+                        }
+                    }
+                };
+                // runs in: another shell than the default for this agent
+                let want = f.shells.get(f.shell).cloned();
+                let swap = want
+                    .filter(|s| *s != self.opts.launch.name)
+                    .and_then(|s| {
+                        crate::shell::build(
+                            Some(&s),
+                            self.opts.launch.integrated,
+                            &crate::paths::cache_dir(),
+                        )
+                        .ok()
+                    })
+                    .map(|l| std::mem::replace(&mut self.opts.launch, l));
                 let (cli, name, prompt, custom, wt) = (
                     f.cli(),
                     f.name.trim().to_string(),
@@ -6348,8 +6492,21 @@ impl App {
                     f.custom.clone(),
                     f.worktree,
                 );
-                match self.start_agent(None, cli, &name, &prompt, &custom, wt, None) {
-                    Ok(_) => {
+                let made = self.start_agent(None, cli, &name, &prompt, &custom, wt, folder);
+                if let Some(l) = swap {
+                    self.opts.launch = l;
+                }
+                match made {
+                    Ok(name) => {
+                        if let Some(id) = self.agent_pane(&name) {
+                            if let Some(a) = self.panes.get_mut(&id).and_then(|p| p.agent.as_mut())
+                            {
+                                if f.full_auto {
+                                    a.always = agents::Action::ALL.to_vec();
+                                }
+                                a.stop_after = stop_after;
+                            }
+                        }
                         self.modal = Modal::None;
                         return;
                     }
@@ -6716,6 +6873,26 @@ impl App {
 
     fn tick_agents(&mut self) {
         self.tick_mcp();
+        // New agent "stop after": pause it when its time is up
+        let due: Vec<String> = self
+            .panes
+            .values()
+            .filter_map(|p| p.agent.as_ref())
+            .filter(|a| !a.paused && a.stop_after.is_some_and(|d| a.started.elapsed() >= d))
+            .map(|a| a.name.clone())
+            .collect();
+        for name in due {
+            if let Some(id) = self.agent_pane(&name) {
+                if let Some(a) = self.panes.get_mut(&id).and_then(|p| p.agent.as_mut()) {
+                    a.stop_after = None;
+                }
+            }
+            if self.signal_agent(&name, "pause") {
+                self.notice(format!(
+                    "{name} paused: its time limit is up · sv agent resume {name}"
+                ));
+            }
+        }
         // forwards that came with a session's tab end with it
         let gone: Vec<usize> = self
             .forwards

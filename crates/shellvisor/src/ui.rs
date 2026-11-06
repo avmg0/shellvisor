@@ -1688,7 +1688,360 @@ fn draw_help(f: &mut Frame, app: &App) {
 }
 
 fn draw_new_agent(f: &mut Frame, app: &App, form: &NewAgentForm) {
-    let area = centered(app.screen, 84, 17);
+    // board 8: CLI cards, two columns of fields, the first instruction,
+    // approvals and limits, a detected CLI to attach, Cancel / Start agent
+    let h = 31u16;
+    let w = 100u16.min(app.screen.width.saturating_sub(2));
+    if app.screen.height < h + 2 || w < 70 {
+        return draw_new_agent_compact(f, app, form);
+    }
+    let area = centered(app.screen, w, h);
+    f.render_widget(Clear, area);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(AMBER));
+    let r = block.inner(area);
+    f.render_widget(block, area);
+    let buf = f.buffer_mut();
+    let x0 = r.x + 2;
+    let iw = r.width.saturating_sub(4);
+    let half = iw / 2;
+    let d = Style::default().fg(DIM);
+    let t = Style::default().fg(TEXT);
+    let on = |i: usize| form.field == i;
+    let lab = |i: usize| {
+        if on(i) {
+            Style::default().fg(AMBER).add_modifier(Modifier::BOLD)
+        } else {
+            d
+        }
+    };
+    let fieldbg = Style::default().bg(Color::Indexed(235)).fg(TEXT);
+    let mut y = r.y + 1;
+    buf.set_string(x0, y, "New agent", t.add_modifier(Modifier::BOLD));
+    let k = format!("{} · tab next field", key_label(app, "new_agent"));
+    buf.set_string(x0 + iw - k.chars().count() as u16, y, &k, d);
+    y += 2;
+    buf.set_string(x0, y, "agent CLI", lab(0));
+    y += 1;
+    // the cards
+    let n = form.clis.len() as u16;
+    let gap = 2u16;
+    let cw = (iw + gap) / n - gap;
+    for (i, c) in form.clis.iter().enumerate() {
+        let cx = x0 + i as u16 * (cw + gap);
+        let picked = i == form.cli;
+        let border = if picked && on(0) {
+            Style::default().fg(AMBER)
+        } else if picked {
+            Style::default().fg(DIM)
+        } else {
+            Style::default().fg(Color::Indexed(238))
+        };
+        let wv = cw as usize;
+        buf.set_stringn(cx, y, format!("╭{}╮", "─".repeat(wv - 2)), wv, border);
+        buf.set_stringn(cx, y + 3, format!("╰{}╯", "─".repeat(wv - 2)), wv, border);
+        for dy in 1..3 {
+            buf.set_string(cx, y + dy, "│", border);
+            buf.set_string(cx + cw - 1, y + dy, "│", border);
+        }
+        if picked {
+            buf.set_style(
+                Rect::new(cx + 1, y + 1, cw - 2, 2),
+                Style::default().bg(Color::Indexed(236)),
+            );
+        }
+        let ok = form.installed.get(i).copied().unwrap_or(true);
+        let name_st = if ok {
+            t.add_modifier(Modifier::BOLD)
+        } else {
+            d
+        };
+        let sub = if *c == agents::Cli::Generic {
+            "any command".to_string()
+        } else if ok {
+            c.name().to_string()
+        } else {
+            "not installed".to_string()
+        };
+        buf.set_stringn(cx + 2, y + 1, c.label(), wv - 3, name_st);
+        buf.set_stringn(
+            cx + 2,
+            y + 2,
+            &sub,
+            wv - 3,
+            if ok { d } else { Style::default().fg(FAINT) },
+        );
+    }
+    y += 5;
+    // name / folder
+    let cursor = |i: usize| if on(i) { "▏" } else { "" };
+    let boxed =
+        |buf: &mut ratatui::buffer::Buffer, x: u16, y: u16, w: u16, text: &str, focus: bool| {
+            buf.set_style(Rect::new(x, y, w, 1), fieldbg);
+            let shown: String = {
+                let c = text.chars().count();
+                let room = w.saturating_sub(3) as usize;
+                if c > room {
+                    text.chars().skip(c - room).collect()
+                } else {
+                    text.to_string()
+                }
+            };
+            buf.set_stringn(
+                x + 1,
+                y,
+                format!("{shown}{}", if focus { "▏" } else { "" }),
+                (w - 1) as usize,
+                fieldbg,
+            );
+            if focus {
+                buf.set_style(Rect::new(x, y, 1, 1), Style::default().bg(AMBER));
+            }
+        };
+    buf.set_string(x0, y, "name / role", lab(1));
+    buf.set_string(x0 + half + 1, y, "folder", lab(2));
+    y += 1;
+    boxed(buf, x0, y, half - 1, &form.name, on(1));
+    boxed(buf, x0 + half + 1, y, iw - half - 1, &form.folder, on(2));
+    let _ = cursor;
+    y += 2;
+    // isolation / runs in
+    let radio = |b: bool| if b { "◉ " } else { "○ " };
+    buf.set_string(x0, y, "isolation", lab(3));
+    buf.set_string(x0 + half + 1, y, "runs in", lab(4));
+    y += 1;
+    let branch = if form.name.is_empty() {
+        "<name>".to_string()
+    } else {
+        form.name.clone()
+    };
+    let (rx, _) = buf.set_stringn(
+        x0,
+        y,
+        radio(form.worktree),
+        2,
+        Style::default().fg(if form.worktree { AMBER } else { DIM }),
+    );
+    let (rx, _) = buf.set_stringn(rx, y, "own git worktree on branch ", half as usize, t);
+    buf.set_stringn(
+        rx,
+        y,
+        format!("agent/{branch}"),
+        half as usize,
+        Style::default().fg(CYAN),
+    );
+    let mut sx = x0 + half + 1;
+    for (i, s) in form.shells.iter().enumerate() {
+        let pick = i == form.shell;
+        let (nx, _) = buf.set_stringn(
+            sx,
+            y,
+            radio(pick),
+            2,
+            Style::default().fg(if pick { AMBER } else { DIM }),
+        );
+        let (nx, _) = buf.set_stringn(nx, y, format!("{s}  "), 10, if pick { t } else { d });
+        sx = nx;
+    }
+    y += 1;
+    buf.set_stringn(
+        x0,
+        y,
+        radio(!form.worktree),
+        2,
+        Style::default().fg(if form.worktree { DIM } else { AMBER }),
+    );
+    buf.set_stringn(
+        x0 + 2,
+        y,
+        "share the folder (read-only agents)",
+        half as usize,
+        if form.worktree { d } else { t },
+    );
+    buf.set_stringn(
+        x0 + half + 1,
+        y,
+        format!("new shell in the agents tab, {}", key_label(app, "agents")),
+        (iw - half - 1) as usize,
+        d,
+    );
+    y += 2;
+    // first instruction (or the command)
+    let generic = form.cli() == agents::Cli::Generic;
+    buf.set_string(
+        x0,
+        y,
+        if generic {
+            "command"
+        } else {
+            "first instruction"
+        },
+        lab(5),
+    );
+    y += 1;
+    let text = if generic { &form.custom } else { &form.prompt };
+    buf.set_style(Rect::new(x0, y, iw, 3), fieldbg);
+    if on(5) {
+        buf.set_style(Rect::new(x0, y, 1, 3), Style::default().bg(AMBER));
+    }
+    let lines = crate::board::wrap_text(text, (iw - 3) as usize);
+    let tail = lines.len().saturating_sub(3);
+    for (k, l) in lines.iter().skip(tail).enumerate() {
+        buf.set_stringn(x0 + 1, y + k as u16, l, (iw - 2) as usize, fieldbg);
+    }
+    if text.is_empty() {
+        let hint = if generic {
+            "e.g. ./my-agent.sh --task tests"
+        } else {
+            "optional — you can also type to the agent once it starts"
+        };
+        buf.set_stringn(
+            x0 + 1,
+            y,
+            hint,
+            (iw - 2) as usize,
+            Style::default().bg(Color::Indexed(235)).fg(FAINT),
+        );
+    }
+    if on(5) {
+        let last = lines.last().map(|l| l.chars().count()).unwrap_or(0) as u16;
+        let ly = y + (lines.len().saturating_sub(tail + 1)) as u16;
+        buf.set_string((x0 + 1 + last).min(x0 + iw - 1), ly, "▏", fieldbg.fg(AMBER));
+    }
+    y += 4;
+    // approvals / limits
+    buf.set_string(x0, y, "approvals", lab(6));
+    buf.set_string(x0 + half + 1, y, "limits", lab(7));
+    y += 1;
+    buf.set_stringn(
+        x0,
+        y,
+        radio(!form.full_auto),
+        2,
+        Style::default().fg(if form.full_auto { DIM } else { AMBER }),
+    );
+    buf.set_stringn(
+        x0 + 2,
+        y,
+        "ask for installs, network, push",
+        half as usize,
+        if form.full_auto { d } else { t },
+    );
+    let (lx, _) = buf.set_stringn(x0 + half + 1, y, "stop after ", 12, t);
+    boxed(buf, lx, y, 8, &form.stop_after, on(7));
+    buf.set_stringn(
+        lx + 9,
+        y,
+        if form.stop_after.trim().is_empty() {
+            "min · empty: no limit"
+        } else {
+            "min, then pause"
+        },
+        24,
+        d,
+    );
+    y += 1;
+    buf.set_stringn(
+        x0,
+        y,
+        radio(form.full_auto),
+        2,
+        Style::default().fg(if form.full_auto { AMBER } else { DIM }),
+    );
+    buf.set_stringn(
+        x0 + 2,
+        y,
+        "full auto (it answers yes itself)",
+        half as usize,
+        if form.full_auto { t } else { d },
+    );
+    buf.set_stringn(
+        x0 + half + 1,
+        y,
+        "tokens show in its column as it works",
+        (iw - half - 1) as usize,
+        d,
+    );
+    y += 2;
+    // detected CLI → attach
+    if let Some((_, what)) = &form.detected {
+        let bst = Style::default().fg(Color::Indexed(238));
+        buf.set_stringn(
+            x0,
+            y,
+            format!("╭{}╮", "─".repeat(iw as usize - 2)),
+            iw as usize,
+            bst,
+        );
+        buf.set_stringn(
+            x0,
+            y + 2,
+            format!("╰{}╯", "─".repeat(iw as usize - 2)),
+            iw as usize,
+            bst,
+        );
+        buf.set_string(x0, y + 1, "│", bst);
+        buf.set_string(x0 + iw - 1, y + 1, "│", bst);
+        let (nx, _) = buf.set_stringn(x0 + 2, y + 1, "◆ Detected ", 12, Style::default().fg(AMBER));
+        buf.set_stringn(nx, y + 1, what, (iw - 30) as usize, t);
+        let btn = " Attach as column ";
+        let st = if on(8) {
+            Style::default()
+                .bg(AMBER)
+                .fg(INK)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(AMBER)
+        };
+        buf.set_string(x0 + iw - 2 - btn.chars().count() as u16, y + 1, btn, st);
+    }
+    // buttons
+    let by = r.bottom() - 2;
+    let start = " Start agent ⏎ ";
+    let cancel = " esc Cancel ";
+    let sx = x0 + iw - start.chars().count() as u16;
+    buf.set_string(
+        sx,
+        by,
+        start,
+        Style::default()
+            .bg(AMBER)
+            .fg(INK)
+            .add_modifier(Modifier::BOLD),
+    );
+    buf.set_string(
+        sx - 2 - cancel.chars().count() as u16,
+        by,
+        cancel,
+        Style::default().bg(Color::Indexed(236)).fg(TEXT),
+    );
+    if let Some(e) = &form.error {
+        buf.set_stringn(
+            x0,
+            by,
+            e,
+            (iw as usize).saturating_sub(32),
+            Style::default().fg(RED),
+        );
+    } else {
+        buf.set_stringn(
+            x0,
+            by,
+            "↑↓ tab field · ←→ choose · space toggle",
+            44,
+            Style::default().fg(FAINT),
+        );
+    }
+}
+
+/// The New agent form on a small screen: one field per line.
+fn draw_new_agent_compact(f: &mut Frame, app: &App, form: &NewAgentForm) {
+    let area = centered(
+        app.screen,
+        84.min(app.screen.width),
+        20.min(app.screen.height),
+    );
     f.render_widget(Clear, area);
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
@@ -1716,51 +2069,73 @@ fn draw_new_agent(f: &mut Frame, app: &App, form: &NewAgentForm) {
             },
         )
     };
-    let mut lines = vec![Line::raw("")];
+    let cursor = |i: usize| if form.field == i { "▏" } else { "" };
     let mut clis = vec![label(0, "agent CLI"), Span::raw("  ")];
     for (i, c) in form.clis.iter().enumerate() {
-        let on = i == form.cli;
-        clis.push(Span::styled(
-            format!(" {} ", c.label()),
-            if on {
-                Style::default()
-                    .fg(INK)
-                    .bg(CYAN)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(DIM)
-            },
-        ));
+        let ok = form.installed.get(i).copied().unwrap_or(true);
+        let st = if i == form.cli {
+            Style::default()
+                .fg(INK)
+                .bg(CYAN)
+                .add_modifier(Modifier::BOLD)
+        } else if ok {
+            Style::default().fg(TEXT)
+        } else {
+            Style::default().fg(FAINT)
+        };
+        clis.push(Span::styled(format!(" {} ", c.label()), st));
         clis.push(Span::raw(" "));
     }
-    lines.push(Line::from(clis));
-    lines.push(Line::raw(""));
-    let cursor = |i: usize| if form.field == i { "▏" } else { "" };
-    lines.push(Line::from(vec![
-        label(1, "name"),
-        Span::raw(format!("  {}{}", form.name, cursor(1))),
-    ]));
-    lines.push(Line::raw(""));
     let generic = form.cli() == agents::Cli::Generic;
-    let (t, v) = if generic {
+    let (tl, tv) = if generic {
         ("command", &form.custom)
     } else {
         ("first task", &form.prompt)
     };
     let room = inner.width.saturating_sub(18) as usize;
-    let shown: String = {
+    let tail = |v: &str| -> String {
         let n = v.chars().count();
         if n > room {
             v.chars().skip(n - room).collect()
         } else {
-            v.clone()
+            v.to_string()
         }
     };
-    lines.push(Line::from(vec![
-        label(2, t),
-        Span::raw(format!("  {shown}{}", cursor(2))),
-    ]));
-    if v.is_empty() {
+    let mut lines = vec![
+        Line::from(clis),
+        Line::from(vec![
+            label(1, "name"),
+            Span::raw(format!("  {}{}", form.name, cursor(1))),
+        ]),
+        Line::from(vec![
+            label(2, "folder"),
+            Span::raw(format!("  {}{}", tail(&form.folder), cursor(2))),
+        ]),
+        Line::from(vec![
+            label(3, "worktree"),
+            Span::raw(format!(
+                "  [{}] own git worktree on branch agent/{}",
+                if form.worktree { "x" } else { " " },
+                if form.name.is_empty() {
+                    "<name>"
+                } else {
+                    &form.name
+                }
+            )),
+        ]),
+        Line::from(vec![
+            label(4, "runs in"),
+            Span::raw(format!(
+                "  {}",
+                form.shells.get(form.shell).cloned().unwrap_or_default()
+            )),
+        ]),
+        Line::from(vec![
+            label(5, tl),
+            Span::raw(format!("  {}{}", tail(tv), cursor(5))),
+        ]),
+    ];
+    if tv.is_empty() {
         lines.push(Line::styled(
             if generic {
                 "               e.g. ./my-agent.sh --task tests"
@@ -1769,22 +2144,33 @@ fn draw_new_agent(f: &mut Frame, app: &App, form: &NewAgentForm) {
             },
             Style::default().fg(FAINT),
         ));
-    } else {
-        lines.push(Line::raw(""));
     }
     lines.push(Line::from(vec![
-        label(3, "worktree"),
+        label(6, "approvals"),
+        Span::raw(if form.full_auto {
+            "  full auto"
+        } else {
+            "  ask for installs, network, push"
+        }),
+    ]));
+    lines.push(Line::from(vec![
+        label(7, "stop after"),
         Span::raw(format!(
-            "  [{}] own git worktree on branch agent/{}",
-            if form.worktree { "x" } else { " " },
-            if form.name.is_empty() {
-                "<name>"
+            "  {}{} min",
+            if form.stop_after.is_empty() {
+                "—"
             } else {
-                &form.name
-            }
+                &form.stop_after
+            },
+            cursor(7)
         )),
     ]));
-    lines.push(Line::raw(""));
+    if let Some((_, what)) = &form.detected {
+        lines.push(Line::from(vec![
+            label(8, "attach"),
+            Span::raw(format!("  ⏎ {what}")),
+        ]));
+    }
     lines.push(Line::styled(
         format!(
             "  runs in a new shell in {} · type to it in its column",
@@ -1793,7 +2179,6 @@ fn draw_new_agent(f: &mut Frame, app: &App, form: &NewAgentForm) {
         Style::default().fg(DIM),
     ));
     if let Some(e) = &form.error {
-        lines.push(Line::raw(""));
         lines.push(Line::styled(format!("  {e}"), Style::default().fg(RED)));
     }
     f.render_widget(Paragraph::new(lines), inner);
