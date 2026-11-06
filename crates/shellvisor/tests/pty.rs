@@ -775,7 +775,7 @@ fn dev_layout_shows_system_stats_and_is_restored() {
     s.wait_for("PROMPT>");
     s.run("sv layout dev");
     s.wait_until("dev layout", |t| {
-        t.contains("CPU") && t.contains("MEM") && t.contains(" tree ") && t.contains("TEMP")
+        t.contains("CPU") && t.contains("Mem") && t.contains(" tree ") && t.contains("Temp")
     });
     s.pump(Duration::from_millis(1500));
     let saved = std::fs::read_to_string(s.dir.join("state/session.yaml")).unwrap();
@@ -799,7 +799,7 @@ fn dev_layout_shows_system_stats_and_is_restored() {
     s.send("\x1b[15~");
     s.wait_for("PID");
     s.send("m");
-    s.wait_for("MEM▾");
+    s.wait_for("MEM%▾");
 }
 
 #[test]

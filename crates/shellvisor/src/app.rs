@@ -6601,6 +6601,7 @@ impl App {
                 if let Some(FlowAct::Type(cmd)) = fp.key(key) {
                     self.type_in_shell(&cmd);
                 }
+                self.dirty = true;
                 return;
             }
             Some(Tool::Remote(r)) => {

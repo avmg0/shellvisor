@@ -1336,12 +1336,7 @@ fn draw_focus_strip(f: &mut Frame, app: &App, r: Rect) {
         } else if p.running {
             let secs = p.started.map(|s| s.elapsed().as_secs()).unwrap_or(0);
             // the command that is running: the last of a `a; b` / `a && b` chain
-            let last = p
-                .command
-                .rsplit([';', '&', '|'])
-                .map(str::trim)
-                .find(|c| !c.is_empty())
-                .unwrap_or("");
+            let last = running_part(&p.command);
             let cmd: String = if last.chars().count() > 24 {
                 last.chars().take(23).chain(['…']).collect()
             } else {
@@ -1381,6 +1376,14 @@ fn draw_focus_strip(f: &mut Frame, app: &App, r: Rect) {
         f.buffer_mut()
             .set_string(r.right() - w, r.y, &hint, Style::default().fg(DIM).bg(BAR));
     }
+}
+
+/// The part of `a; b && c` that is running now: the last one.
+pub fn running_part(cmd: &str) -> &str {
+    cmd.rsplit([';', '&'])
+        .map(str::trim)
+        .find(|c| !c.is_empty())
+        .unwrap_or("")
 }
 
 pub fn fmt_secs(s: u64) -> String {

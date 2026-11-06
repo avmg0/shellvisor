@@ -403,111 +403,190 @@ impl SysPane {
             return;
         }
 
-        // CPU + sparkline
-        let spark_w = w.saturating_sub(24).min(HISTORY);
-        let spark = sparkline(self.history.iter().copied(), spark_w);
-        line(
-            buf,
-            &mut y,
-            &[
-                ("CPU  ", label),
-                (&format!("{:>3.0}% ", s.cpu), val.fg(heat(s.cpu))),
-                (&spark, Style::default().fg(AMBER)),
-                (
-                    &format!("  load {:.1} {:.1} {:.1}", s.load.0, s.load.1, s.load.2),
-                    label,
-                ),
-            ],
+        // Board 1: "CPU 23.4%  ·  self 5.6 MB · 0.2% · load 2.41", a two-row
+        // bar chart of recent CPU, then labelled rows and the process table.
+        let right = format!(
+            "self {} · {:.1}% · load {:.2}{}",
+            human(s.self_mem),
+            s.self_cpu,
+            s.load.0,
+            if low_power { " · ◌" } else { "" }
         );
-        // per-core grid: "▕████░░▏" cells
-        if !s.cores.is_empty() {
-            let cell = 10usize;
-            let per_row = (w / cell).max(1);
-            let rows = s.cores.len().div_ceil(per_row);
-            let max_rows = if area.height > 18 { 4 } else { 1 };
-            for r in 0..rows.min(max_rows) {
-                let mut parts: Vec<(String, Style)> = Vec::new();
-                for (i, c) in s.cores.iter().enumerate().skip(r * per_row).take(per_row) {
-                    parts.push((format!("{i:>2}"), Style::default().fg(FAINT)));
-                    parts.push((bar(*c as f64 / 100.0, 5), Style::default().fg(heat(*c))));
-                    parts.push((format!("{:>2.0} ", c.min(99.0)), label));
-                }
-                let refs: Vec<(&str, Style)> =
-                    parts.iter().map(|(t, s)| (t.as_str(), *s)).collect();
-                line(buf, &mut y, &refs);
-            }
-        }
-        let mem_frac = frac(s.mem_used, s.mem_total);
-        let bw = w.saturating_sub(34).clamp(6, 30);
-        line(
-            buf,
-            &mut y,
-            &[
-                ("MEM  ", label),
-                (
-                    &bar(mem_frac, bw),
-                    Style::default().fg(heat((mem_frac * 100.0) as f32)),
-                ),
-                (&format!(" {} / {}", gb(s.mem_used), gb(s.mem_total)), val),
-                (
-                    &format!("   swap {} / {}", gb(s.swap_used), gb(s.swap_total)),
-                    label,
-                ),
-            ],
-        );
-        for (mount, used, total) in s.disks.iter().take(2) {
-            let f = frac(*used, *total);
+        let left = format!("CPU {:.1}%", s.cpu);
+        let gap = w.saturating_sub(left.chars().count() + right.chars().count());
+        if gap >= 2 {
             line(
                 buf,
                 &mut y,
                 &[
-                    ("DISK ", label),
-                    (&bar(f, bw), Style::default().fg(heat((f * 100.0) as f32))),
-                    (&format!(" {} / {}", gb(*used), gb(*total)), val),
-                    (&format!("   {mount}"), label),
+                    ("CPU ", val),
+                    (&format!("{:.1}%", s.cpu), val.fg(heat(s.cpu))),
+                    (&" ".repeat(gap), label),
+                    (&right, label),
                 ],
             );
+        } else {
+            line(
+                buf,
+                &mut y,
+                &[
+                    ("CPU ", val),
+                    (&format!("{:.1}%", s.cpu), val.fg(heat(s.cpu))),
+                ],
+            );
+        }
+        // rows below the chart: cores, mem, swap, disk, temp, therm(+spark), net, io
+        let fixed = 9u16 + 1;
+        let left_after = bottom.saturating_sub(y);
+        let chart_rows: u16 = if left_after >= fixed + 2 + 6 {
+            2
+        } else if left_after >= fixed + 1 + 3 {
+            1
+        } else {
+            0
+        };
+        if chart_rows > 0 {
+            let (top, low) = chart(self.history.iter().copied(), w, chart_rows as usize);
+            let st = Style::default().fg(AMBER);
+            if chart_rows == 2 {
+                line(buf, &mut y, &[(&top, st)]);
+            }
+            line(buf, &mut y, &[(&low, st)]);
+        }
+        let lab = |t: &str| format!("{t:<6}");
+        // Cores: one cell per core
+        if !s.cores.is_empty() {
+            let mut parts: Vec<(String, Style)> = vec![(lab("Cores"), label)];
+            for c in s.cores.iter().take(w.saturating_sub(6)) {
+                parts.push((
+                    sparkline(std::iter::once(*c), 1),
+                    Style::default().fg(heat(*c)),
+                ));
+            }
+            let refs: Vec<(&str, Style)> = parts.iter().map(|(t, s)| (t.as_str(), *s)).collect();
+            line(buf, &mut y, &refs);
+        }
+        // labelled bars with the value right-aligned
+        let val_w = 14usize;
+        let bw = w.saturating_sub(6 + val_w + 1).max(4);
+        let gauge = |buf: &mut Buffer, y: &mut u16, name: &str, f: f64, color: Color, v: &str| {
+            let full = ((f.clamp(0.0, 1.0)) * bw as f64).round() as usize;
+            line(
+                buf,
+                y,
+                &[
+                    (&lab(name), label),
+                    (&"━".repeat(full), Style::default().fg(color)),
+                    (&"━".repeat(bw - full.min(bw)), Style::default().fg(BAR_BG)),
+                    (&format!(" {v:>val_w$}"), Style::default().fg(DIM)),
+                ],
+            );
+        };
+        let mem_f = frac(s.mem_used, s.mem_total);
+        gauge(
+            buf,
+            &mut y,
+            "Mem",
+            mem_f,
+            heat((mem_f * 100.0) as f32),
+            &format!("{}/{}", gb_short(s.mem_used), gb_short(s.mem_total) + " GB"),
+        );
+        let swap_f = frac(s.swap_used, s.swap_total);
+        gauge(
+            buf,
+            &mut y,
+            "Swap",
+            swap_f,
+            heat((swap_f * 100.0) as f32),
+            &format!(
+                "{}/{}",
+                gb_short(s.swap_used),
+                gb_short(s.swap_total) + " GB"
+            ),
+        );
+        if let Some((mount, used, total)) = s.disks.first() {
+            let f = frac(*used, *total);
+            let _ = mount;
+            gauge(
+                buf,
+                &mut y,
+                "Disk",
+                f,
+                heat((f * 100.0) as f32),
+                &format!("{} GB free", gb_short(total.saturating_sub(*used))),
+            );
+        }
+        let hottest = s.temps.iter().map(|t| t.celsius).fold(0.0f32, f32::max);
+        match s.temps.first() {
+            Some(t) => gauge(
+                buf,
+                &mut y,
+                "Temp",
+                t.celsius as f64 / 100.0,
+                temp_color(t.celsius),
+                &format!("{} {:.0}°C", t.group.to_uppercase(), t.celsius),
+            ),
+            None => line(
+                buf,
+                &mut y,
+                &[
+                    (&lab("Temp"), label),
+                    ("no sensors readable here", Style::default().fg(DIM)),
+                ],
+            ),
+        }
+        // Therm: state, every group, macOS speed limit; temperature history below
+        let (state, sc) = if hottest >= 90.0 {
+            ("hot", RED)
+        } else if hottest >= 75.0 || s.speed_limit.is_some_and(|l| l < 100) {
+            ("warm", AMBER)
+        } else {
+            ("nominal", GREEN)
+        };
+        let groups: String = s
+            .temps
+            .iter()
+            .map(|t| format!(" {} {:.0}°", short_group(t.group), t.celsius))
+            .collect();
+        let limit = match s.speed_limit {
+            Some(l) if l < 100 => format!("  speed {l}%"),
+            _ => match s.clock {
+                Some((now, _)) if now > 0 => format!("  {:.1} GHz", now as f64 / 1000.0),
+                _ => String::new(),
+            },
+        };
+        if !s.temps.is_empty() {
+            line(
+                buf,
+                &mut y,
+                &[
+                    (&lab("Therm"), label),
+                    ("● ", Style::default().fg(sc)),
+                    (state, Style::default().fg(sc)),
+                    (&groups, Style::default().fg(DIM)),
+                    (&limit, Style::default().fg(DIM)),
+                ],
+            );
+            if let Some((_, h)) = self.temp_history.first() {
+                if chart_rows > 0 {
+                    let n = w.saturating_sub(6).min(24);
+                    let sp = sparkline(h.iter().copied(), n);
+                    line(
+                        buf,
+                        &mut y,
+                        &[(&lab(""), label), (&sp, Style::default().fg(AMBER))],
+                    );
+                }
+            }
         }
         line(
             buf,
             &mut y,
             &[
-                ("NET  ", label),
+                (&lab("Net"), label),
                 (
                     &format!("↓ {}/s  ↑ {}/s", human(s.net_rx), human(s.net_tx)),
-                    val.fg(CYAN),
-                ),
-                ("     IO  ", label),
-                (
-                    &format!("r {}/s  w {}/s", human(s.io_read), human(s.io_write)),
-                    val.fg(CYAN),
-                ),
-            ],
-        );
-        let temps = if s.temps.is_empty() {
-            "no sensors readable here".to_string()
-        } else {
-            s.temps
-                .iter()
-                .map(|t| format!("{} {:.0}°C", t.group, t.celsius))
-                .collect::<Vec<_>>()
-                .join(" · ")
-        };
-        let hottest = s.temps.iter().map(|t| t.celsius).fold(0.0f32, f32::max);
-        line(
-            buf,
-            &mut y,
-            &[
-                ("TEMP ", label),
-                (
-                    &temps,
-                    Style::default().fg(if hottest >= 90.0 {
-                        RED
-                    } else if hottest >= 75.0 {
-                        AMBER
-                    } else {
-                        GREEN
-                    }),
+                    Style::default().fg(CYAN),
                 ),
             ],
         );
@@ -515,68 +594,59 @@ impl SysPane {
             buf,
             &mut y,
             &[
-                ("SELF ", label),
+                (&lab("I/O"), label),
                 (
-                    &format!(
-                        "{} {} · {:.1}% cpu",
-                        crate::NAME_LOWER,
-                        human(s.self_mem),
-                        s.self_cpu
-                    ),
-                    Style::default().fg(DIM),
-                ),
-                (
-                    if low_power { "   ◌ low-power" } else { "" },
-                    Style::default().fg(AMBER),
+                    &format!("R {}/s  W {}/s", human(s.io_read), human(s.io_write)),
+                    Style::default().fg(CYAN),
                 ),
             ],
         );
 
-        // process table
-        if y + 2 > bottom {
+        // process table: PID NAME CPU% MEM%
+        if y + 3 > bottom {
             return;
         }
-        let name_w = w.saturating_sub(23).max(8);
+        y += 1;
+        let name_w = w.saturating_sub(7 + 7 + 7).max(6);
         let header = format!(
-            "{:>7} {:<name_w$} {:>5} {:>8}",
+            "{:<6} {:<name_w$}{:>7}{:>7}",
             "PID",
-            format!("NAME ({} procs)", s.nprocs),
+            "NAME",
             if self.sort == Sort::Cpu {
-                "CPU▾"
+                "CPU%▾"
             } else {
-                "CPU"
+                "CPU%"
             },
             if self.sort == Sort::Mem {
-                "MEM▾"
+                "MEM%▾"
             } else {
-                "MEM"
+                "MEM%"
             },
         );
-        line(
-            buf,
-            &mut y,
-            &[(
-                &header,
-                Style::default().fg(DIM).add_modifier(Modifier::UNDERLINED),
-            )],
-        );
+        line(buf, &mut y, &[(&header, Style::default().fg(DIM))]);
         let room = (bottom - y) as usize;
         let start = self.sel.saturating_sub(room.saturating_sub(1));
         for (i, p) in s.procs.iter().enumerate().skip(start).take(room) {
             let name: String = p.name.chars().take(name_w).collect();
-            let text = format!(
-                "{:>7} {:<name_w$} {:>5.1} {:>8}",
-                p.pid,
-                name,
-                p.cpu,
-                human(p.mem)
-            );
-            let st = if i == self.sel {
+            let memp = frac(p.mem, s.mem_total) * 100.0;
+            let sel = i == self.sel;
+            let base = if sel {
                 Style::default().bg(BAR_BG).add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             };
-            line(buf, &mut y, &[(&text, st)]);
+            line(
+                buf,
+                &mut y,
+                &[
+                    (&format!("{:<6} ", p.pid), base.fg(DIM)),
+                    (
+                        &format!("{name:<name_w$}"),
+                        if p.cpu >= 20.0 { base.fg(AMBER) } else { base },
+                    ),
+                    (&format!("{:>7.1}{:>7.1}", p.cpu, memp), base),
+                ],
+            );
         }
         let _ = line;
     }
@@ -895,14 +965,51 @@ pub fn sparkline(
     s
 }
 
-pub fn bar(frac: f64, width: usize) -> String {
-    let f = frac.clamp(0.0, 1.0);
-    let full = (f * width as f64).round() as usize;
-    format!(
-        "{}{}",
-        "█".repeat(full),
-        "░".repeat(width - full.min(width))
-    )
+/// A bar chart of recent values, `rows` tall (1 or 2), one column per sample,
+/// newest on the right. Returns (top row, bottom row).
+pub fn chart(
+    values: impl DoubleEndedIterator<Item = f32> + ExactSizeIterator,
+    width: usize,
+    rows: usize,
+) -> (String, String) {
+    const T: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let n = values.len();
+    let v: Vec<f32> = values.skip(n.saturating_sub(width)).collect();
+    let pad = width - v.len();
+    let levels = 8 * rows.clamp(1, 2);
+    let (mut top, mut low) = (" ".repeat(pad), "▁".repeat(pad));
+    for x in v {
+        // never fully empty: a quiet machine still shows a floor
+        let l = ((x.clamp(0.0, 100.0) / 100.0 * levels as f32).round() as usize).max(1);
+        if rows >= 2 {
+            low.push(T[l.min(8)]);
+            top.push(T[l.saturating_sub(8)]);
+        } else {
+            low.push(T[l.min(8)]);
+        }
+    }
+    (top, low)
+}
+
+/// "9.8" for 9.8 GB, "108" for 108 GB.
+fn gb_short(b: u64) -> String {
+    let g = b as f64 / 1_073_741_824.0;
+    if g >= 100.0 || g == g.round() {
+        format!("{g:.0}")
+    } else {
+        format!("{g:.1}")
+    }
+}
+
+/// "performance cores" style group names, shortened for the Therm row.
+fn short_group(g: &str) -> String {
+    match g {
+        "cpu" => "CPU".into(),
+        "gpu" => "GPU".into(),
+        "battery" => "Batt".into(),
+        "disk" => "SSD".into(),
+        o => o.to_string(),
+    }
 }
 
 fn frac(a: u64, b: u64) -> f64 {
@@ -921,10 +1028,6 @@ fn heat(p: f32) -> Color {
     } else {
         GREEN
     }
-}
-
-fn gb(b: u64) -> String {
-    format!("{:.1} GB", b as f64 / 1_073_741_824.0)
 }
 
 /// 1536 → "1.5K", 3_500_000 → "3.3M"
@@ -952,8 +1055,10 @@ mod tests {
         assert_eq!(human(512), "512B");
         assert_eq!(human(1536), "1.5K");
         assert_eq!(human(3 * 1024 * 1024), "3.0M");
-        assert_eq!(bar(0.5, 4), "██░░");
-        assert_eq!(bar(2.0, 3), "███");
+        assert_eq!(
+            chart([0.0, 50.0, 100.0].into_iter(), 4, 2),
+            ("   █".into(), "▁▁██".into())
+        );
         assert_eq!(sparkline([0.0, 50.0, 100.0].into_iter(), 5), "  ▁▅█");
         assert_eq!(
             sparkline([10.0, 20.0, 30.0].into_iter(), 2).chars().count(),
@@ -1025,7 +1130,7 @@ mod tests {
                     + "\n"
             })
             .collect();
-        for want in ["CPU", "MEM", "NET", "TEMP", "SELF", "PID"] {
+        for want in ["CPU", "Mem", "Net", "Temp", "self", "PID", "MEM%"] {
             assert!(text.contains(want), "{want} missing:\n{text}");
         }
         assert!(p.key(b"m"));

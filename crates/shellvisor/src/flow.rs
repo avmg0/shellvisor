@@ -40,7 +40,6 @@ pub struct Proc {
 }
 
 impl Proc {
-    #[cfg(test)]
     pub fn name(&self) -> &str {
         let first = self.args.split_whitespace().next().unwrap_or("");
         first.rsplit('/').next().unwrap_or(first)
@@ -126,6 +125,8 @@ pub struct FlowPane {
     hist: Vec<std::collections::VecDeque<u64>>,
     /// The stats the history was last taken from: (file, bytes out per stage, when).
     hist_at: Option<(PathBuf, Vec<u64>, Instant)>,
+    /// `tab`: show the live job even while an `sv flow` result is around.
+    pub prefer_live: bool,
 }
 
 /// Seconds of history the throughput chart shows.
@@ -241,12 +242,17 @@ impl FlowPane {
     /// Is there an `sv flow` to show (running, or the last one)?
     fn showing_flow(&self) -> bool {
         match &self.flow {
+            Some(_) if self.prefer_live => false,
             Some((_, s)) => !s.done || self.job.is_empty(),
             None => false,
         }
     }
 
     pub fn key(&mut self, key: &[u8]) -> Option<FlowAct> {
+        if key == b"\t" && self.flow.is_some() {
+            self.prefer_live = !self.prefer_live;
+            return None;
+        }
         let (_, s) = self.flow.as_ref()?;
         match key {
             b"s" => Some(FlowAct::Type(s.cmd.clone())),
@@ -275,34 +281,93 @@ impl FlowPane {
         } else if !self.job.is_empty() {
             self.render_job(area, buf);
         } else {
-            let lines = [
-                (
-                    "Nothing running in the shell next to this pane.",
-                    Style::default().fg(DIM),
-                ),
-                ("", Style::default()),
-                (
-                    "Run a command to see its processes, CPU, memory and pipes —",
-                    Style::default(),
-                ),
-                ("or meter a pipeline stage by stage:", Style::default()),
-                ("", Style::default()),
-                (
-                    "  sv flow 'cat big.log | grep ERROR | sort | uniq -c'",
-                    Style::default().fg(CYAN),
-                ),
-            ];
-            for (i, (t, st)) in lines.iter().enumerate() {
-                if i as u16 >= area.height {
-                    break;
-                }
+            let mut y = self.render_tabs(area, buf, false);
+            buf.set_stringn(
+                area.x,
+                y,
+                "fg job · Nothing running — the shell is at its prompt",
+                area.width as usize,
+                Style::default().fg(DIM),
+            );
+            y += 2;
+            if y < area.bottom() {
                 buf.set_stringn(
-                    area.x + 1,
-                    area.y + i as u16,
-                    t,
-                    area.width as usize - 1,
-                    *st,
+                    area.x,
+                    y,
+                    "  sv flow 'cat big.log | grep ERROR | sort | uniq -c'",
+                    area.width as usize,
+                    Style::default().fg(CYAN),
                 );
+            }
+            self.render_footer(area, buf, y + 2);
+        }
+    }
+
+    /// "Live job  sv flow" with the one showing underlined (board 1).
+    fn render_tabs(&self, area: Rect, buf: &mut Buffer, flow: bool) -> u16 {
+        let on = Style::default()
+            .fg(TEXT)
+            .add_modifier(Modifier::UNDERLINED | Modifier::BOLD);
+        let off = Style::default().fg(DIM);
+        let (nx, _) = buf.set_stringn(
+            area.x,
+            area.y,
+            "Live job",
+            area.width as usize,
+            if flow { off } else { on },
+        );
+        if nx + 10 < area.right() {
+            buf.set_stringn(nx + 2, area.y, "sv flow", 7, if flow { on } else { off });
+        }
+        let hint = "tab switch";
+        if nx + 24 < area.right() && (self.flow.is_some() || flow) {
+            let x = area.right() - hint.len() as u16;
+            buf.set_string(x, area.y, hint, Style::default().fg(FAINT));
+        }
+        area.y + 2
+    }
+
+    /// The wrapped note at the bottom, when there is room below `from`.
+    fn render_footer(&self, area: Rect, buf: &mut Buffer, from: u16) {
+        let text = "Meter a pipeline stage by stage: sv flow 'a | b | c'. Rates and pipe links on Linux; CPU and memory everywhere.";
+        let lines = wrap(text, area.width as usize);
+        let n = lines.len() as u16;
+        if area.bottom() < from + n {
+            return;
+        }
+        for (i, l) in lines.iter().enumerate() {
+            let y = area.bottom() - n + i as u16;
+            // `sv flow '…'` in cyan
+            match l.find("sv flow") {
+                Some(k) => {
+                    let (a, rest) = l.split_at(k);
+                    let end = rest.find("'.").map(|e| e + 1).unwrap_or(rest.len());
+                    let (b, c) = rest.split_at(end);
+                    let (x1, _) = buf.set_stringn(
+                        area.x,
+                        y,
+                        a,
+                        area.width as usize,
+                        Style::default().fg(DIM),
+                    );
+                    let (x2, _) = buf.set_stringn(
+                        x1,
+                        y,
+                        b,
+                        area.right().saturating_sub(x1) as usize,
+                        Style::default().fg(CYAN),
+                    );
+                    buf.set_stringn(
+                        x2,
+                        y,
+                        c,
+                        area.right().saturating_sub(x2) as usize,
+                        Style::default().fg(DIM),
+                    );
+                }
+                None => {
+                    buf.set_stringn(area.x, y, l, area.width as usize, Style::default().fg(DIM));
+                }
             }
         }
     }
@@ -1014,43 +1079,27 @@ impl FlowPane {
 
     fn render_job(&self, area: Rect, buf: &mut Buffer) {
         let w = area.width as usize;
-        let mut y = area.y;
+        let mut y = self.render_tabs(area, buf, false);
         let secs = self.job_started.map(|t| t.elapsed().as_secs()).unwrap_or(0);
         let title = if self.job_cmd.is_empty() {
-            "running".to_string()
+            self.job
+                .first()
+                .map(|j| j.proc.args.clone())
+                .unwrap_or_default()
         } else {
-            self.job_cmd.clone()
+            crate::ui::running_part(&self.job_cmd).to_string()
         };
-        let (nx, _) = buf.set_stringn(
-            area.x,
-            y,
-            format!(" {title} "),
-            w.saturating_sub(12),
-            Style::default().add_modifier(Modifier::BOLD),
-        );
+        let (x, _) = buf.set_stringn(area.x, y, "fg job · ", w, Style::default().fg(DIM));
+        let tail = format!(" ▶ running {}", crate::ui::fmt_secs(secs));
+        let room = area.right().saturating_sub(x) as usize;
+        let cmd_w = room.saturating_sub(tail.chars().count());
+        let (x, _) = buf.set_stringn(x, y, &title, cmd_w, Style::default().fg(TEXT));
         buf.set_stringn(
-            nx,
+            x,
             y,
-            format!(" {}s", secs),
-            area.right().saturating_sub(nx) as usize,
-            Style::default().fg(AMBER),
-        );
-        y += 2;
-        let rates = self.job.iter().any(|j| j.read_rate.is_some());
-        let head = if rates {
-            format!(
-                " {:>7} {:>6} {:>9} {:>9} {:>9}  command",
-                "pid", "cpu", "mem", "read/s", "write/s"
-            )
-        } else {
-            format!(" {:>7} {:>6} {:>9}  command", "pid", "cpu", "mem")
-        };
-        buf.set_stringn(
-            area.x,
-            y,
-            head,
-            w,
-            Style::default().fg(DIM).add_modifier(Modifier::UNDERLINED),
+            &tail,
+            area.right().saturating_sub(x) as usize,
+            Style::default().fg(GREEN),
         );
         y += 1;
         let busiest = self
@@ -1058,46 +1107,192 @@ impl FlowPane {
             .iter()
             .enumerate()
             .max_by(|a, b| a.1.proc.cpu.total_cmp(&b.1.proc.cpu))
-            .filter(|(_, j)| j.proc.cpu >= 5.0)
+            .filter(|(_, j)| j.proc.cpu >= 5.0 || self.job.len() == 1)
             .map(|(i, _)| i);
-        for (i, j) in self.job.iter().enumerate() {
-            if y >= area.bottom().saturating_sub(1) {
-                break;
-            }
-            if j.piped_from_prev && y + 1 < area.bottom() {
-                buf.set_stringn(
-                    area.x + 9,
-                    y,
-                    "│ pipe",
-                    w.saturating_sub(9),
-                    Style::default().fg(FAINT),
+        let footer_h = wrap(
+            "Meter a pipeline stage by stage: sv flow 'a | b | c'. Rates and pipe links on Linux; CPU and memory everywhere.",
+            w,
+        )
+        .len() as u16;
+        // a card per process (board 1) when they fit, else one row each
+        let card_h = |i: usize| 6 + u16::from(busiest == Some(i));
+        let need: u16 = (0..self.job.len()).map(|i| card_h(i) + 1).sum::<u16>();
+        let bottom = area.bottom().saturating_sub(footer_h + 1);
+        if w >= 34 && y + need <= bottom + 1 {
+            for (i, j) in self.job.iter().enumerate() {
+                if i > 0 {
+                    let st = Style::default().fg(FAINT);
+                    let t = if j.piped_from_prev { "  │ pipe" } else { "" };
+                    buf.set_stringn(area.x, y, t, w, st);
+                    y += 1;
+                }
+                let next = self.job.get(i + 1);
+                let piped_to = match next {
+                    Some(n) if n.piped_from_prev => n.proc.name().to_string(),
+                    Some(_) => "—".to_string(),
+                    None if self.job.len() == 1 => "— (single process)".to_string(),
+                    None => "— (last stage)".to_string(),
+                };
+                self.card(
+                    j,
+                    &piped_to,
+                    busiest == Some(i),
+                    Rect::new(area.x, y, area.width, card_h(i)),
+                    buf,
                 );
+                y += card_h(i);
+            }
+        } else {
+            let rates = self.job.iter().any(|j| j.read_rate.is_some());
+            let head = if rates {
+                format!(
+                    " {:>7} {:>6} {:>9} {:>9} {:>9}  command",
+                    "pid", "cpu", "mem", "read/s", "write/s"
+                )
+            } else {
+                format!(" {:>7} {:>6} {:>9}  command", "pid", "cpu", "mem")
+            };
+            y += 1;
+            buf.set_stringn(area.x, y, head, w, Style::default().fg(DIM));
+            y += 1;
+            for (i, j) in self.job.iter().enumerate() {
+                if y >= area.bottom().saturating_sub(1) {
+                    break;
+                }
+                if j.piped_from_prev && y + 1 < area.bottom() {
+                    buf.set_stringn(
+                        area.x + 9,
+                        y,
+                        "│ pipe",
+                        w.saturating_sub(9),
+                        Style::default().fg(FAINT),
+                    );
+                    y += 1;
+                }
+                let p = &j.proc;
+                let mut row = format!(" {:>7} {:>5.1}% {:>9}", p.pid, p.cpu, size(p.rss_kb * 1024));
+                if rates {
+                    row.push_str(&format!(
+                        " {:>9} {:>9}",
+                        j.read_rate.map(size).unwrap_or_default(),
+                        j.write_rate.map(size).unwrap_or_default()
+                    ));
+                }
+                row.push_str(&format!("  {}", p.args));
+                let (nx, _) = buf.set_stringn(area.x, y, &row, w, Style::default());
+                if busiest == Some(i) && nx + 12 < area.right() {
+                    buf.set_string(nx + 1, y, "◀ busiest", Style::default().fg(AMBER));
+                }
                 y += 1;
             }
-            let p = &j.proc;
-            let mut row = format!(" {:>7} {:>5.1}% {:>9}", p.pid, p.cpu, size(p.rss_kb * 1024));
-            if rates {
-                row.push_str(&format!(
-                    " {:>9} {:>9}",
-                    j.read_rate.map(size).unwrap_or_default(),
-                    j.write_rate.map(size).unwrap_or_default()
-                ));
-            }
-            row.push_str(&format!("  {}", p.args));
-            let (nx, _) = buf.set_stringn(area.x, y, &row, w, Style::default());
-            if busiest == Some(i) && nx + 12 < area.right() {
-                buf.set_string(nx + 1, y, "◀ busiest", Style::default().fg(AMBER));
-            }
-            y += 1;
         }
-        buf.set_stringn(
-            area.x,
-            area.bottom() - 1,
-            " meter a pipeline stage by stage: sv flow 'a | b | c'",
-            w,
-            Style::default().fg(FAINT),
-        );
+        self.render_footer(area, buf, y + 1);
     }
+
+    /// One process as a bordered card: name, pid, cpu, rss, rates, pipe.
+    fn card(&self, j: &JobProc, piped_to: &str, busiest: bool, r: Rect, buf: &mut Buffer) {
+        let border = Style::default().fg(Color::Indexed(238));
+        let w = r.width as usize;
+        let inner = w.saturating_sub(4);
+        buf.set_stringn(r.x, r.y, format!("╭{}╮", "─".repeat(w - 2)), w, border);
+        buf.set_stringn(
+            r.x,
+            r.bottom() - 1,
+            format!("╰{}╯", "─".repeat(w - 2)),
+            w,
+            border,
+        );
+        for y in r.y + 1..r.bottom() - 1 {
+            buf.set_string(r.x, y, "│", border);
+            buf.set_string(r.right() - 1, y, "│", border);
+        }
+        let x = r.x + 2;
+        let p = &j.proc;
+        let row = |buf: &mut Buffer, y: u16, l: &[(String, Style)], right: &[(String, Style)]| {
+            let mut cx = x;
+            for (t, st) in l {
+                let (nx, _) = buf.set_stringn(
+                    cx,
+                    y,
+                    t,
+                    (x + inner as u16).saturating_sub(cx) as usize,
+                    *st,
+                );
+                cx = nx;
+            }
+            let rw: usize = right.iter().map(|(t, _)| t.chars().count()).sum();
+            if (cx - x) as usize + rw < inner {
+                let mut rx = x + (inner - rw) as u16;
+                for (t, st) in right {
+                    let (nx, _) = buf.set_stringn(rx, y, t, rw, *st);
+                    rx = nx;
+                }
+            }
+        };
+        let d = Style::default().fg(DIM);
+        let t = Style::default().fg(TEXT);
+        row(
+            buf,
+            r.y + 1,
+            &[
+                (
+                    p.name().to_string(),
+                    Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+                ),
+                (format!(" pid {}", p.pid), d),
+            ],
+            &[
+                ("cpu ".into(), t),
+                (format!("{:.0}%", p.cpu), Style::default().fg(AMBER)),
+                (" · rss ".into(), t),
+                (size(p.rss_kb * 1024), Style::default().fg(MAGENTA)),
+            ],
+        );
+        let rate = |v: Option<u64>| match v {
+            Some(b) => (size(b), Style::default().fg(MAGENTA)),
+            None => ("—".to_string(), d),
+        };
+        row(buf, r.y + 2, &[("read/s".into(), d)], &[rate(j.read_rate)]);
+        row(
+            buf,
+            r.y + 3,
+            &[("write/s".into(), d)],
+            &[rate(j.write_rate)],
+        );
+        row(
+            buf,
+            r.y + 4,
+            &[("piped to".into(), d)],
+            &[(piped_to.to_string(), t)],
+        );
+        if busiest {
+            row(
+                buf,
+                r.y + 5,
+                &[],
+                &[("◀ busiest".into(), Style::default().fg(AMBER))],
+            );
+        }
+    }
+}
+
+/// Words into lines of at most `w` characters.
+fn wrap(text: &str, w: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for word in text.split(' ') {
+        if !cur.is_empty() && cur.chars().count() + 1 + word.chars().count() > w {
+            out.push(std::mem::take(&mut cur));
+        }
+        if !cur.is_empty() {
+            cur.push(' ');
+        }
+        cur.push_str(word);
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
 }
 
 /// "0.6%", "25%"
