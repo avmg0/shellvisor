@@ -109,6 +109,7 @@ pub const MENU: &[(&str, Cmd)] = &[
 ];
 
 /// A pane that isn't a shell.
+#[allow(clippy::large_enum_variant)] // a handful per window
 pub enum Tool {
     Files(FilesPane),
     System(SysPane),
@@ -2112,10 +2113,11 @@ impl App {
     }
 
     fn tool_act(&mut self, id: PaneId, act: Act) {
-        if let Act::Notice(m) = act {
-            self.notice(m);
-            return;
-        }
+        let act = match act {
+            Act::Notice(m) => return self.notice(m),
+            Act::Copy(t) => return self.copy(&t),
+            a => a,
+        };
         let Some(tab) = self.tab_of(id) else { return };
         let Some(shell) = self.paired_shell(tab) else {
             self.notice("no shell in this tab — split one with alt+\\");
@@ -2147,7 +2149,14 @@ impl App {
                     edit_command(&editor(), &relative(&file, &cwd), line)
                 )
             }
-            Act::Notice(_) => return,
+            Act::Move(paths) => {
+                let list: Vec<String> = paths
+                    .iter()
+                    .map(|p| shell_quote(&relative(p, &cwd)))
+                    .collect();
+                format!("\x05\x15mv -i {} ", list.join(" "))
+            }
+            Act::Notice(_) | Act::Copy(_) => return,
         };
         if let Some(p) = self.panes.get_mut(&shell) {
             let _ = p.pane.write(text.as_bytes());
@@ -7487,6 +7496,10 @@ impl App {
             Preset::Dev => {
                 // The default 4-pane workspace: files │ shell │ system over flow.
                 let f = self.new_tool("files", here.clone());
+                // board 1: the file column has its PREVIEW box under the tree
+                if let Some(Tool::Files(fp)) = self.tools.get_mut(&f) {
+                    let _ = fp.show_preview(true);
+                }
                 let s = self.new_tool("system", here.clone());
                 let fl = self.new_tool("flow", here);
                 Node::Split {

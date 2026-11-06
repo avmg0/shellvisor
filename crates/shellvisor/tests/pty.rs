@@ -716,7 +716,7 @@ fn files_pane_opens_inserts_paths_and_closes() {
     std::fs::create_dir_all(work.join("beta")).unwrap();
     s.send("\x1bOQ"); // F2
     s.wait_until("files pane", |t| {
-        t.contains("▸ beta/") && t.contains("alpha.txt") && t.contains(" tree ")
+        t.contains("▸ beta/") && t.contains("alpha.txt") && t.contains("Tree ")
     });
     s.send("j"); // beta/ → alpha.txt
     s.send("i"); // insert path at the prompt (and focus the shell)
@@ -775,7 +775,7 @@ fn dev_layout_shows_system_stats_and_is_restored() {
     s.wait_for("PROMPT>");
     s.run("sv layout dev");
     s.wait_until("dev layout", |t| {
-        t.contains("CPU") && t.contains("Mem") && t.contains(" tree ") && t.contains("Temp")
+        t.contains("CPU") && t.contains("Mem") && t.contains("Tree ") && t.contains("Temp")
     });
     s.pump(Duration::from_millis(1500));
     let saved = std::fs::read_to_string(s.dir.join("state/session.yaml")).unwrap();
@@ -792,7 +792,7 @@ fn dev_layout_shows_system_stats_and_is_restored() {
     let mut s = Session::launch("bash", dir);
     s.wait_for("Restore last session");
     s.send("y");
-    s.wait_until("panes back", |t| t.contains("CPU") && t.contains(" tree "));
+    s.wait_until("panes back", |t| t.contains("CPU") && t.contains("Tree "));
     // F3 on the shell focuses the system pane; F5 zooms it; `m` sorts by memory.
     s.send("\x1bOR");
     s.pump(Duration::from_millis(200));

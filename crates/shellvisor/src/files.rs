@@ -12,7 +12,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -27,6 +27,9 @@ const RED: Color = Color::Indexed(167);
 const CYAN: Color = Color::Indexed(73);
 const SEL_BG: Color = Color::Indexed(237);
 const INK: Color = Color::Indexed(16);
+const TEXT: Color = Color::Indexed(252);
+const BLUE: Color = Color::Indexed(110);
+const MAGENTA: Color = Color::Indexed(170);
 
 /// Most entries read from one folder.
 const MAX_DIR: usize = 5000;
@@ -76,16 +79,30 @@ pub enum View {
 }
 
 impl View {
+    /// In the boards' order: 1 Tree … 8 Recent (the number keys pick them).
     pub const ALL: [View; 8] = [
         View::Tree,
-        View::List,
         View::Columns,
+        View::List,
         View::Grid,
+        View::Sizes,
         View::Git,
         View::Find,
-        View::Sizes,
         View::Recent,
     ];
+    /// As the header shows it.
+    pub fn label(self) -> &'static str {
+        match self {
+            View::Tree => "Tree",
+            View::List => "List",
+            View::Columns => "Columns",
+            View::Grid => "Grid",
+            View::Git => "Git",
+            View::Find => "Find",
+            View::Sizes => "Size",
+            View::Recent => "Recent",
+        }
+    }
     pub fn name(self) -> &'static str {
         match self {
             View::Tree => "tree",
@@ -149,6 +166,7 @@ pub struct Sized {
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)] // one at a time, off the UI thread
 pub enum Done {
     Git {
         root: PathBuf,
@@ -191,6 +209,10 @@ pub enum Act {
     /// Open in $EDITOR (at a line, for search hits).
     Edit(PathBuf, Option<usize>),
     Notice(String),
+    /// Put this on the clipboard.
+    Copy(String),
+    /// Type `mv -i <paths> ` at the prompt for you to finish.
+    Move(Vec<PathBuf>),
 }
 
 #[derive(Debug, Default)]
@@ -236,7 +258,10 @@ struct DirCache {
 
 #[derive(Debug, Clone, PartialEq)]
 enum Row {
-    Entry { idx: (PathBuf, usize), depth: u16 },
+    Entry {
+        idx: (PathBuf, usize),
+        depth: u16,
+    },
     Up,
     More(usize, u16),
     Change(PathBuf, GitMark),
@@ -245,6 +270,8 @@ enum Row {
     Size(usize),
     Recent(usize),
     Note(String),
+    /// A group title ("STAGED", "CHANGES"): not selectable.
+    Heading(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -315,6 +342,31 @@ pub struct FilesPane {
     pub folder_style: Style,
     /// What downloads are filling right now: path → progress (a spinner on it).
     pub loading: HashMap<PathBuf, Option<u8>>,
+    /// The pane was wide enough at the last draw to show a preview beside the list.
+    wide: Cell<bool>,
+    /// Git and Find turn the preview on by themselves when wide; what it was before.
+    preview_before: Option<bool>,
+    /// The preview was turned on by a layout, not by you (see `show_preview`).
+    pub preview_soft: bool,
+    /// List view: sort column and the files marked with space.
+    sort: ListSort,
+    marked: Vec<PathBuf>,
+    /// Grid cards' second line, worked out once per entry: "6 items", "512×512".
+    grid_info: RefCell<HashMap<PathBuf, String>>,
+    /// Rows above the list body drawn last frame (List's column header).
+    header: Cell<u16>,
+    /// Size view: `x` asked to delete this (waiting for y).
+    confirm_delete: Option<PathBuf>,
+}
+
+/// List view sort column (`s` cycles; `S` flips the order).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ListSort {
+    #[default]
+    Name,
+    Size,
+    Modified,
+    Type,
 }
 
 impl FilesPane {
@@ -346,6 +398,14 @@ impl FilesPane {
             grid_cols: Cell::new(1),
             folder_style: Style::default().fg(CYAN),
             loading: HashMap::new(),
+            wide: Cell::new(false),
+            preview_before: None,
+            preview_soft: false,
+            sort: ListSort::Name,
+            marked: Vec::new(),
+            header: Cell::new(0),
+            grid_info: RefCell::new(HashMap::new()),
+            confirm_delete: None,
         };
         let jobs = p.set_root(root);
         (p, jobs)
@@ -372,6 +432,7 @@ impl FilesPane {
         }
         jobs.extend(self.view_job());
         self.rebuild();
+        jobs.extend(self.update_preview());
         jobs
     }
 
@@ -452,12 +513,21 @@ impl FilesPane {
     /// Re-read changed folders and ask for a fresh git status.
     pub fn refresh(&mut self) -> Vec<Job> {
         self.reload_changed(true);
+        self.grid_info.borrow_mut().clear();
         self.sizes = None;
         self.recent = None;
         let mut jobs = vec![self.git_job()];
         jobs.extend(self.view_job());
         self.rebuild();
         jobs
+    }
+
+    /// Turn the preview on. `soft`: only where it fits beside or under the
+    /// list (the dev layout's PREVIEW box), never in place of it.
+    pub fn show_preview(&mut self, soft: bool) -> Vec<Job> {
+        self.preview = true;
+        self.preview_soft = soft;
+        self.update_preview()
     }
 
     /// Cheap check while visible: re-read folders whose mtime changed.
@@ -559,13 +629,25 @@ impl FilesPane {
                     rows.push(Row::Up);
                 }
                 if let Some(c) = self.cache.get(&self.root) {
-                    for (i, it) in c.items.iter().enumerate() {
-                        if self.visible_item(it) {
-                            rows.push(Row::Entry {
-                                idx: (self.root.clone(), i),
-                                depth: 0,
-                            });
+                    let mut idx: Vec<usize> = (0..c.items.len())
+                        .filter(|i| self.visible_item(&c.items[*i]))
+                        .collect();
+                    if self.view == View::List {
+                        let it = |i: &usize| &c.items[*i];
+                        match self.sort {
+                            ListSort::Name => {}
+                            ListSort::Size => idx.sort_by_key(|i| std::cmp::Reverse(it(i).size)),
+                            ListSort::Modified => {
+                                idx.sort_by_key(|i| std::cmp::Reverse(it(i).mtime))
+                            }
+                            ListSort::Type => idx.sort_by_key(|i| (!it(i).dir, kind(it(i)))),
                         }
+                    }
+                    for i in idx {
+                        rows.push(Row::Entry {
+                            idx: (self.root.clone(), i),
+                            depth: 0,
+                        });
                     }
                     if c.more > 0 {
                         rows.push(Row::More(c.more, 0));
@@ -577,10 +659,49 @@ impl FilesPane {
                     rows.push(Row::Note("reading git status…".into()))
                 }
                 Some(g) => {
-                    for (p, m) in g.entries() {
-                        let rel = p.strip_prefix(&self.root).unwrap_or(p);
-                        if self.filter.is_empty() || matches(&self.filter, &rel.to_string_lossy()) {
-                            rows.push(Row::Change(p.to_path_buf(), m));
+                    // board 10: STAGED, CHANGES, UNTRACKED, then BY AGENT
+                    let shown: Vec<(PathBuf, GitMark, bool)> = g
+                        .entries()
+                        .into_iter()
+                        .filter(|(p, _)| {
+                            let rel = p.strip_prefix(&self.root).unwrap_or(p);
+                            self.filter.is_empty() || matches(&self.filter, &rel.to_string_lossy())
+                        })
+                        .map(|(p, m)| (p.to_path_buf(), m, g.is_staged(p)))
+                        .collect();
+                    type Pick = fn(&(PathBuf, GitMark, bool)) -> bool;
+                    let groups: [(&str, Pick); 3] = [
+                        ("STAGED", |e| e.2),
+                        ("CHANGES", |e| !e.2 && e.1 != GitMark::Untracked),
+                        ("UNTRACKED", |e| !e.2 && e.1 == GitMark::Untracked),
+                    ];
+                    for (name, pick) in groups {
+                        let mut first = true;
+                        for e in shown.iter().filter(|e| pick(e)) {
+                            if first {
+                                rows.push(Row::Heading(name.into()));
+                                first = false;
+                            }
+                            rows.push(Row::Change(e.0.clone(), e.1));
+                        }
+                    }
+                    let mut by: Vec<(String, usize)> = Vec::new();
+                    for (p, (who, _)) in &self.agent_marks {
+                        if p.starts_with(&self.root) {
+                            match by.iter_mut().find(|(w, _)| w == who) {
+                                Some((_, n)) => *n += 1,
+                                None => by.push((who.clone(), 1)),
+                            }
+                        }
+                    }
+                    by.sort();
+                    if !by.is_empty() {
+                        rows.push(Row::Heading("BY AGENT".into()));
+                        for (who, n) in by {
+                            rows.push(Row::Note(format!(
+                                "● {who}  {n} file{}  agent/{who}",
+                                if n == 1 { "" } else { "s" }
+                            )));
                         }
                     }
                     if rows.is_empty() {
@@ -649,6 +770,53 @@ impl FilesPane {
         }
         self.rows = rows;
         self.sel = self.sel.min(self.rows.len().saturating_sub(1));
+        self.skip_headings(true);
+    }
+
+    /// Marked files (List view), else the one under the cursor.
+    fn marked_or_selected(&self) -> Vec<PathBuf> {
+        if !self.marked.is_empty() {
+            return self.marked.clone();
+        }
+        match self.rows.get(self.sel) {
+            Some(Row::Entry { .. }) => self.selected().map(|s| vec![s.0]).unwrap_or_default(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Move off a group title, the way the cursor was going.
+    fn skip_headings(&mut self, down: bool) {
+        let n = self.rows.len();
+        let heading = |r: Option<&Row>| matches!(r, Some(Row::Heading(_)));
+        if !heading(self.rows.get(self.sel)) {
+            return;
+        }
+        let mut i = self.sel;
+        if down {
+            while i + 1 < n && heading(self.rows.get(i)) {
+                i += 1;
+            }
+            if heading(self.rows.get(i)) {
+                return self.skip_from_bottom();
+            }
+        } else {
+            while i > 0 && heading(self.rows.get(i)) {
+                i -= 1;
+            }
+            if heading(self.rows.get(i)) {
+                // the top row is a title: go to the first thing below it
+                while i + 1 < n && heading(self.rows.get(i)) {
+                    i += 1;
+                }
+            }
+        }
+        self.sel = i;
+    }
+
+    fn skip_from_bottom(&mut self) {
+        while self.sel > 0 && matches!(self.rows.get(self.sel), Some(Row::Heading(_))) {
+            self.sel -= 1;
+        }
     }
 
     fn tree_rows(&self, dir: &Path, depth: u16, rows: &mut Vec<Row>) {
@@ -697,7 +865,7 @@ impl FilesPane {
                 let (_, f) = self.recent.as_ref()?;
                 Some((self.root.join(&f.get(*i)?.0), false, None))
             }
-            Row::More(..) | Row::Note(_) => None,
+            Row::More(..) | Row::Note(_) | Row::Heading(_) => None,
         }
     }
 
@@ -758,11 +926,16 @@ impl FilesPane {
             }
             Done::Diff { file, text } => {
                 if self.prev.as_ref().map(|p| &p.path) == Some(&file) {
-                    let lines = text.lines().map(diff_line).collect::<Vec<_>>();
+                    // board 10: hunks only, with +N −M in the title
+                    let body: Vec<&str> =
+                        text.lines().skip_while(|l| !l.starts_with("@@")).collect();
+                    let add = body.iter().filter(|l| l.starts_with('+')).count();
+                    let del = body.iter().filter(|l| l.starts_with('-')).count();
+                    let lines = body.into_iter().map(diff_line).collect::<Vec<_>>();
                     let note = if lines.is_empty() {
                         "no diff (untracked or binary)".into()
                     } else {
-                        String::new()
+                        format!(" +{add} −{del}")
                     };
                     self.prev = Some(Preview {
                         path: file,
@@ -775,7 +948,11 @@ impl FilesPane {
             }
         }
         self.rebuild();
-        Outcome::redraw()
+        Outcome {
+            jobs: self.update_preview(),
+            redraw: true,
+            ..Default::default()
+        }
     }
 
     fn ensure_index(&mut self) -> Vec<Job> {
@@ -864,12 +1041,21 @@ impl FilesPane {
                 ..Default::default()
             };
         }
+        if let Some(before) = self.preview_before.take() {
+            self.preview = before;
+        }
+        if matches!(v, View::Git | View::Find) && self.wide.get() && !self.preview {
+            self.preview_before = Some(self.preview);
+            self.preview = true;
+        }
         self.view = v;
         self.sel = 0;
         self.scroll.set(0);
         self.filter.clear();
         self.editing = None;
         self.prev = None;
+        self.marked.clear();
+        self.confirm_delete = None;
         match v {
             View::Find => {
                 self.editing = Some(Editing::Query);
@@ -886,6 +1072,36 @@ impl FilesPane {
     pub fn key(&mut self, key: &[u8]) -> Outcome {
         if let Some(ed) = self.editing {
             return self.edit_key(ed, key);
+        }
+        if let Some(path) = self.confirm_delete.take() {
+            let mut out = Outcome::redraw();
+            if key == b"y" || key == b"Y" {
+                match to_trash(&path) {
+                    Ok(dest) => {
+                        out.acts.push(Act::Notice(format!(
+                            "moved {} to the Trash ({})",
+                            path.file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_default(),
+                            crate::ui::short_path(&dest.to_string_lossy())
+                        )));
+                        out.jobs = self.refresh();
+                    }
+                    Err(e) => out
+                        .acts
+                        .push(Act::Notice(format!("couldn't move it to the Trash: {e}"))),
+                }
+            }
+            return out;
+        }
+        if self.view == View::Sizes && key == b"x" {
+            if let Some((p, _, _)) = self
+                .selected()
+                .filter(|_| matches!(self.rows.get(self.sel), Some(Row::Size(_))))
+            {
+                self.confirm_delete = Some(p);
+            }
+            return Outcome::redraw();
         }
         let mut out = Outcome::redraw();
         let n = self.rows.len();
@@ -905,9 +1121,81 @@ impl FilesPane {
                 return out;
             }
         }
+        if self.view == View::List {
+            match key {
+                b" " => {
+                    if let Some((p, _, _)) = self
+                        .selected()
+                        .filter(|_| matches!(self.rows.get(self.sel), Some(Row::Entry { .. })))
+                    {
+                        match self.marked.iter().position(|m| *m == p) {
+                            Some(i) => {
+                                self.marked.remove(i);
+                            }
+                            None => self.marked.push(p),
+                        }
+                    }
+                    self.sel = (self.sel + 1).min(n.saturating_sub(1));
+                    return out;
+                }
+                b"s" => {
+                    self.sort = match self.sort {
+                        ListSort::Name => ListSort::Size,
+                        ListSort::Size => ListSort::Modified,
+                        ListSort::Modified => ListSort::Type,
+                        ListSort::Type => ListSort::Name,
+                    };
+                    let keep = self.selected().map(|s| s.0);
+                    self.rebuild();
+                    if let Some(k) = keep {
+                        if let Some(i) = (0..self.rows.len()).find(|i| {
+                            let save = self.sel;
+                            self.sel = *i;
+                            let hit = self.selected().map(|s| s.0) == Some(k.clone());
+                            self.sel = save;
+                            hit
+                        }) {
+                            self.sel = i;
+                        }
+                    }
+                    return out;
+                }
+                b"y" | b"m" => {
+                    let paths = self.marked_or_selected();
+                    if paths.is_empty() {
+                        return out;
+                    }
+                    if key == b"y" {
+                        let text = paths
+                            .iter()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        out.acts.push(Act::Copy(text));
+                        out.acts.push(Act::Notice(format!(
+                            "copied {} path{}",
+                            paths.len(),
+                            if paths.len() == 1 { "" } else { "s" }
+                        )));
+                    } else {
+                        // the shell finishes it: you type where to
+                        out.acts.push(Act::Move(paths));
+                    }
+                    self.marked.clear();
+                    return out;
+                }
+                _ => {}
+            }
+        }
         match key {
-            b"\x1b[A" | b"\x1bOA" | b"k" => self.sel = self.sel.saturating_sub(1),
-            b"\x1b[B" | b"\x1bOB" | b"j" => self.sel = (self.sel + 1).min(n.saturating_sub(1)),
+            b"\x1b[A" | b"\x1bOA" | b"k" => {
+                self.sel = self.sel.saturating_sub(1);
+                self.skip_headings(false);
+            }
+            b"\x1b[B" | b"\x1bOB" | b"j" => {
+                self.sel = (self.sel + 1).min(n.saturating_sub(1));
+                self.skip_headings(true);
+            }
             b"\x1b[5~" => self.sel = self.sel.saturating_sub(self.page.get()),
             b"\x1b[6~" => self.sel = (self.sel + self.page.get()).min(n.saturating_sub(1)),
             b"g" | b"\x1b[H" | b"\x1bOH" => self.sel = 0,
@@ -954,7 +1242,8 @@ impl FilesPane {
             b"t" => out.jobs = self.set_view(View::Tree),
             b"s" => out.jobs = self.set_view(View::Git),
             b"p" | b" " => {
-                self.preview = !self.preview;
+                self.preview = !self.preview || self.preview_soft;
+                self.preview_soft = false;
                 if !self.preview {
                     self.prev = None;
                 }
@@ -1241,10 +1530,10 @@ impl FilesPane {
     /// A click at (x, y) inside the pane.
     pub fn click(&mut self, x: u16, y: u16, width: u16) -> Outcome {
         if y == 0 {
-            // view tabs: " tree  list  git  find "
-            let mut col = 1u16;
-            for v in View::ALL {
-                let w = v.name().len() as u16 + 2;
+            // view tabs, laid out as drawn
+            let mut col = 0u16;
+            for (v, text) in self.tab_cells(width) {
+                let w = text.chars().count() as u16;
                 if x >= col && x < col + w {
                     let jobs = self.set_view(v);
                     return Outcome {
@@ -1257,7 +1546,7 @@ impl FilesPane {
             }
             return Outcome::default();
         }
-        let top = self.list_top();
+        let top = self.list_top() + self.header.get();
         if y < top || (self.preview && width >= 50 && x >= width * 45 / 100) {
             return Outcome::default();
         }
@@ -1275,6 +1564,40 @@ impl FilesPane {
             };
         }
         Outcome::default()
+    }
+
+    /// The header's view tabs for a pane this wide: every name if they fit,
+    /// else numbers with the current one named, else just the current one.
+    fn tab_cells(&self, width: u16) -> Vec<(View, String)> {
+        let full: Vec<(View, String)> = View::ALL
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (*v, format!(" {} {} ", i + 1, v.label())))
+            .collect();
+        let need: usize = full.iter().map(|(_, t)| t.chars().count() + 1).sum();
+        if need + 10 <= width as usize {
+            return full;
+        }
+        let short: Vec<(View, String)> = View::ALL
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                if *v == self.view {
+                    (*v, format!(" {} {} ", i + 1, v.label()))
+                } else {
+                    (*v, format!("{}", i + 1))
+                }
+            })
+            .collect();
+        let need: usize = short.iter().map(|(_, t)| t.chars().count() + 1).sum();
+        if need + 6 <= width as usize {
+            return short;
+        }
+        let i = View::ALL.iter().position(|v| *v == self.view).unwrap_or(0);
+        vec![(
+            self.view,
+            format!(" {}/{} {} ", i + 1, View::ALL.len(), self.view.label()),
+        )]
     }
 
     fn list_top(&self) -> u16 {
@@ -1306,15 +1629,12 @@ impl FilesPane {
             return;
         }
         let dim = Style::default().fg(DIM);
-        // row 0: view switcher + flags
-        let mut x = area.x + 1;
-        let full: usize = View::ALL.iter().map(|v| v.name().len() + 3).sum();
-        let fits = full + 12 <= area.width as usize;
-        for v in View::ALL {
-            if !fits && v != self.view {
-                continue;
-            }
-            let st = if v == self.view {
+        self.header.set(0);
+        // row 0: "1 Tree  2 Columns  3 List …" (board 9), the current one in amber
+        let tabs = self.tab_cells(area.width);
+        let mut x = area.x;
+        for (v, text) in &tabs {
+            let st = if *v == self.view {
                 Style::default()
                     .bg(if focused { AMBER } else { FAINT })
                     .fg(INK)
@@ -1322,24 +1642,8 @@ impl FilesPane {
             } else {
                 dim
             };
-            let (nx, _) = buf.set_stringn(
-                x,
-                area.y,
-                format!(" {} ", v.name()),
-                area.right().saturating_sub(x) as usize,
-                st,
-            );
-            x = nx + 1;
-        }
-        if !fits {
-            let i = View::ALL.iter().position(|v| *v == self.view).unwrap_or(0) + 1;
-            let (nx, _) = buf.set_stringn(
-                x,
-                area.y,
-                format!("{i}/{} tab", View::ALL.len()),
-                area.right().saturating_sub(x) as usize,
-                dim,
-            );
+            let (nx, _) =
+                buf.set_stringn(x, area.y, text, area.right().saturating_sub(x) as usize, st);
             x = nx + 1;
         }
         let mut flags = String::new();
@@ -1379,8 +1683,7 @@ impl FilesPane {
         let top = self.list_top();
         if top == 2 {
             let (label, text) = match (self.view, self.find.contents) {
-                (View::Find, false) => (" name ", &self.find.query),
-                (View::Find, true) => (" text ", &self.find.query),
+                (View::Find, _) => ("❯ ", &self.find.query),
                 _ => (" filter ", &self.filter),
             };
             let st = Style::default().fg(CYAN).add_modifier(Modifier::BOLD);
@@ -1410,12 +1713,13 @@ impl FilesPane {
                     } else {
                         ""
                     };
+                    let total = self.find.index.as_ref().map(|i| i.len()).unwrap_or(0);
                     format!(
-                        "  {n}{more} · tab: {}",
+                        "  {} · {n}{more} / {total} · tab switches",
                         if self.find.contents {
-                            "names"
+                            "names | [contents]"
                         } else {
-                            "contents"
+                            "[names] | contents"
                         }
                     )
                 }
@@ -1432,7 +1736,51 @@ impl FilesPane {
 
         // body: rows (+ preview)
         let body_h = area.height.saturating_sub(top + 1) as usize; // last row: hints
+        self.wide.set(area.width >= 70);
+        // tall and narrow (the dev layout's file column): PREVIEW under the list (board 1)
+        if self.preview && area.width < 50 && body_h >= 18 {
+            let list_h = (body_h * 11 / 20) as u16;
+            let body = Rect::new(area.x, area.y + top, area.width, list_h);
+            self.page.set((list_h as usize).max(1));
+            match self.view {
+                View::Grid => self.render_grid(body, buf, focused),
+                _ => self.render_rows(body, buf, focused),
+            }
+            let ry = area.y + top + list_h;
+            let rule = format!("─ PREVIEW {}", "─".repeat(area.width as usize));
+            buf.set_stringn(
+                area.x,
+                ry,
+                &rule,
+                area.width as usize,
+                Style::default().fg(FAINT),
+            );
+            buf.set_stringn(
+                area.x + 2,
+                ry,
+                "PREVIEW",
+                7,
+                Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+            );
+            self.render_preview(
+                Rect::new(area.x, ry + 1, area.width, body_h as u16 - list_h - 1),
+                buf,
+            );
+            self.render_hints(area, buf);
+            return;
+        }
         let split = self.preview && area.width >= 50;
+        if self.preview && self.preview_soft && !split {
+            // a layout's preview that doesn't fit: just the list
+            let body = Rect::new(area.x, area.y + top, area.width, body_h as u16);
+            self.page.set(body_h.max(1));
+            match self.view {
+                View::Grid => self.render_grid(body, buf, focused),
+                _ => self.render_rows(body, buf, focused),
+            }
+            self.render_hints(area, buf);
+            return;
+        }
         let list_w = if split {
             area.width * 45 / 100
         } else {
@@ -1461,6 +1809,29 @@ impl FilesPane {
                         focused,
                     );
                 }
+                View::Sizes if body.height >= 14 && list_w >= 30 => {
+                    let mh = (body.height / 3).clamp(4, 7);
+                    self.render_treemap(Rect::new(body.x, body.y, body.width, mh), buf);
+                    self.header.set(mh + 1);
+                    self.render_rows(
+                        Rect::new(body.x, body.y + mh + 1, body.width, body.height - mh - 1),
+                        buf,
+                        focused,
+                    );
+                }
+                View::List if list_w >= 44 => {
+                    self.render_list_header(body, buf);
+                    self.render_rows(
+                        Rect::new(
+                            body.x,
+                            body.y + 1,
+                            body.width,
+                            body.height.saturating_sub(1),
+                        ),
+                        buf,
+                        focused,
+                    );
+                }
                 _ => self.render_rows(body, buf, focused),
             }
             if split {
@@ -1475,7 +1846,161 @@ impl FilesPane {
             }
         }
 
-        // hints
+        self.render_hints(area, buf);
+    }
+
+    /// Size view: the biggest entries as blocks sized by what they hold.
+    fn render_treemap(&self, area: Rect, buf: &mut Buffer) {
+        let Some((r, e, _)) = &self.sizes else { return };
+        if *r != self.root || e.is_empty() {
+            return;
+        }
+        let top: Vec<(usize, &Sized)> = e
+            .iter()
+            .enumerate()
+            .take(6)
+            .filter(|(_, x)| x.bytes > 0)
+            .collect();
+        let mut rect = area;
+        let mut left: u64 = top.iter().map(|(_, x)| x.bytes).sum::<u64>().max(1);
+        for (k, (i, it)) in top.iter().enumerate() {
+            if rect.width < 2 || rect.height < 1 {
+                break;
+            }
+            let last = k + 1 == top.len();
+            let share = it.bytes as f64 / left as f64;
+            // alternate: across, then down, so blocks stay roughly square
+            let cell = if last {
+                rect
+            } else if k % 2 == 0 {
+                // leave room for the rest, however small they are
+                let max = rect.width.saturating_sub(10).max(1);
+                let w = ((rect.width as f64 * share).round() as u16).clamp(1, max);
+                let c = Rect::new(rect.x, rect.y, w, rect.height);
+                rect = Rect::new(rect.x + w, rect.y, rect.width - w, rect.height);
+                c
+            } else {
+                let max = rect.height.saturating_sub(2).max(1);
+                let h = ((rect.height as f64 * share).round() as u16).clamp(1, max);
+                let c = Rect::new(rect.x, rect.y, rect.width, h);
+                rect = Rect::new(rect.x, rect.y + h, rect.width, rect.height - h);
+                c
+            };
+            left = left.saturating_sub(it.bytes).max(1);
+            let bg = rank_tint(*i);
+            // a one-column gap on the right and a row below, like separate tiles
+            let tile = Rect::new(
+                cell.x,
+                cell.y,
+                cell.width
+                    .saturating_sub(u16::from(cell.right() < area.right()))
+                    .max(1),
+                cell.height
+                    .saturating_sub(u16::from(cell.bottom() < area.bottom()))
+                    .max(1),
+            );
+            buf.set_style(tile, Style::default().bg(bg));
+            let w = tile.width.saturating_sub(1) as usize;
+            let name = format!("{}{}", it.name, if it.dir { "/" } else { "" });
+            let size = human_space(it.bytes);
+            if tile.height >= 2 {
+                buf.set_stringn(
+                    tile.x + 1,
+                    tile.y,
+                    truncate(&name, w),
+                    w,
+                    Style::default().bg(bg).fg(TEXT),
+                );
+                buf.set_stringn(
+                    tile.x + 1,
+                    tile.y + 1,
+                    &size,
+                    w,
+                    Style::default().bg(bg).fg(DIM),
+                );
+            } else {
+                let t = format!("{name} {size}");
+                buf.set_stringn(
+                    tile.x + 1,
+                    tile.y,
+                    truncate(&t, w),
+                    w,
+                    Style::default().bg(bg).fg(TEXT),
+                );
+            }
+        }
+    }
+
+    /// NAME · SIZE · MODIFIED · GIT · TYPE, the sorted one amber with ▾.
+    fn render_list_header(&self, area: Rect, buf: &mut Buffer) {
+        let w = area.width as usize;
+        let cols_w = 6 + 1 + 12 + 1 + 3 + 1 + 4;
+        let room = w.saturating_sub(cols_w + 1);
+        let d = Style::default().fg(DIM);
+        let on = Style::default().fg(AMBER);
+        let pick = |k: ListSort| if self.sort == k { on } else { d };
+        let arrow = |k: ListSort| if self.sort == k { "▾" } else { "" };
+        buf.set_stringn(
+            area.x + 2,
+            area.y,
+            format!("NAME{}", arrow(ListSort::Name)),
+            room,
+            pick(ListSort::Name),
+        );
+        let x = area.x + room as u16 + 1;
+        buf.set_stringn(
+            x,
+            area.y,
+            format!("{:>6}", format!("SIZE{}", arrow(ListSort::Size))),
+            6,
+            pick(ListSort::Size),
+        );
+        buf.set_stringn(
+            x + 7,
+            area.y,
+            format!("MODIFIED{}", arrow(ListSort::Modified)),
+            12,
+            pick(ListSort::Modified),
+        );
+        buf.set_stringn(x + 20, area.y, "GIT", 3, d);
+        buf.set_stringn(
+            x + 24,
+            area.y,
+            format!("TYPE{}", arrow(ListSort::Type)),
+            5,
+            pick(ListSort::Type),
+        );
+        self.header.set(1);
+    }
+
+    fn render_hints(&self, area: Rect, buf: &mut Buffer) {
+        if let Some(p) = &self.confirm_delete {
+            let size = self
+                .sizes
+                .as_ref()
+                .and_then(|(_, e, _)| {
+                    let n = p.file_name()?.to_string_lossy().into_owned();
+                    e.iter()
+                        .find(|x| x.name == n)
+                        .map(|x| crate::sysmon::human(x.bytes))
+                })
+                .unwrap_or_default();
+            let t = format!(
+                "delete {}{} ({size})? y moves it to the Trash · any other key keeps it",
+                p.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                if p.is_dir() { "/" } else { "" }
+            );
+            buf.set_stringn(
+                area.x,
+                area.bottom() - 1,
+                &t,
+                area.width as usize,
+                Style::default().fg(RED).add_modifier(Modifier::BOLD),
+            );
+            return;
+        }
         let hints = if self.editing.is_some() {
             if self.view == View::Find {
                 "⏎ open/search · tab names⇄text · ↑↓ · esc done"
@@ -1485,10 +2010,34 @@ impl FilesPane {
         } else {
             match self.view {
                 View::Find => "/ edit · ⏎ open · i insert · p preview · esc back",
+                View::List if !self.marked.is_empty() => {
+                    let bytes: u64 = self
+                        .marked
+                        .iter()
+                        .filter_map(|p| std::fs::metadata(p).ok())
+                        .map(|m| m.len())
+                        .sum();
+                    let t = format!(
+                        "space select · s sort · {} selected ({}) → y copy paths · m move",
+                        self.marked.len(),
+                        crate::sysmon::human(bytes)
+                    );
+                    buf.set_stringn(
+                        area.x,
+                        area.bottom() - 1,
+                        &t,
+                        area.width as usize,
+                        Style::default().fg(FAINT),
+                    );
+                    return;
+                }
+                View::List => {
+                    "space select · s sort · y copy path · m move · ⏎ open · p preview · tab view"
+                }
                 View::Grid => "←↑↓→ move · ⏎ open · ⌫ up · i insert · p preview · tab view",
-                View::Sizes => "⏎ into folder · ⌫ up · r recount · i insert · / filter · tab view",
+                View::Sizes => "⏎ drill in · x delete (asks first) · ⌫ up · r recount · tab view",
                 View::Recent => {
-                    "newest first · ⏎ edit · i insert · p preview · r refresh · tab view"
+                    "who changed what, newest first · ⏎ open · i insert · p preview · r refresh"
                 }
                 _ => {
                     "⏎ open · i insert · c cd · e edit · p preview · / filter · . hidden · tab view"
@@ -1567,12 +2116,49 @@ impl FilesPane {
                         base
                     };
                     let mark = git.and_then(|g| g.mark(&it.path));
+                    if self.view == View::List && w >= 44 {
+                        // board 9: NAME · SIZE · MODIFIED · GIT · TYPE columns
+                        let marked = self.marked.contains(&it.path);
+                        let size = if it.dir {
+                            "—".to_string()
+                        } else {
+                            crate::sysmon::human(it.size)
+                        };
+                        let modified = format!("{size:>6} {:<12} ", ago_long(it.mtime));
+                        let gitc = format!("{:<3} ", mark.map(|m| m.symbol()).unwrap_or(""));
+                        let typ = format!("{:<4}", kind(it));
+                        let cols_w = 6 + 1 + 12 + 1 + 3 + 1 + 4;
+                        let lead = if marked { "▣ " } else { "  " };
+                        let name_st = if marked { st.fg(AMBER) } else { st };
+                        let gcol = mark.map(mark_color).unwrap_or(FAINT);
+                        let room = w.saturating_sub(cols_w + 1);
+                        buf.set_stringn(
+                            area.x,
+                            y,
+                            truncate(&format!("{lead}{name}"), room),
+                            room,
+                            name_st,
+                        );
+                        let cx = area.x + room as u16 + 1;
+                        let (nx, _) = buf.set_stringn(cx, y, &modified, 20, base.fg(DIM));
+                        let (nx, _) = buf.set_stringn(nx, y, &gitc, 4, base.fg(gcol));
+                        buf.set_stringn(
+                            nx,
+                            y,
+                            &typ,
+                            area.right().saturating_sub(nx) as usize,
+                            base.fg(DIM),
+                        );
+                        continue;
+                    }
                     let mut right = String::new();
                     if self.view == View::List && w > 40 {
                         if !it.dir {
                             right.push_str(&crate::sysmon::human(it.size));
                         }
                         right.push_str(&format!(" {:>4}", ago(it.mtime)));
+                    } else if self.view == View::Tree && w >= 40 && !it.dir {
+                        right.push_str(&format!("{:>6}", crate::sysmon::human(it.size)));
                     }
                     let agent = self.agent_marks.get(&it.path);
                     let loading = self.loading_at(&it.path, it.dir);
@@ -1611,16 +2197,21 @@ impl FilesPane {
                     None,
                 ),
                 Row::Note(t) => (format!("  {t}"), base.fg(DIM), None),
+                Row::Heading(t) => (t.clone(), Style::default().fg(DIM), None),
                 Row::Change(p, m) => {
                     let rel = p
                         .strip_prefix(&self.root)
                         .unwrap_or(p)
                         .to_string_lossy()
                         .into_owned();
+                    let who = self
+                        .agent_marks
+                        .get(p)
+                        .map(|(w, c)| (format!("◆ {w} "), base.fg(Color::Indexed(*c))));
                     (
-                        format!(" {}  {rel}", m.symbol()),
+                        format!("  {}  {rel}", m.symbol()),
                         base.fg(mark_color(*m)),
-                        None,
+                        who,
                     )
                 }
                 Row::Name(i) => {
@@ -1632,6 +2223,40 @@ impl FilesPane {
                         .cloned()
                         .unwrap_or_default();
                     (format!("  {p}"), base, None)
+                }
+                Row::Size(i) if w >= 30 => {
+                    // board 10: name · size · a bar coloured by rank
+                    let Some((_, e, _)) = &self.sizes else {
+                        continue;
+                    };
+                    let Some(it) = e.get(*i) else { continue };
+                    let biggest = e.first().map(|x| x.bytes).unwrap_or(1).max(1);
+                    let bar_w = (w / 3).clamp(6, 30);
+                    let filled = (((it.bytes as f64 / biggest as f64) * bar_w as f64).round()
+                        as usize)
+                        .max(1);
+                    let col = rank_color(*i);
+                    let size = format!("{:>8}  ", human_space(it.bytes));
+                    let room = w.saturating_sub(bar_w + size.chars().count() + 1);
+                    let name = if it.dir {
+                        format!("{}/", it.name)
+                    } else {
+                        it.name.clone()
+                    };
+                    let nst = if it.dir { base.fg(BLUE) } else { base };
+                    buf.set_stringn(area.x, y, truncate(&name, room), room, nst);
+                    let x = area.x + room as u16 + 1;
+                    let (x, _) = buf.set_stringn(x, y, &size, w, base.fg(TEXT));
+                    let (x, _) =
+                        buf.set_stringn(x, y, "━".repeat(filled.min(bar_w)), bar_w, base.fg(col));
+                    buf.set_stringn(
+                        x,
+                        y,
+                        "━".repeat(bar_w - filled.min(bar_w)),
+                        bar_w,
+                        base.fg(Color::Indexed(237)),
+                    );
+                    continue;
                 }
                 Row::Size(i) => {
                     let Some((_, e, _)) = &self.sizes else {
@@ -1671,6 +2296,57 @@ impl FilesPane {
                         },
                         Some((format!("{bar} {size:>6} {pct:>3}% "), base.fg(col))),
                     )
+                }
+                Row::Recent(i) if w >= 44 => {
+                    // board 10: time · who · path · what happened
+                    let Some((_, f)) = &self.recent else { continue };
+                    let Some((p, t, _)) = f.get(*i) else { continue };
+                    let abs = self.root.join(p);
+                    let secs = t
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    let (who, wc) = match self.agent_marks.get(&abs) {
+                        Some((n, c)) => (n.clone(), Color::Indexed(*c)),
+                        None => ("you".to_string(), TEXT),
+                    };
+                    let (what, what_c) = match git.and_then(|g| g.mark(&abs)) {
+                        Some(GitMark::Untracked) | Some(GitMark::Added) => ("created", GREEN),
+                        Some(GitMark::Conflict) => ("conflict", RED),
+                        Some(GitMark::Deleted) => ("deleted", RED),
+                        Some(_) if who != "you" => ("edited", AMBER),
+                        Some(_) => ("edited", AMBER),
+                        None => ("saved", DIM),
+                    };
+                    let (x, _) = buf.set_stringn(
+                        area.x,
+                        y,
+                        format!("{} ", crate::mcpscreen::hms(secs)),
+                        w,
+                        base.fg(DIM),
+                    );
+                    let (x, _) = buf.set_stringn(x, y, "● ", 2, base.fg(wc));
+                    let who_w = 8usize;
+                    let (_, _) =
+                        buf.set_stringn(x, y, format!("{:<who_w$}", who), who_w, base.fg(wc));
+                    let px = x + who_w as u16;
+                    let room = area.right().saturating_sub(px) as usize;
+                    let what_w = what.len() + 1;
+                    buf.set_stringn(
+                        px,
+                        y,
+                        truncate(p, room.saturating_sub(what_w + 1)),
+                        room.saturating_sub(what_w + 1),
+                        base,
+                    );
+                    buf.set_stringn(
+                        area.right() - what.len() as u16,
+                        y,
+                        what,
+                        what.len(),
+                        base.fg(what_c),
+                    );
+                    continue;
                 }
                 Row::Recent(i) => {
                     let Some((_, f)) = &self.recent else { continue };
@@ -1773,12 +2449,18 @@ impl FilesPane {
         }
     }
 
-    /// Grid view: names in cells, filled row by row.
+    /// Grid view: a card per entry (board 9), coloured by type, row by row.
     fn render_grid(&self, area: Rect, buf: &mut Buffer, focused: bool) {
-        let cell = 20u16.min(area.width.max(1));
-        let cols = (area.width / cell).max(1) as usize;
+        let gap = 1u16;
+        let card_w = 18u16.min(area.width.max(4));
+        let cols = ((area.width + gap) / (card_w + gap)).max(1) as usize;
+        // stretch the cards to use the width
+        let card_w = ((area.width + gap) / cols as u16)
+            .saturating_sub(gap)
+            .max(4);
+        let card_h = 4u16;
         self.grid_cols.set(cols);
-        let h = area.height as usize;
+        let h = (area.height / card_h) as usize;
         if h == 0 {
             return;
         }
@@ -1794,44 +2476,66 @@ impl FilesPane {
         self.scroll.set(top);
         self.page.set((h * cols).max(1));
         for (i, row) in self.rows.iter().enumerate().skip(top * cols).take(h * cols) {
-            let gy = area.y + (i / cols - top) as u16;
-            let gx = area.x + (i % cols) as u16 * cell;
-            let (label, st) = match row {
+            let gy = area.y + (i / cols - top) as u16 * card_h;
+            let gx = area.x + (i % cols) as u16 * (card_w + gap);
+            let (name, info, color) = match row {
                 Row::Entry { idx, .. } => {
                     let Some(it) = self.item(idx) else { continue };
-                    if it.dir {
-                        (format!("▸ {}/", it.name), self.folder_style)
+                    let (info, color) = card_info(it, &self.grid_info);
+                    let icon = if it.dir {
+                        "▸"
+                    } else if color == MAGENTA {
+                        "■"
                     } else {
-                        let ext = it.name.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
-                        let icon = match ext {
-                            "rs" | "py" | "js" | "ts" | "go" | "c" | "h" | "rb" | "sh"
-                            | "swift" => "λ",
-                            "md" | "txt" | "rst" => "¶",
-                            "json" | "yaml" | "yml" | "toml" | "csv" => "≡",
-                            "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" => "◩",
-                            _ => "·",
-                        };
-                        (format!("{icon} {}", it.name), Style::default())
-                    }
+                        "·"
+                    };
+                    (
+                        format!("{icon} {}{}", it.name, if it.dir { "/" } else { "" }),
+                        info,
+                        color,
+                    )
                 }
-                Row::More(n, _) => (format!("… {n} more"), Style::default().fg(FAINT)),
-                Row::Note(t) => (t.clone(), Style::default().fg(DIM)),
+                Row::More(n, _) => (format!("… {n} more"), String::new(), FAINT),
+                Row::Note(t) => {
+                    buf.set_stringn(gx, gy, t, area.width as usize, Style::default().fg(DIM));
+                    continue;
+                }
                 _ => continue,
             };
-            let st = if i == self.sel {
-                st.bg(SEL_BG).add_modifier(if focused {
-                    Modifier::BOLD
-                } else {
-                    Modifier::empty()
-                })
+            let sel = i == self.sel;
+            let border = if sel && focused {
+                Style::default().fg(AMBER)
+            } else if sel {
+                Style::default().fg(DIM)
             } else {
-                st
+                Style::default().fg(Color::Indexed(238))
             };
-            let w = (cell - 1) as usize;
-            if i == self.sel {
-                buf.set_style(Rect::new(gx, gy, cell - 1, 1), st);
+            let w = card_w as usize;
+            buf.set_stringn(gx, gy, format!("╭{}╮", "─".repeat(w - 2)), w, border);
+            buf.set_stringn(gx, gy + 3, format!("╰{}╯", "─".repeat(w - 2)), w, border);
+            for dy in 1..3 {
+                buf.set_string(gx, gy + dy, "│", border);
+                buf.set_string(gx + card_w - 1, gy + dy, "│", border);
             }
-            buf.set_stringn(gx, gy, truncate(&label, w), w, st);
+            if sel {
+                buf.set_style(
+                    Rect::new(gx + 1, gy + 1, card_w - 2, 2),
+                    Style::default().bg(SEL_BG),
+                );
+            }
+            let inner = w.saturating_sub(3);
+            let mut st = Style::default().fg(color);
+            if sel && focused {
+                st = st.add_modifier(Modifier::BOLD);
+            }
+            buf.set_stringn(gx + 2, gy + 1, truncate(&name, inner), inner, st);
+            buf.set_stringn(
+                gx + 2,
+                gy + 2,
+                truncate(&info, inner),
+                inner,
+                Style::default().fg(DIM),
+            );
         }
     }
 
@@ -1921,6 +2625,145 @@ fn mark_color(m: GitMark) -> Color {
         GitMark::Added | GitMark::Untracked => GREEN,
         GitMark::Deleted | GitMark::Conflict => RED,
         GitMark::Changed => DIM,
+    }
+}
+
+/// A grid card's second line and colour: folders blue with their item count,
+/// images magenta with their size in pixels, data green, logs amber.
+fn card_info(it: &Item, cache: &RefCell<HashMap<PathBuf, String>>) -> (String, Color) {
+    let ext = kind(it);
+    let color = if it.dir {
+        BLUE
+    } else {
+        match ext.as_str() {
+            "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "ico" => MAGENTA,
+            "csv" | "json" | "parquet" | "sqlite" | "db" | "tsv" | "xlsx" => GREEN,
+            "log" => AMBER,
+            _ if it.name.starts_with('.') => DIM,
+            _ => TEXT,
+        }
+    };
+    if let Some(s) = cache.borrow().get(&it.path) {
+        return (s.clone(), color);
+    }
+    let info = if it.dir {
+        let n = std::fs::read_dir(&it.path)
+            .map(|r| r.take(10_000).count())
+            .unwrap_or(0);
+        format!("{n} item{}", if n == 1 { "" } else { "s" })
+    } else if it.name.starts_with('.') && !it.name[1..].contains('.') {
+        "hidden".into()
+    } else if ext == "png" {
+        png_size(&it.path)
+            .map(|(w, h)| format!("{w}×{h}"))
+            .unwrap_or_else(|| crate::sysmon::human(it.size))
+    } else {
+        crate::sysmon::human(it.size)
+    };
+    cache.borrow_mut().insert(it.path.clone(), info.clone());
+    (info, color)
+}
+
+/// The size view's colours by rank: biggest red, then amber, blue, grey.
+fn rank_color(i: usize) -> Color {
+    [RED, AMBER, BLUE].get(i).copied().unwrap_or(DIM)
+}
+
+/// The same, as dark tile backgrounds for the treemap.
+fn rank_tint(i: usize) -> Color {
+    [
+        Color::Rgb(0x4a, 0x24, 0x2a),
+        Color::Rgb(0x3d, 0x30, 0x18),
+        Color::Rgb(0x1e, 0x2c, 0x45),
+    ]
+    .get(i)
+    .copied()
+    .unwrap_or(Color::Rgb(0x1e, 0x25, 0x30))
+}
+
+/// "912 MB", "1.4 MB", "38 KB" for the size view.
+fn human_space(b: u64) -> String {
+    const U: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut v = b as f64;
+    let mut u = 0;
+    while v >= 1000.0 && u < U.len() - 1 {
+        v /= 1024.0;
+        u += 1;
+    }
+    if v >= 10.0 || u == 0 {
+        format!("{v:.0} {}", U[u])
+    } else {
+        format!("{v:.1} {}", U[u])
+    }
+}
+
+/// Move a file or folder into the Trash (macOS ~/.Trash, else the
+/// freedesktop trash). A move, never a delete; fails across disks.
+fn to_trash(p: &Path) -> std::io::Result<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    let dir = if cfg!(target_os = "macos") {
+        home.join(".Trash")
+    } else {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".local/share"))
+            .join("Trash/files")
+    };
+    std::fs::create_dir_all(&dir)?;
+    let name = p
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("no name"))?;
+    let mut dest = dir.join(name);
+    let mut n = 2;
+    while dest.exists() {
+        dest = dir.join(format!("{} {n}", name.to_string_lossy()));
+        n += 1;
+    }
+    std::fs::rename(p, &dest)?;
+    Ok(dest)
+}
+
+/// Width and height from a PNG's header.
+fn png_size(p: &Path) -> Option<(u32, u32)> {
+    use std::io::Read;
+    let mut head = [0u8; 24];
+    std::fs::File::open(p).ok()?.read_exact(&mut head).ok()?;
+    if &head[..8] != b"\x89PNG\r\n\x1a\n" {
+        return None;
+    }
+    let w = u32::from_be_bytes(head[16..20].try_into().ok()?);
+    let h = u32::from_be_bytes(head[20..24].try_into().ok()?);
+    Some((w, h))
+}
+
+/// "py", "rs", "dir" — the List view's TYPE column.
+fn kind(it: &Item) -> String {
+    if it.dir {
+        return "dir".into();
+    }
+    match it.name.rsplit_once('.') {
+        Some((a, e)) if !a.is_empty() => e.to_lowercase(),
+        _ => "file".into(),
+    }
+}
+
+/// "2 min ago", "1 h ago", "yesterday", "3 days ago".
+fn ago_long(t: Option<SystemTime>) -> String {
+    let Some(d) = t.and_then(|t| t.elapsed().ok()) else {
+        return String::new();
+    };
+    let s = d.as_secs();
+    match s {
+        0..60 => "just now".into(),
+        60..3600 => format!("{} min ago", s / 60),
+        3600..86_400 => format!("{} h ago", s / 3600),
+        86_400..172_800 => "yesterday".into(),
+        172_800..1_209_600 => format!("{} days ago", s / 86_400),
+        1_209_600..5_184_000 => format!("{} weeks ago", s / 604_800),
+        5_184_000..31_536_000 => format!("{} months ago", s / 2_592_000),
+        _ => format!("{} years ago", s / 31_536_000),
     }
 }
 
@@ -2375,7 +3218,7 @@ mod tests {
         let (mut p, jobs) = FilesPane::new(d.clone());
         settle(&mut p, jobs);
         // columns: the parent folder on the left, this one on the right
-        let out = p.key(b"3");
+        let out = p.key(b"2");
         settle(&mut p, out.jobs);
         assert_eq!(p.view, View::Columns);
         let me = d.file_name().unwrap().to_string_lossy().to_string();
@@ -2390,7 +3233,10 @@ mod tests {
         assert_eq!(p.view, View::Grid);
         let s = screen(&p);
         assert!(
-            s.contains("▸ docs/") && s.contains("▸ src/") && s.contains("¶ README.md"),
+            s.contains("▸ docs/")
+                && s.contains("▸ src/")
+                && s.contains("· README.md")
+                && s.contains("2 items"),
             "{s}"
         );
         assert_eq!(
@@ -2407,14 +3253,14 @@ mod tests {
         assert_eq!(p.view, View::Grid);
         p.key(b"\x7f");
         // sizes: biggest first, as bars
-        let out = p.key(b"7");
+        let out = p.key(b"5");
         settle(&mut p, out.jobs);
         assert_eq!(p.view, View::Sizes);
         let s = screen(&p);
-        let docs = s.lines().position(|l| l.contains("docs/")).unwrap();
-        let src = s.lines().position(|l| l.contains("src/")).unwrap();
+        let docs = s.lines().position(|l| l.starts_with("docs/")).unwrap();
+        let src = s.lines().position(|l| l.starts_with("src/")).unwrap();
         assert!(docs < src, "biggest first: {s}");
-        assert!(s.contains('█') && s.contains('%'), "{s}");
+        assert!(s.contains('━') && s.contains("49 KB"), "{s}");
         // into a folder and back
         p.sel = p
             .rows
@@ -2445,7 +3291,7 @@ mod tests {
     fn list_view_navigates_and_preview_highlights() {
         let d = tmp("list");
         let (mut p, _) = FilesPane::new(d.clone());
-        p.key(b"2");
+        p.key(b"3");
         assert_eq!(p.view, View::List);
         let s = screen(&p);
         assert!(s.contains("../") && s.contains("README.md"), "{s}");
@@ -2469,6 +3315,40 @@ mod tests {
             d.join("src"),
             "keeps the folder we came from selected"
         );
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn list_columns_sort_select_and_size_delete_asks() {
+        let d = tmp("listcols");
+        std::fs::write(d.join("big.txt"), vec![b'x'; 9000]).unwrap();
+        let (mut p, jobs) = FilesPane::new(d.clone());
+        settle(&mut p, jobs);
+        p.key(b"3");
+        let s = screen(&p);
+        assert!(s.contains("NAME▾") && s.contains("MODIFIED") && s.contains("TYPE"), "{s}");
+        // s: by size, biggest first
+        p.key(b"s");
+        let s = screen(&p);
+        assert!(s.contains("SIZE▾"), "{s}");
+        let big = s.lines().position(|l| l.contains("big.txt")).unwrap();
+        let readme = s.lines().position(|l| l.contains("README.md")).unwrap();
+        assert!(big < readme, "{s}");
+        // space marks two, y copies both paths
+        p.sel = p.rows.iter().position(|r| matches!(r, Row::Entry { .. })).unwrap();
+        p.key(b" ");
+        p.key(b" ");
+        assert!(screen(&p).contains("2 selected"), "{}", screen(&p));
+        let out = p.key(b"y");
+        assert!(matches!(&out.acts[0], Act::Copy(t) if t.lines().count() == 2));
+        // size view: x asks, anything but y keeps it
+        let out = p.key(b"5");
+        settle(&mut p, out.jobs);
+        p.sel = p.rows.iter().position(|r| matches!(r, Row::Size(_))).unwrap();
+        p.key(b"x");
+        assert!(screen(&p).contains("moves it to the Trash"), "{}", screen(&p));
+        p.key(b"n");
+        assert!(d.join("big.txt").exists() && d.join("docs").exists());
         let _ = std::fs::remove_dir_all(d);
     }
 

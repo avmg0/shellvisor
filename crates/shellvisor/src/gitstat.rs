@@ -47,6 +47,8 @@ pub struct GitStatus {
     dirs: HashSet<PathBuf>,
     /// Untracked folders git reports as a whole ("?? build/").
     new_dirs: HashSet<PathBuf>,
+    /// Files with changes in the index (`git add`ed).
+    staged: HashSet<PathBuf>,
 }
 
 impl GitStatus {
@@ -59,6 +61,11 @@ impl GitStatus {
             return Some(GitMark::Untracked);
         }
         self.dirs.contains(path).then_some(GitMark::Changed)
+    }
+
+    /// Has changes staged for the next commit.
+    pub fn is_staged(&self, path: &Path) -> bool {
+        self.staged.contains(path)
     }
 
     /// Changed files under the root, sorted by path.
@@ -171,6 +178,9 @@ pub fn parse(root: &Path, prefix: &str, out: &[u8]) -> GitStatus {
         }
         if is_dir && mark == GitMark::Untracked {
             st.new_dirs.insert(abs.clone());
+        }
+        if x != ' ' && x != '?' && mark != GitMark::Conflict {
+            st.staged.insert(abs.clone());
         }
         st.marks.insert(abs, mark);
     }
