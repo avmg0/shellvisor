@@ -2762,6 +2762,12 @@ impl App {
             }
             if let Some(m) = self.ctx {
                 self.dirty = true;
+                // the mouse goes to the menu itself (hover, release, clicks)
+                if let Some(ev) = MouseEv::parse_sgr(key) {
+                    self.flush_forward(&mut forward)?;
+                    self.on_mouse(ev)?;
+                    continue;
+                }
                 match key {
                     b"\x1b[A" | b"\x1bOA" => {
                         self.ctx = Some(ContextMenu {
@@ -7233,7 +7239,38 @@ impl App {
         }
         // the right-click menu: a click on an item does it, anywhere else closes it
         if let Some(m) = self.ctx {
-            if ev.is_left_press() || (!ev.release && ev.code & 0b11 == 2) {
+            let r = self.context_rect(&m);
+            let item = |ev: &MouseEv| -> Option<usize> {
+                if !r.contains((ev.x, ev.y).into()) {
+                    return None;
+                }
+                let i = ev.y.checked_sub(r.y + 1)? as usize;
+                (i < CONTEXT_ITEMS.len()).then_some(i)
+            };
+            // moving with the button held (or hovering) highlights an item
+            if ev.is_motion() {
+                if let Some(i) = item(&ev) {
+                    self.ctx = Some(ContextMenu { sel: i, ..m });
+                    self.dirty = true;
+                }
+                return Ok(());
+            }
+            // press, drag onto an item, let go: like a native menu. Letting
+            // go where it opened keeps it open for a click.
+            if ev.release {
+                if (ev.x, ev.y) != (m.x, m.y) {
+                    if let Some(i) = item(&ev) {
+                        self.ctx = None;
+                        self.dirty = true;
+                        self.context_act_menu(&m, i)?;
+                    }
+                }
+                return Ok(());
+            }
+            if ev.wheel().is_some() {
+                return Ok(());
+            }
+            if ev.is_left_press() || ev.code & 0b11 == 2 {
                 self.ctx = None;
                 self.dirty = true;
                 let r = self.context_rect(&m);

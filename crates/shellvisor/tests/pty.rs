@@ -1861,8 +1861,24 @@ fn mouse_selects_copies_and_right_click_menu() {
             && t.contains("Open link")
             && t.contains("Split stacked")
     });
+    // letting go of the button where it opened, or moving, keeps it open
+    s.send(&format!("\x1b[<2;{lx};{ly}m"));
+    s.send(&format!("\x1b[<34;{};{}M", lx + 1, ly + 1));
+    s.pump(Duration::from_millis(300));
+    assert!(
+        s.text().contains("Split stacked"),
+        "menu stays open:\n{}",
+        s.text()
+    );
     s.send("\x1b");
     s.wait_until("menu closed", |t| !t.contains("Split stacked"));
+    // press, drag onto "Split side by side", let go: it runs
+    s.send(&format!("\x1b[<2;{lx};{ly}M"));
+    s.wait_for("Split stacked");
+    let (ix, iy) = find(&s, "Split side by side");
+    s.send(&format!("\x1b[<34;{ix};{iy}M"));
+    s.send(&format!("\x1b[<2;{ix};{iy}m"));
+    s.wait_until("split", |t| top(t).contains("⊞2"));
     // typing still goes to the shell
     s.run("echo still-typing");
     s.wait_for("still-typing");
