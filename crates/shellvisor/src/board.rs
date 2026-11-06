@@ -382,6 +382,18 @@ pub struct Board {
     pub plan: Plan,
     /// "stop api and its sub-agents? y/n"
     confirm: Option<(String, BoardAct)>,
+    /// Tree: branches folded with ←.
+    pub folded: std::collections::HashSet<String>,
+    /// Tree: a line being typed — a message to the agent, or the task of a
+    /// new sub-agent under it.
+    pub input: Option<(Input, String)>,
+}
+
+/// What the tree's input line is for.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Input {
+    Message(String),
+    Spawn(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -398,6 +410,12 @@ pub enum BoardAct {
     Plan,
     Dispatch,
     NextStage,
+    /// Board 15: type this to the agent.
+    Send(String, String),
+    /// Board 15: a new sub-agent under this one, with this task (or command).
+    Spawn(String, String),
+    /// Board 15: make a sub-agent a top-level agent with its own branch of the tree.
+    Promote(String),
 }
 
 /// What the board shows about one agent.
@@ -453,17 +471,29 @@ impl Board {
             scroll: 0,
             plan,
             confirm: None,
+            folded: Default::default(),
+            input: None,
         }
     }
 
     /// Typing text (goal or a title): letters go there, not to commands.
     pub fn typing(&self) -> bool {
-        self.view == View::Plan && (self.plan.phase == Phase::Goal || self.plan.edit.is_some())
+        self.input.is_some()
+            || self.view == View::Plan
+                && (self.plan.phase == Phase::Goal || self.plan.edit.is_some())
     }
 
     /// Rows of the tree view: (node index or None for a helper, label indent, helper name).
-    fn tree_rows(snap: &Snap) -> Vec<(usize, String)> {
-        fn walk(s: &Snap, parent: Option<&str>, indent: &str, out: &mut Vec<(usize, String)>) {
+    fn tree_rows(&self, snap: &Snap) -> Vec<(usize, String)> {
+        let folded = &self.folded;
+        fn walk(
+            s: &Snap,
+            folded: &std::collections::HashSet<String>,
+            parent: Option<&str>,
+            indent: &str,
+            out: &mut Vec<(usize, String)>,
+            seen: &mut Vec<usize>,
+        ) {
             let kids: Vec<usize> = (0..s.nodes.len())
                 .filter(|i| s.nodes[*i].parent.as_deref() == parent)
                 .collect();
@@ -477,22 +507,46 @@ impl Board {
                     ),
                 };
                 out.push((*i, branch));
-                walk(s, Some(&s.nodes[*i].name), &next, out);
+                seen.push(*i);
+                if folded.contains(&s.nodes[*i].name) {
+                    // folded: its sub-agents are counted, not listed
+                    let mut hidden = Vec::new();
+                    walk(
+                        s,
+                        &Default::default(),
+                        Some(&s.nodes[*i].name),
+                        "",
+                        &mut hidden,
+                        seen,
+                    );
+                } else {
+                    walk(s, folded, Some(&s.nodes[*i].name), &next, out, seen);
+                }
             }
         }
         let mut out = Vec::new();
-        walk(snap, None, "", &mut out);
+        let mut seen = Vec::new();
+        walk(snap, folded, None, "", &mut out, &mut seen);
         // agents whose parent is gone
         for i in 0..snap.nodes.len() {
-            if !out.iter().any(|(j, _)| *j == i) {
+            if !seen.contains(&i) {
                 out.push((i, String::new()));
             }
         }
         out
     }
 
+    /// How many agents are below this one (all levels).
+    fn below(snap: &Snap, name: &str) -> usize {
+        snap.nodes
+            .iter()
+            .filter(|n| n.parent.as_deref() == Some(name))
+            .map(|n| 1 + Self::below(snap, &n.name))
+            .sum()
+    }
+
     fn selected_name(&self, snap: &Snap) -> Option<String> {
-        let rows = Self::tree_rows(snap);
+        let rows = self.tree_rows(snap);
         rows.get(self.sel.min(rows.len().saturating_sub(1)))
             .map(|(i, _)| snap.nodes[*i].name.clone())
     }
@@ -504,6 +558,39 @@ impl Board {
                 b"y" | b"Y" | b"\r" => (true, Some(act)),
                 _ => (true, None),
             };
+        }
+        if let Some((what, mut text)) = self.input.take() {
+            match key {
+                b"\r" => {
+                    let t = text.trim().to_string();
+                    if t.is_empty() {
+                        return (true, None);
+                    }
+                    return (
+                        true,
+                        Some(match what {
+                            Input::Message(n) => BoardAct::Send(n, t),
+                            Input::Spawn(n) => BoardAct::Spawn(n, t),
+                        }),
+                    );
+                }
+                b"\x1b" | [0x03] => return (true, None),
+                [0x7f] | [0x08] => {
+                    text.pop();
+                }
+                [0x15] => text.clear(),
+                k if !k.is_empty()
+                    && k[0] >= 0x20
+                    && k[0] != 0x7f
+                    && k[0] != 0x1b
+                    && text.chars().count() < 2000 =>
+                {
+                    text.push_str(&String::from_utf8_lossy(k));
+                }
+                _ => {}
+            }
+            self.input = Some((what, text));
+            return (true, None);
         }
         let up = matches!(key, b"\x1b[A" | b"\x1bOA");
         let down = matches!(key, b"\x1b[B" | b"\x1bOB");
@@ -518,7 +605,7 @@ impl Board {
         }
         let n = match self.view {
             View::Log => snap.log.len(),
-            _ => Self::tree_rows(snap).len(),
+            _ => self.tree_rows(snap).len(),
         };
         match key {
             b"\x1b" | b"q" | [0x03] => return (true, Some(BoardAct::Close)),
@@ -558,6 +645,64 @@ impl Board {
                             name,
                         )),
                     );
+                }
+            }
+            // board 15: ← folds a branch (or goes to the parent), → opens it
+            b"\x1b[D" | b"\x1bOD" | b"h" if self.view == View::Tree => {
+                let Some(name) = self.selected_name(snap) else {
+                    return (false, None);
+                };
+                if Self::below(snap, &name) > 0 && !self.folded.contains(&name) {
+                    self.folded.insert(name);
+                } else if let Some(p) = snap
+                    .nodes
+                    .iter()
+                    .find(|n| n.name == name)
+                    .and_then(|n| n.parent.clone())
+                {
+                    if let Some(i) = self
+                        .tree_rows(snap)
+                        .iter()
+                        .position(|(i, _)| snap.nodes[*i].name == p)
+                    {
+                        self.sel = i;
+                    }
+                }
+            }
+            b"\x1b[C" | b"\x1bOC" | b"l" if self.view == View::Tree => {
+                let Some(name) = self.selected_name(snap) else {
+                    return (false, None);
+                };
+                if !self.folded.remove(&name) {
+                    return (false, None);
+                }
+            }
+            b"c" if self.view == View::Tree => {
+                let Some(name) = self.selected_name(snap) else {
+                    return (false, None);
+                };
+                let sub = snap
+                    .nodes
+                    .iter()
+                    .any(|n| n.name == name && n.parent.is_some());
+                if !sub {
+                    return (false, None);
+                }
+                self.confirm = Some((
+                    format!(
+                        "promote {name} out of its parent's branch, to a column of its own? y/n"
+                    ),
+                    BoardAct::Promote(name),
+                ));
+            }
+            b"+" | b"s" if self.view == View::Tree => {
+                if let Some(name) = self.selected_name(snap) {
+                    self.input = Some((Input::Spawn(name), String::new()));
+                }
+            }
+            b"i" | b"/" if self.view == View::Tree => {
+                if let Some(name) = self.selected_name(snap) {
+                    self.input = Some((Input::Message(name), String::new()));
                 }
             }
             b"d" if self.view == View::Tree => {
@@ -786,6 +931,21 @@ impl Board {
         }
         // footer
         let y = area.bottom() - 1;
+        if let Some((what, t)) = &self.input {
+            let label = match what {
+                Input::Message(n) => format!(" message {n}: "),
+                Input::Spawn(n) => format!(" new sub-agent of {n}: "),
+            };
+            put(
+                buf,
+                area.x,
+                y,
+                w,
+                &format!("{label}{t}▏   ⏎ send · esc cancel"),
+                Style::default().fg(AMBER),
+            );
+            return;
+        }
         let hint = if let Some((q, _)) = &self.confirm {
             put(
                 buf,
@@ -812,7 +972,7 @@ impl Board {
                     Phase::Dispatched(_) => "tab tree / timeline / log · g new goal · esc close",
                 },
                 View::Tree => {
-                    "↑↓ agent · ⏎ go to it · p pause/resume branch · k stop branch · d review · m merge its branch · tab view · esc close"
+                    "↑↓ agent · ←/→ fold branch · i message · + spawn child · c promote to column · p pause · k stop branch · d review · m merge · ⏎ open · tab view"
                 }
                 View::Timeline => {
                     "↑↓ agent · ⏎ go to it · ━ working · ─ waiting · ⚑ approval · ┄ paused · tab view · esc close"
@@ -1187,7 +1347,7 @@ impl Board {
     }
 
     fn draw_tree(&self, r: Rect, buf: &mut Buffer, snap: &Snap) {
-        let rows = Self::tree_rows(snap);
+        let rows = self.tree_rows(snap);
         if rows.is_empty() {
             put(
                 buf,
@@ -1231,7 +1391,12 @@ impl Board {
             let left = format!(" {branch}{icon} ");
             put(buf, r.x, y, lw, &left, bg.fg(Color::Indexed(n.color)));
             let lx = r.x + left.chars().count() as u16;
-            let name = format!("{:<12} {:<8}", n.name, short_agent(&n.cli));
+            let fold = if self.folded.contains(&n.name) {
+                format!(" ▸ +{}", Self::below(snap, &n.name))
+            } else {
+                String::new()
+            };
+            let name = format!("{:<12} {:<8}{fold}", n.name, short_agent(&n.cli));
             put(
                 buf,
                 lx,
@@ -1384,31 +1549,70 @@ impl Board {
             Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
         );
         y += 1;
-        let mut facts = vec![n.status.clone()];
+        // board 15: state · time · tokens on the right of the path
+        let mut facts = vec![n.status.clone(), fmt_age(n.age)];
         if let Some(t) = n.tokens {
             facts.push(fmt_tokens(t));
         }
-        facts.push(format!("{}m", (n.age / 60.0) as u64));
-        put(
-            buf,
-            sx + 1,
-            y,
-            side - 2,
-            &facts.join(" · "),
-            Style::default().fg(DIM),
-        );
-        y += 1;
-        if let Some(b) = &n.branch {
+        let f = facts.join(" · ");
+        let fw = f.chars().count() as u16;
+        if path.join(" › ").chars().count() as u16 + fw + 4 < side {
             put(
                 buf,
-                sx + 1,
-                y,
-                side - 2,
-                &format!("branch {b}"),
-                Style::default().fg(DIM),
+                sx + side - fw - 1,
+                y - 1,
+                fw,
+                &f,
+                Style::default().fg(status_color(&n.status)),
             );
+        } else {
+            put(buf, sx + 1, y, side - 2, &f, Style::default().fg(DIM));
             y += 1;
         }
+        // spawned by · via · worktree, as three columns
+        let col = (side.saturating_sub(2)) / 3;
+        let cells = [
+            (
+                "spawned by",
+                n.parent.clone().unwrap_or_else(|| "you".into()),
+            ),
+            (
+                "via",
+                if n.parent.is_some() {
+                    "sv agent spawn".to_string()
+                } else if n.orchestrator {
+                    "team.yaml".to_string()
+                } else {
+                    "sv agent new".to_string()
+                },
+            ),
+            (
+                "worktree",
+                match (&n.branch, &n.parent) {
+                    (Some(b), _) => b.clone(),
+                    (None, Some(p)) => format!("{p}'s (shared)"),
+                    (None, None) => "the folder (shared)".into(),
+                },
+            ),
+        ];
+        for (k, (label, value)) in cells.iter().enumerate() {
+            let cx = sx + 1 + k as u16 * col;
+            put(
+                buf,
+                cx,
+                y,
+                col.saturating_sub(1),
+                label,
+                Style::default().fg(DIM),
+            );
+            let vst = if k == 0 && n.parent.is_some() {
+                Style::default().fg(CYAN)
+            } else {
+                Style::default().fg(TEXT)
+            };
+            put(buf, cx, y + 1, col.saturating_sub(1), value, vst);
+        }
+        y += 2;
         if n.files > 0 {
             put(
                 buf,
@@ -1420,39 +1624,87 @@ impl Board {
             );
             y += 1;
         }
-        if let Some(p) = &n.parent {
-            put(
-                buf,
-                sx + 1,
-                y,
-                side - 2,
-                &format!("spawned by {p} via sv agent spawn"),
-                Style::default().fg(DIM),
-            );
-            y += 1;
-        }
         y += 1;
         if !n.task.is_empty() {
-            put(buf, sx + 1, y, side - 2, "task", Style::default().fg(DIM));
+            let from = match &n.parent {
+                Some(p) => format!("instruction from {p}"),
+                None => "task".to_string(),
+            };
+            put(buf, sx + 1, y, side - 2, &from, Style::default().fg(DIM));
             y += 1;
-            for line in wrap(&n.task, side.saturating_sub(3) as usize)
+            let lines: Vec<String> = wrap(&n.task, side.saturating_sub(5) as usize)
                 .into_iter()
-                .take(5)
-            {
-                put(buf, sx + 1, y, side - 2, &line, Style::default().fg(TEXT));
+                .take(4)
+                .collect();
+            fill(
+                buf,
+                Rect::new(sx + 1, y, side - 2, lines.len() as u16),
+                Style::default().bg(Color::Indexed(235)),
+            );
+            for line in lines {
+                put(
+                    buf,
+                    sx + 2,
+                    y,
+                    side - 4,
+                    &line,
+                    Style::default().fg(TEXT).bg(Color::Indexed(235)),
+                );
                 y += 1;
             }
             y += 1;
         }
-        let room = r.bottom().saturating_sub(y) as usize;
+        let room = r.bottom().saturating_sub(y + 2) as usize;
         for line in n.tail.iter().skip(n.tail.len().saturating_sub(room)) {
             put(buf, sx + 1, y, side - 2, line, Style::default().fg(DIM));
             y += 1;
         }
+        // board 15: "message ws-push [ … ]" at the bottom of the details
+        let my = r.bottom().saturating_sub(1);
+        let (label, text, live) = match &self.input {
+            Some((Input::Message(who), t)) if *who == n.name => {
+                (format!("message {who}"), t.clone(), true)
+            }
+            Some((Input::Spawn(who), t)) if *who == n.name => {
+                (format!("new sub-agent of {who}"), t.clone(), true)
+            }
+            _ => (
+                format!("message {}", n.name),
+                "i to type · + starts a sub-agent under it".to_string(),
+                false,
+            ),
+        };
+        put(buf, sx + 1, my, side - 2, &label, Style::default().fg(DIM));
+        let bx = sx + 2 + label.chars().count() as u16;
+        let bw = (sx + side).saturating_sub(bx + 1);
+        fill(
+            buf,
+            Rect::new(bx, my, bw, 1),
+            Style::default().bg(Color::Indexed(235)),
+        );
+        let shown: String = {
+            let c = text.chars().count();
+            let room = bw.saturating_sub(3) as usize;
+            if c > room {
+                text.chars().skip(c - room).collect()
+            } else {
+                text
+            }
+        };
+        put(
+            buf,
+            bx + 1,
+            my,
+            bw.saturating_sub(1),
+            &format!("{shown}{}", if live { "▏" } else { "" }),
+            Style::default()
+                .bg(Color::Indexed(235))
+                .fg(if live { TEXT } else { FAINT }),
+        );
     }
 
     fn draw_timeline(&self, r: Rect, buf: &mut Buffer, snap: &Snap) {
-        let rows = Self::tree_rows(snap);
+        let rows = self.tree_rows(snap);
         if rows.is_empty() {
             put(
                 buf,
@@ -1602,6 +1854,16 @@ impl Board {
                 Style::default().fg(col),
             );
         }
+    }
+}
+
+/// "45s", "1m40s", "2h05m".
+fn fmt_age(secs: f64) -> String {
+    let s = secs.max(0.0) as u64;
+    match s {
+        0..60 => format!("{s}s"),
+        60..3600 => format!("{}m{:02}s", s / 60, s % 60),
+        _ => format!("{}h{:02}m", s / 3600, (s % 3600) / 60),
     }
 }
 
@@ -1777,5 +2039,95 @@ mod tests {
         assert!(!b.plan.tasks.iter().any(|t| t.id == "ui"));
         assert_eq!(b.key(b"s", &snap).1, Some(BoardAct::Dispatch));
         assert!(b.plan.step);
+    }
+
+    #[test]
+    fn tree_folds_promotes_spawns_and_messages() {
+        let node = |name: &str, parent: Option<&str>, depth: u8| Node {
+            name: name.into(),
+            parent: parent.map(String::from),
+            depth,
+            cli: "claude".into(),
+            status: "working".into(),
+            ..Default::default()
+        };
+        let snap = Snap {
+            nodes: vec![
+                node("lead", None, 1),
+                node("api", Some("lead"), 2),
+                node("ws", Some("api"), 3),
+                node("ui", Some("lead"), 2),
+            ],
+            max_depth: 3,
+            max_agents: 10,
+            max_children: 3,
+            ..Default::default()
+        };
+        let plan = Plan {
+            goal: String::new(),
+            phase: Phase::Goal,
+            tasks: Vec::new(),
+            sel: 0,
+            edit: None,
+            parallel: 3,
+            budget: None,
+            clis: vec![],
+            planner: String::new(),
+            reviewer: String::new(),
+            folder: PathBuf::from("/tmp"),
+            step: false,
+            run: 0,
+        };
+        let mut b = Board::new(View::Tree, plan);
+        let names = |b: &Board| -> Vec<String> {
+            b.tree_rows(&snap)
+                .iter()
+                .map(|(i, _)| snap.nodes[*i].name.clone())
+                .collect()
+        };
+        assert_eq!(names(&b), ["lead", "api", "ws", "ui"]);
+        // ← on api folds its branch; → opens it again
+        b.key(b"\x1b[B", &snap);
+        b.key(b"\x1b[D", &snap);
+        assert_eq!(names(&b), ["lead", "api", "ui"]);
+        let area = Rect::new(0, 0, 140, 30);
+        let mut buf = Buffer::empty(area);
+        b.render(area, &mut buf, &snap);
+        let text: String = (0..30)
+            .map(|y| {
+                (0..140)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    + "\n"
+            })
+            .collect();
+        assert!(
+            text.contains("▸ +1") && text.contains("message api"),
+            "{text}"
+        );
+        b.key(b"\x1b[C", &snap);
+        assert_eq!(names(&b), ["lead", "api", "ws", "ui"]);
+        // c asks, y promotes
+        b.key(b"c", &snap);
+        assert_eq!(b.key(b"y", &snap).1, Some(BoardAct::Promote("api".into())));
+        // i types a message; + a sub-agent's task
+        b.key(b"i", &snap);
+        assert!(b.typing());
+        for k in ["h", "i"] {
+            b.key(k.as_bytes(), &snap);
+        }
+        assert_eq!(
+            b.key(b"\r", &snap).1,
+            Some(BoardAct::Send("api".into(), "hi".into()))
+        );
+        b.key(b"+", &snap);
+        b.key(b"x", &snap);
+        assert_eq!(
+            b.key(b"\r", &snap).1,
+            Some(BoardAct::Spawn("api".into(), "x".into()))
+        );
+        // the top agent can't be promoted
+        b.key(b"\x1b[A", &snap);
+        assert_eq!(b.key(b"c", &snap), (false, None));
     }
 }

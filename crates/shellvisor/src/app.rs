@@ -5266,6 +5266,28 @@ impl App {
                 self.close_board();
                 self.open_review(&name);
             }
+            Some(BoardAct::Send(name, text)) => match self.send_to_agent(&name, &text, "you") {
+                Ok(()) => self.notice(format!("sent to {name}")),
+                Err(e) => self.notice(e),
+            },
+            Some(BoardAct::Spawn(parent, text)) => {
+                // a Custom agent's child needs a command; the others take a task
+                let generic = self
+                    .agent_by_name(&parent)
+                    .is_some_and(|a| a.cli == Cli::Generic);
+                let req = if generic {
+                    serde_json::json!({ "op": "spawn", "cmd": text })
+                } else {
+                    serde_json::json!({ "op": "spawn", "task": text })
+                };
+                let v = self.bus_spawn(&req, Some(parent.clone()));
+                match (v["error"].as_str(), v["name"].as_str()) {
+                    (Some(e), _) => self.notice(e.to_string()),
+                    (None, Some(n)) => self.notice(format!("{n} started under {parent}")),
+                    _ => {}
+                }
+            }
+            Some(BoardAct::Promote(name)) => self.promote_agent(&name),
             Some(BoardAct::Plan) => self.start_planner(),
             Some(BoardAct::Dispatch) => self.dispatch_plan(),
             Some(BoardAct::NextStage) => {
@@ -6691,6 +6713,48 @@ impl App {
         Ok(name)
     }
 
+    /// Board 15 "promote to column": a sub-agent leaves its parent's branch
+    /// and becomes a top-level agent (its own sub-agents move up with it).
+    fn promote_agent(&mut self, name: &str) {
+        let Some(id) = self.agent_pane(name) else {
+            self.notice(format!("no agent called {name}"));
+            return;
+        };
+        let (old_parent, old_depth) = match self.panes.get(&id).and_then(|p| p.agent.as_ref()) {
+            Some(a) => (a.parent.clone(), a.depth),
+            None => return,
+        };
+        let Some(old_parent) = old_parent else {
+            self.notice(format!("{name} is already a top-level agent"));
+            return;
+        };
+        let lift = old_depth.saturating_sub(1);
+        let all: Vec<(String, Option<String>)> = self
+            .panes
+            .values()
+            .filter_map(|p| p.agent.as_ref())
+            .map(|a| (a.name.clone(), a.parent.clone()))
+            .collect();
+        let below = agents::descendants(&all, name);
+        for p in self.panes.values_mut() {
+            if let Some(a) = p.agent.as_mut() {
+                if a.name == name {
+                    a.parent = None;
+                    a.depth = 1;
+                } else if below.contains(&a.name) {
+                    a.depth = a.depth.saturating_sub(lift).max(2);
+                }
+            }
+        }
+        // every agent already has a column; leave the board showing it
+        if let Some(t) = self.tab_of(id) {
+            self.tabs[t].focus = id;
+        }
+        self.bus_event(format!("{name} promoted out of {old_parent}'s branch"));
+        self.notice(format!("{name} is a top-level agent now"));
+        self.dirty = true;
+    }
+
     /// Add a pane to the agents tab (creating it), as one more column.
     fn place_in_agents_tab(&mut self, id: PaneId) {
         let t = match self
@@ -7840,6 +7904,11 @@ impl App {
     }
 
     fn editor_key(&mut self, key: &[u8]) -> io::Result<()> {
+        // the mouse: pick a preset, select a pane, drag a border, carry a
+        // palette item onto a drop zone (board 4)
+        if let Some(ev) = MouseEv::parse_sgr(key) {
+            return self.on_mouse(ev);
+        }
         self.dirty = true;
         let Some(ed) = self.editor.as_mut() else {
             return Ok(());

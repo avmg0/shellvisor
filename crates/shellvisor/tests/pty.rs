@@ -1373,7 +1373,7 @@ fn agents_spawn_sub_agents_within_limits_wait_and_stop_as_a_tree() {
     let helper = s.dir.join("helper.sh");
     std::fs::write(
         &helper,
-        "#!/bin/bash\necho \"helper working on: $*\"\nsleep 0.5\necho 'helper finished'\nread -p '> ' msg\necho \"helper got: $msg\"\nread -p '> ' msg\necho \"helper again: $msg\"\nread -p '> ' msg\n",
+        "#!/bin/bash\necho \"helper working on: $*\"\nsleep 0.5\necho 'helper finished'\nread -p '> ' msg\necho \"helper got: $msg\"\nread -p '> ' msg\necho \"helper again: $msg\"\nread -p '> ' msg\necho \"helper last: $msg\"\nsleep 60\n",
     )
     .unwrap();
     let lead = s.dir.join("lead.sh");
@@ -1430,11 +1430,30 @@ fn agents_spawn_sub_agents_within_limits_wait_and_stop_as_a_tree() {
     s.wait_for("resumed helper");
     s.send("\x1b2");
     s.wait_for("helper again: still-there");
+    // board 15: the tree messages the selected agent and promotes it
+    s.send("\x1bg"); // alt+g: the agent board, tree view
+    s.wait_for("i message");
+    s.send("\x1b[B");
+    s.send("i");
+    s.wait_for("message helper:");
+    s.send("from the tree\r");
+    s.wait_for("sent to helper");
+    s.send("c");
+    s.wait_for("promote helper");
+    s.send("y");
+    s.wait_for("helper is a top-level agent now");
+    s.send("\x1b");
+    s.wait_for("helper last: from the tree");
     s.send("\x1b1");
     s.pump(Duration::from_millis(300));
-    s.send("clear; sv agent pause helper; sv agent stop lead --tree\r");
+    s.send("clear; sv agent tree\r");
+    s.wait_until("helper on its own", |t| {
+        t.contains("helper  command") && !t.contains("└─ helper")
+    });
+    s.send("clear; sv agent pause helper; sv agent stop lead --tree; sv agent stop helper\r");
     s.wait_for("paused helper");
-    s.wait_for("stopped lead, helper");
+    s.wait_for("stopped lead");
+    s.wait_for("stopped helper");
     s.send("clear; sv agent wait nobody; echo \"wait exit $?\"\r");
     s.wait_for("no agent called nobody");
     s.wait_for("wait exit 1");
@@ -1600,6 +1619,37 @@ fn auto_plan_dispatches_stages_then_review_and_merges_from_the_tree() {
     s.pump(Duration::from_millis(300));
     s.send("clear; sv agent log | grep -c 'tests.done'\r");
     s.wait_for("1");
+}
+
+#[test]
+fn layout_editor_takes_a_palette_item_dragged_onto_a_pane() {
+    let mut s = Session::start_with("bash", "layoutdrag", "start_view: full\nrestore: never\n");
+    s.wait_for("PROMPT>");
+    s.send("\x1be"); // alt+e
+    s.wait_until("editor screen", |t| {
+        t.contains("EDITING") && t.contains("Thermals")
+    });
+    // where things are on the screen (1-based for the mouse)
+    let at = |t: &str, what: &str| -> (usize, usize) {
+        let (row, line) = t
+            .lines()
+            .enumerate()
+            .find(|(_, l)| l.contains(what))
+            .unwrap();
+        let col = line[..line.find(what).unwrap()].chars().count();
+        (col + 2, row + 1)
+    };
+    let screen = s.text();
+    let (px, py) = at(&screen, "Thermals");
+    let (ex, ey) = at(&screen, "EDITING");
+    let (mx, my) = (ex + 30, ey + 5); // low in the map: the bottom drop zone
+    s.send(&format!("\x1b[<0;{px};{py}M"));
+    s.send(&format!("\x1b[<32;{mx};{my}M"));
+    s.wait_for("drop “Thermals” here");
+    s.send(&format!("\x1b[<0;{mx};{my}m"));
+    s.wait_for("Thermals added");
+    s.send("\r");
+    s.wait_for("THERMAL");
 }
 
 #[test]

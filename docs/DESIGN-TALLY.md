@@ -5,7 +5,7 @@ Checked 2026-11-07 against `main` after the board-matching pass on top of
 New agent form, Option-as-Alt dialog, basic-view hint). One row per thing a
 board shows. ✅ built · ◐ built differently or in part · ✗ not built.
 
-Totals: **21 boards · 140 items · 126 ✅ built · 7 ◐ partly or differently · 7 ✗ not built**.
+Totals: **21 boards · 140 items · 129 ✅ built · 7 ◐ partly or differently · 4 ✗ not built**.
 
 ## 1 · Default workspace (`sv layout dev`)
 
@@ -47,7 +47,7 @@ Totals: **21 boards · 140 items · 126 ✅ built · 7 ◐ partly or differently
 | `F7` / `alt+l` cycles arrangements | ✅ | |
 | Editor: palette, map, split, remove, resize, undo, esc cancels | ✅ | v1.0.1 |
 | Save as name / default / for this folder, YAML preview | ✅ | v1.0.1; saved in `layouts/`, not config.yaml |
-| Drag a pane from the palette onto a drop zone | ✗ | pick in the palette, then split |
+| Drag a pane from the palette onto a drop zone | ✅ | a dashed cyan zone says where it lands (split left / right / above / below, or replace) |
 | Preview / Agents / Activity as pane kinds | ✗ | not panes in Shellvisor |
 
 ## 4b · Keymap & Mac setup
@@ -190,8 +190,8 @@ Totals: **21 boards · 140 items · 126 ✅ built · 7 ◐ partly or differently
 | Timeline view | ✅ | |
 | Limits shown, refused spawns explained | ✅ | |
 | `p` pause / `k` stop a branch | ✅ | |
-| Fold branches, `c` promote to column, `+` spawn child | ✗ | |
-| Message box to the selected agent | ✗ | `sv agent send` |
+| Fold branches, `c` promote to column, `+` spawn child | ✅ | ← / → fold and open, `c` asks then promotes, `+` types the child's task |
+| Message box to the selected agent | ✅ | `i` types into it; spawned by · via · worktree and the instruction above it |
 
 ## 16 · Agent scripts & connections
 
@@ -264,10 +264,8 @@ install script / signed releases, `sv agent emit|usage|budget`.
 
 ## Suggested next (biggest gaps first)
 
-1. Agent tree (board 15): fold a branch, `c` promote a sub-agent to a column, `+` spawn a child of the selected one, a message box for the selected agent.
-2. Layout editor (board 4): drag a pane kind from the palette onto a drop zone.
-3. Agents tab: sync scroll across columns; Recent `u` to undo an agent's edit to one file.
-4. File views: indent guides in Tree, type-to-jump in Columns, `+/−` density in Grid.
+1. Agents tab: sync scroll across columns; Recent `u` to undo an agent's edit to one file.
+2. File views: indent guides in Tree, type-to-jump in Columns, `+/−` density in Grid.
 
 ## What a terminal can't do (noted, not faked)
 

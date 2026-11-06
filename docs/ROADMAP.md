@@ -213,7 +213,10 @@ Deliverables
 - Agents, boards 5 and 8 (done): facts inside each column, orchestrator column, message bus, tell / pause / resume all; the New agent form with CLI cards, folder, shell, approvals, stop-after and Attach as column.
 - Option-as-Alt dialog with Test again (board 4b) and the fading basic-view hint (board 14) (done).
 
-Next: the agent tree's fold / promote / spawn / message box (board 15), layout editor drop zones (board 4), sync scroll, undo an agent's edit from Recent.
+- Agent tree, board 15 (done): ← / → fold and open a branch, `c` promotes a sub-agent to its own column, `+` spawns a child of the selected agent, `i` messages it; the details show spawned by · via · worktree, the instruction and its output.
+- Layout editor drop zones, board 4 (done): drag a palette item onto a pane; a dashed zone shows where it lands. The editor's mouse (presets, panes, borders) now works from the terminal, not only in tests.
+
+Next: sync scroll, undo an agent's edit from Recent.
 
 ---
 

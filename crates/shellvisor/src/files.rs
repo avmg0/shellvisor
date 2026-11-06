@@ -3326,7 +3326,10 @@ mod tests {
         settle(&mut p, jobs);
         p.key(b"3");
         let s = screen(&p);
-        assert!(s.contains("NAME▾") && s.contains("MODIFIED") && s.contains("TYPE"), "{s}");
+        assert!(
+            s.contains("NAME▾") && s.contains("MODIFIED") && s.contains("TYPE"),
+            "{s}"
+        );
         // s: by size, biggest first
         p.key(b"s");
         let s = screen(&p);
@@ -3335,7 +3338,11 @@ mod tests {
         let readme = s.lines().position(|l| l.contains("README.md")).unwrap();
         assert!(big < readme, "{s}");
         // space marks two, y copies both paths
-        p.sel = p.rows.iter().position(|r| matches!(r, Row::Entry { .. })).unwrap();
+        p.sel = p
+            .rows
+            .iter()
+            .position(|r| matches!(r, Row::Entry { .. }))
+            .unwrap();
         p.key(b" ");
         p.key(b" ");
         assert!(screen(&p).contains("2 selected"), "{}", screen(&p));
@@ -3344,9 +3351,17 @@ mod tests {
         // size view: x asks, anything but y keeps it
         let out = p.key(b"5");
         settle(&mut p, out.jobs);
-        p.sel = p.rows.iter().position(|r| matches!(r, Row::Size(_))).unwrap();
+        p.sel = p
+            .rows
+            .iter()
+            .position(|r| matches!(r, Row::Size(_)))
+            .unwrap();
         p.key(b"x");
-        assert!(screen(&p).contains("moves it to the Trash"), "{}", screen(&p));
+        assert!(
+            screen(&p).contains("moves it to the Trash"),
+            "{}",
+            screen(&p)
+        );
         p.key(b"n");
         assert!(d.join("big.txt").exists() && d.join("docs").exists());
         let _ = std::fs::remove_dir_all(d);

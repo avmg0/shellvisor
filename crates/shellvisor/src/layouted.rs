@@ -121,11 +121,35 @@ pub struct Editor {
     undo: Vec<(Node, Vec<Slot>, u32)>,
     /// Dragging a divider in the map: its path.
     drag: Option<Vec<bool>>,
+    /// Board 4: a palette kind being dragged, and where it would land.
+    carry: Option<(usize, Option<(u32, Zone)>)>,
     /// Where the map was drawn (for the mouse).
     map_area: std::cell::Cell<Rect>,
     /// Palette rows and preset thumbnails as drawn (for clicks).
     hits: std::cell::RefCell<Vec<(Rect, Hit)>>,
     pub message: Option<String>,
+}
+
+/// Where a dragged pane lands on another one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Zone {
+    /// A split to its right.
+    Right,
+    /// A split below it.
+    Below,
+    /// Takes its place (changes its kind).
+    Replace,
+}
+
+impl Zone {
+    /// The part of a pane's box the zone covers.
+    fn area(self, r: Rect) -> Rect {
+        match self {
+            Zone::Right => Rect::new(r.x + r.width / 2, r.y, r.width - r.width / 2, r.height),
+            Zone::Below => Rect::new(r.x, r.y + r.height / 2, r.width, r.height - r.height / 2),
+            Zone::Replace => r,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -221,6 +245,7 @@ impl Editor {
             presets,
             undo: Vec::new(),
             drag: None,
+            carry: None,
             map_area: std::cell::Cell::new(Rect::default()),
             hits: std::cell::RefCell::new(Vec::new()),
             message: prefs
@@ -474,6 +499,19 @@ impl Editor {
     /// Mouse in the map: click selects a pane, drag moves a divider.
     pub fn mouse(&mut self, x: u16, y: u16, press: bool, motion: bool, release: bool) -> bool {
         let area = self.map_area.get();
+        // board 4: a palette item carried onto a pane's drop zone
+        if let Some((k, _)) = self.carry {
+            let target = self.zone_at(x, y);
+            if release {
+                self.carry = None;
+                if let Some((id, zone)) = target {
+                    self.drop_kind(k, id, zone);
+                }
+            } else {
+                self.carry = Some((k, target));
+            }
+            return true;
+        }
         if let Some(path) = self.drag.clone() {
             if release {
                 self.drag = None;
@@ -495,6 +533,8 @@ impl Editor {
         match hit {
             Some(Hit::Kind(i)) => {
                 self.kind = i;
+                // holding the button down carries it to the map
+                self.carry = Some((i, None));
                 return true;
             }
             Some(Hit::Preset(i)) => {
@@ -518,6 +558,59 @@ impl Editor {
             return true;
         }
         false
+    }
+
+    /// The pane under (x, y) on the map and which of its zones: its bottom
+    /// third splits below, its right third splits right, the rest replaces it.
+    fn zone_at(&self, x: u16, y: u16) -> Option<(u32, Zone)> {
+        let area = self.map_area.get();
+        if !area.contains((x, y).into()) {
+            return None;
+        }
+        let rects = self.rects(area);
+        let (id, r) = rects.iter().find(|(_, r)| r.contains((x, y).into()))?;
+        let fx = (x - r.x) as f32 / r.width.max(1) as f32;
+        let fy = (y - r.y) as f32 / r.height.max(1) as f32;
+        let zone = if fy >= 0.66 {
+            Zone::Below
+        } else if fx >= 0.66 {
+            Zone::Right
+        } else {
+            Zone::Replace
+        };
+        Some((*id, zone))
+    }
+
+    /// Put a palette kind on a pane: a split right or below it, or in its place.
+    pub fn drop_kind(&mut self, k: usize, on: u32, zone: Zone) {
+        let kind = KINDS[k];
+        self.checkpoint();
+        match zone {
+            Zone::Replace => {
+                if self.slots[on as usize].kind == kind {
+                    self.message = Some(format!("it already is {}", kind.name));
+                    return;
+                }
+                let new = self.next_slot(kind);
+                replace_leaf(&mut self.tree, on, new);
+                self.sel = new;
+            }
+            Zone::Right | Zone::Below => {
+                let axis = if zone == Zone::Right {
+                    Axis::Horizontal
+                } else {
+                    Axis::Vertical
+                };
+                let new = self.next_slot(kind);
+                self.tree.split(on, axis, new);
+                self.sel = new;
+            }
+        }
+        self.kind = k;
+        self.message = Some(format!(
+            "{} added — ⏎ to use the layout, u undoes",
+            kind.name
+        ));
     }
 
     fn rects(&self, area: Rect) -> Vec<(u32, Rect)> {
@@ -687,7 +780,14 @@ impl Editor {
                 );
             }
             if roomy {
-                let note = if used.contains(k) { "in use" } else { k.note };
+                let carried = self.carry.is_some_and(|(c, _)| c == i);
+                let note = if carried {
+                    "dragging"
+                } else if used.contains(k) {
+                    "in use"
+                } else {
+                    k.note
+                };
                 put(
                     buf,
                     area.x + 2,
@@ -860,7 +960,7 @@ impl Editor {
         let hint = match (&self.message, self.field) {
             (Some(m), _) => m.clone(),
             (None, Field::Name) => "type a name · ⏎ done · esc clear".into(),
-            (None, Field::Map) => "←↑↓→ pane · \\ split right · - split below · c change kind · x remove · < > J K resize (5%) · drag borders · u undo · ⏎ use · esc cancel".into(),
+            (None, Field::Map) => "←↑↓→ pane · \\ split right · - split below · c change kind · x remove · < > J K resize (5%) · drag borders · drag a palette item onto a pane · u undo · ⏎ use · esc cancel".into(),
         };
         let st = if self.message.is_some() {
             Style::default().fg(AMBER)
@@ -1004,6 +1104,50 @@ impl Editor {
             }
         }
         draw_dividers(buf, &self.tree, inner);
+        // the drop zone under a carried palette item (board 4)
+        if let Some((k, Some((id, zone)))) = self.carry {
+            if let Some((_, r)) = rects.iter().find(|(i, _)| *i == id) {
+                let z = zone.area(*r);
+                let st = Style::default().fg(CYAN);
+                fill(
+                    buf,
+                    Rect::new(
+                        z.x + 1,
+                        z.y + 1,
+                        z.width.saturating_sub(2),
+                        z.height.saturating_sub(2),
+                    ),
+                    Style::default().bg(Color::Indexed(23)),
+                );
+                // a dashed outline
+                for x in z.x..z.right() {
+                    put(buf, x, z.y, 1, "╌", st);
+                    put(buf, x, z.bottom().saturating_sub(1), 1, "╌", st);
+                }
+                for y in z.y..z.bottom() {
+                    put(buf, z.x, y, 1, "╎", st);
+                    put(buf, z.right().saturating_sub(1), y, 1, "╎", st);
+                }
+                let what = match zone {
+                    Zone::Right => "split right",
+                    Zone::Below => "split below",
+                    Zone::Replace => "in its place",
+                };
+                let t = format!("drop “{}” here · {what}", KINDS[k].name);
+                let tw = (t.chars().count() as u16).min(z.width.saturating_sub(2));
+                put(
+                    buf,
+                    z.x + (z.width.saturating_sub(tw)) / 2,
+                    z.y + z.height / 2,
+                    tw,
+                    &t,
+                    Style::default()
+                        .fg(CYAN)
+                        .bg(Color::Indexed(23))
+                        .add_modifier(Modifier::BOLD),
+                );
+            }
+        }
     }
 }
 
@@ -1354,6 +1498,40 @@ mod tests {
         let (thermal, _) = *hits.iter().find(|(_, h)| *h == Hit::Kind(4)).unwrap();
         assert!(e.mouse(thermal.x + 1, thermal.y, true, false, false));
         assert_eq!(KINDS[e.kind].name, "Thermals");
+        // carried onto the bottom of the files pane: "drop “Thermals” here", then a split below
+        let panes = e.tree.panes().len();
+        let rects = e.rects(map);
+        let files = rects
+            .iter()
+            .find(|(i, _)| e.slots[*i as usize].existing == Some(7))
+            .unwrap()
+            .1;
+        let (dx, dy) = (files.x + 2, files.bottom() - 2);
+        assert!(e.mouse(dx, dy, false, true, false));
+        let mut buf = Buffer::empty(area);
+        e.render(area, &mut buf);
+        let text: String = (0..40)
+            .map(|y| {
+                (0..160)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    + "\n"
+            })
+            .collect();
+        assert!(
+            text.contains("drop “Thermals” here") && text.contains("dragging"),
+            "{text}"
+        );
+        assert!(e.mouse(dx, dy, false, false, true));
+        assert_eq!(e.tree.panes().len(), panes + 1);
+        assert_eq!(e.slots[e.sel as usize].kind.name, "Thermals");
+        // a click on the palette (press and release in place) only picks it
+        let hits = e.hits.borrow().clone();
+        let (shell, _) = *hits.iter().find(|(_, h)| *h == Hit::Kind(0)).unwrap();
+        e.mouse(shell.x + 1, shell.y, true, false, false);
+        e.mouse(shell.x + 1, shell.y, false, false, true);
+        assert_eq!(e.tree.panes().len(), panes + 1);
+        assert_eq!(KINDS[e.kind].name, "Shell");
         let (monitor, _) = *hits.iter().find(|(_, h)| *h == Hit::Preset(1)).unwrap();
         e.mouse(monitor.x + 1, monitor.y + 1, true, false, false);
         assert_eq!(e.tree.panes().len(), 2);

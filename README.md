@@ -54,7 +54,7 @@ shellvisor --shell bash    # or pick: zsh, bash, or a full path
 | `F9` · `shift+F9` | agents tab · new agent |
 | `alt+a` | agents waiting for approval: `y` allow · `n` deny · `a` always |
 | `sv layout dev` | files + shell + system + flow (also `monitor`, `files`, `data`, `agents`; or `alt+m`) |
-| `alt+e` | layout editor: start from a preset or a saved layout, add shell / files / git / system / thermals / flow panes, remove, resize (keys or mouse), undo; nothing changes until ⏎, esc puts it back. Save by name, as the default, or for this folder (`sv layout <name>` opens a saved one) |
+| `alt+e` | layout editor: start from a preset or a saved layout, add shell / files / git / system / thermals / flow panes (keys, or drag one from the palette onto a pane — a dashed zone shows where it lands), remove, resize (keys or mouse), undo; nothing changes until ⏎, esc puts it back. Save by name, as the default, or for this folder (`sv layout <name>` opens a saved one) |
 | `ctrl+]` `j` · `sv activity` | downloads & installs: progress bar, speed, time left; finished ones with `c` cd into it · `o` open in files (or click the download in the status bar) |
 | `alt+s` · `sv settings` | settings: colour of the folder in your prompt, of the commands you type and of folders in lists, `ls` as a table, table borders, theme |
 | `alt+m` | tab menu: Rename, Duplicate here, Change shell, Split right / down, Move to new window, Pin / unpin, Mute alerts, Close — then panes, layouts and the rest |
@@ -263,7 +263,7 @@ Mistakes are reported before anything starts, with the agent and field (`agents[
 Four views over everything agents are doing (`tab` switches; `sv agent board tree|timeline|log` opens one):
 
 - **Plan** — type a goal (or run `sv agent plan 'add price alerts'`). A planner reads the repository and proposes tasks in stages, with scopes, estimates in tokens and overlap risks. Edit a title (`e`), reassign the agent CLI (`a`), drop a task (`x`), set how many run at once (`+`/`-`) and a token budget (`b`), re-plan (`r`). `⏎` dispatches everything; `s` runs one stage at a time (`⏎` releases the next). Each task gets its own worktree and branch; once all are done a reviewer agent compares the branches and reports.
-- **Tree** — who spawned whom, status, tokens and files, totals per branch, and the selected agent's task and latest output. `p` pauses or resumes a branch, `k` stops it, `m` merges an agent's branch into your checkout, `⏎` jumps to its column.
+- **Tree** — who spawned whom, status, tokens and files, totals per branch, and the selected agent's details: spawned by, via, worktree, its instruction and latest output. `←` / `→` fold and open a branch, `i` messages the selected agent, `+` starts a sub-agent under it (type its task), `c` promotes a sub-agent to a column of its own, `p` pauses or resumes a branch, `k` stops it, `d` reviews it, `m` merges an agent's branch into your checkout, `⏎` jumps to its column.
 - **Timeline** — every agent over time: working, waiting, approval, paused, done.
 - **Log** — spawns, messages, events, refusals and budget stops.
 
