@@ -213,7 +213,20 @@ fn draw_all(f: &mut Frame, app: &App) {
         let is_focus = id == focused;
         if let Some(t) = app.tools.get(&id) {
             if full {
-                let mut title = format!(" {} ", t.title());
+                // the boards' titles: "F2 · FILES", "F3 · SYSTEM", "F8 · FLOW"
+                let (action, name) = match t {
+                    Tool::Files(_) => ("toggle_files", "FILES"),
+                    Tool::System(sp) if sp.thermal => ("toggle_system", "THERMAL"),
+                    Tool::System(_) => ("toggle_system", "SYSTEM"),
+                    Tool::Flow(_) => ("toggle_flow", "FLOW"),
+                    Tool::Remote(_) => ("", "REMOTE"),
+                };
+                let key = key_label(app, action);
+                let mut title = if key.is_empty() {
+                    format!(" {name} · {} ", t.title())
+                } else {
+                    format!(" {key} · {name} ")
+                };
                 if zoomed {
                     title.push_str("· zoomed ");
                 }
@@ -308,7 +321,17 @@ fn draw_all(f: &mut Frame, app: &App) {
             };
             f.render_widget(block, outer);
         } else if full {
-            let title = format!(" {} · {} ", p.shell, short_path(&p.cwd));
+            let shells_here = app.tabs[app.active]
+                .root
+                .panes()
+                .iter()
+                .filter(|i| app.panes.get(i).is_some_and(|q| q.agent.is_none()))
+                .count();
+            let title = if shells_here > 1 {
+                format!(" SHELL · {} · {} ", p.shell, basename(&short_path(&p.cwd)))
+            } else {
+                format!(" SHELL · {} ", p.shell)
+            };
             let mut rest = Vec::new();
             if let Some(a) = &p.activity {
                 rest.push(Span::styled("· ", Style::default().fg(DIM)));
@@ -331,6 +354,15 @@ fn draw_all(f: &mut Frame, app: &App) {
                 ));
             }
             let mut block = pane_block_line(title, rest, is_focus);
+            if is_focus && outer.width > 50 {
+                block = block.title(
+                    Line::from(Span::styled(
+                        format!(" {}×{} · focused ", inner.width, inner.height),
+                        Style::default().fg(DIM),
+                    ))
+                    .right_aligned(),
+                );
+            }
             if let Some(h) = stuck_hint(p) {
                 block = block.title_bottom(Span::styled(
                     format!(" {h} "),
@@ -386,11 +418,55 @@ fn draw_all(f: &mut Frame, app: &App) {
         }
     }
 
+    // focus layout's rail: the other panes, one key away (board 3)
+    if full && app.tabs[app.active].focus_mode {
+        let (_, content, _) = app.regions();
+        let area = app.pane_area(content);
+        if area.width < content.width {
+            let rail = Rect::new(
+                area.right(),
+                content.y,
+                content.right() - area.right(),
+                content.height,
+            );
+            let block = Block::bordered()
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(FAINT));
+            let inner = block.inner(rail);
+            f.render_widget(block, rail);
+            let mut y = inner.y + 1;
+            for (action, name) in [
+                ("toggle_files", "files"),
+                ("toggle_system", "system"),
+                ("toggle_flow", "flow"),
+            ] {
+                let label = format!("{} {name}", key_label(app, action));
+                let chars: Vec<char> = label.chars().collect();
+                if y + chars.len() as u16 > inner.bottom() {
+                    break;
+                }
+                for (i, c) in chars.iter().enumerate() {
+                    f.buffer_mut().set_string(
+                        inner.x + inner.width / 2,
+                        y + i as u16,
+                        c.to_string(),
+                        Style::default().fg(DIM),
+                    );
+                }
+                y += chars.len() as u16 + 2;
+            }
+        }
+    }
     if let Some(r) = tabbar {
-        draw_tabs(f, app, r);
+        if r.height >= 2 {
+            draw_header(f, app, Rect::new(r.x, r.y, r.width, 1));
+            draw_tabs(f, app, Rect::new(r.x, r.y + 1, r.width, 1));
+        } else {
+            draw_tabs(f, app, r);
+        }
     }
     if let Some(r) = status {
-        draw_status(f, app, r);
+        draw_keys(f, app, r);
     }
 
     if let Some(t) = &app.table {
@@ -866,7 +942,7 @@ fn tab_label(app: &App, i: usize) -> (String, Option<(String, Color)>) {
     } else if panes.iter().any(|p| p.running) {
         Some((spinner(app).to_string(), AMBER))
     } else if let Some(code) = panes.iter().filter_map(|p| p.last_exit).find(|c| *c != 0) {
-        Some((format!("✖{code}"), RED))
+        Some((format!("✖ {code}"), RED))
     } else if panes.iter().any(|p| p.bell) {
         Some(("!".to_string(), AMBER))
     } else if panes.iter().any(|p| p.unseen) {
@@ -885,8 +961,9 @@ fn tab_label(app: &App, i: usize) -> (String, Option<(String, Color)>) {
 /// Tab index under screen column `x` (for mouse clicks).
 pub fn tab_at(app: &App, x: u16) -> Option<usize> {
     let mut col = 0u16;
+    let compact = tabs_compact(app, app.screen.width);
     for i in 0..app.tabs.len() {
-        let w = tab_width(app, i);
+        let w = tab_width_in(app, i, compact);
         if x >= col && x < col + w {
             return Some(i);
         }
@@ -901,33 +978,66 @@ fn tab_width(app: &App, i: usize) -> u16 {
     (label.chars().count() + icon_w + 2) as u16
 }
 
-fn draw_tabs(f: &mut Frame, app: &App, r: Rect) {
-    f.render_widget(Paragraph::new("").style(Style::default().bg(BAR)), r);
-    let mut spans = Vec::new();
-    for i in 0..app.tabs.len() {
-        let (label, icon) = tab_label(app, i);
-        let active = i == app.active;
-        let base = if active {
-            Style::default()
-                .bg(AMBER)
-                .fg(INK)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().bg(BAR).fg(DIM)
-        };
-        spans.push(Span::styled(" ", base));
-        if let Some((s, c)) = icon {
-            spans.push(Span::styled(
-                format!("{s} "),
-                if active { base } else { base.fg(c) },
-            ));
-        }
-        spans.push(Span::styled(format!("{label} "), base));
-        spans.push(Span::styled(" ", Style::default().bg(BAR)));
+/// The key a configurable action is on, as the boards write it ("F2", "alt+;", "^Q").
+fn key_label(app: &App, action: &str) -> String {
+    if action.is_empty() {
+        return String::new();
     }
-    spans.push(Span::styled("+ alt+t", Style::default().bg(BAR).fg(FAINT)));
-    f.render_widget(Paragraph::new(Line::from(spans)), r);
-    // the boards' header badge: "◜ 4 downloads · 58% · 9.6 MB/s"
+    let k = app.keymap().shown(action);
+    let first = k.split(" · ").next().unwrap_or("").trim().to_string();
+    if first.is_empty() {
+        return String::new();
+    }
+    if let Some(rest) = first.strip_prefix("ctrl+") {
+        if rest.chars().count() == 1 {
+            return format!("^{}", rest.to_uppercase());
+        }
+    }
+    if first.starts_with('f') && first[1..].chars().all(|c| c.is_ascii_digit()) {
+        return first.to_uppercase();
+    }
+    first
+}
+
+/// The header row (boards 1, 3, 12): name, folder, shell and pid on the left;
+/// downloads, agents, CPU, memory and the clock on the right.
+fn draw_header(f: &mut Frame, app: &App, r: Rect) {
+    use crate::palette::{Role, role};
+    f.render_widget(Paragraph::new("").style(Style::default().bg(BAR)), r);
+    let target = app.input_target();
+    let p = app.panes.get(&target).or_else(|| {
+        app.paired_shell(app.active)
+            .and_then(|id| app.panes.get(&id))
+    });
+    let mut left = vec![Span::styled(
+        format!(" ▍{}", crate::NAME_LOWER),
+        Style::default()
+            .fg(AMBER)
+            .bg(BAR)
+            .add_modifier(Modifier::BOLD),
+    )];
+    if app.tabs[app.active].focus_mode {
+        left.push(Span::styled(
+            "  layout: focus",
+            Style::default().fg(DIM).bg(BAR),
+        ));
+    } else if let Some(p) = p {
+        left.push(Span::styled(
+            format!("  {}", short_path(&p.cwd)),
+            Style::default().fg(DIM).bg(BAR),
+        ));
+        let pid = p
+            .pane
+            .pid()
+            .map(|n| format!(" · pid {n}"))
+            .unwrap_or_default();
+        left.push(Span::styled(
+            format!("  {}{pid}", p.shell),
+            Style::default().fg(DIM).bg(BAR),
+        ));
+    }
+    // right: a downloads pill, agents, live, CPU, MEM, clock
+    let mut right: Vec<Span> = Vec::new();
     let acts = app.activities();
     if !acts.is_empty() {
         let n = acts.len();
@@ -935,7 +1045,7 @@ fn draw_tabs(f: &mut Frame, app: &App, r: Rect) {
             .iter()
             .filter_map(|(_, a, _)| a.progress.map(u32::from))
             .collect();
-        let mut t = format!("{} download{}", n, if n == 1 { "" } else { "s" });
+        let mut t = format!("{n} download{}", if n == 1 { "" } else { "s" });
         if !pcts.is_empty() {
             t.push_str(&format!(
                 " · {}%",
@@ -949,176 +1059,327 @@ fn draw_tabs(f: &mut Frame, app: &App, r: Rect) {
         if rate > 0.0 {
             t.push_str(&format!(" · {}/s", crate::sysmon::human(rate as u64)));
         }
-        let w = t.chars().count() as u16 + 5;
-        if r.width > w + 20 {
-            let pill = Style::default()
-                .bg(crate::palette::role(crate::palette::Role::Badge))
-                .fg(TEXT);
-            let line = Line::from(vec![
-                Span::styled(" ", pill),
-                Span::styled(circle(app).to_string(), pill.fg(AMBER)),
-                Span::styled(format!(" {t} "), pill),
-            ]);
-            f.render_widget(
-                Paragraph::new(line),
-                Rect::new(r.right() - w - 1, r.y, w, 1),
-            );
-        }
+        let pill = Style::default().bg(role(Role::Badge)).fg(TEXT);
+        right.push(Span::styled(" ", pill));
+        right.push(Span::styled(circle(app).to_string(), pill.fg(AMBER)));
+        right.push(Span::styled(format!(" {t} "), pill));
+        right.push(Span::styled("  ", Style::default().bg(BAR)));
     }
-}
-
-fn draw_status(f: &mut Frame, app: &App, r: Rect) {
-    let target = app.input_target();
-    let tool = app.tools.get(&target);
-    let p = app.panes.get(&target).or_else(|| {
-        app.paired_shell(app.active)
-            .and_then(|id| app.panes.get(&id))
-    });
-    let mut left = vec![
-        Span::styled(
-            format!(" ▍{} ", crate::NAME_LOWER),
-            Style::default()
-                .fg(AMBER)
-                .bg(BAR)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!(" {} ", p.map(|p| short_path(&p.cwd)).unwrap_or_default()),
-            Style::default().fg(CYAN).bg(BAR),
-        ),
-    ];
-    if let Some(t) = tool {
-        left.push(Span::styled(
-            format!(" {} ", t.kind()),
-            Style::default().fg(INK).bg(CYAN),
-        ));
-    }
-    // Agents anywhere: count and approvals.
     let ids = app.agent_ids();
     if !ids.is_empty() {
-        let waiting = app.pending_approvals().len();
-        left.push(Span::styled(
+        right.push(Span::styled(
             format!(
-                " ◆ {} agent{} ",
+                "◆ {} agent{}",
                 ids.len(),
                 if ids.len() == 1 { "" } else { "s" }
             ),
             Style::default().fg(Color::Indexed(176)).bg(BAR),
         ));
+        right.push(Span::styled("  ", Style::default().bg(BAR)));
+        let waiting = app.pending_approvals().len();
         if waiting > 0 {
-            left.push(Span::styled(
+            right.push(Span::styled(
                 format!(" ⚑ {waiting} · alt+a "),
                 Style::default()
                     .fg(INK)
                     .bg(AMBER)
                     .add_modifier(Modifier::BOLD),
             ));
+            right.push(Span::styled("  ", Style::default().bg(BAR)));
         }
     }
-    // Downloads anywhere (other tabs, agents too) show here; a click lists them.
-    let acts = app.activities();
-    if let Some((_, first, _)) = acts.first() {
-        // the boards' "job: ◜ pip 52% · ETA 1m"
-        let mut t = first.label.clone();
-        if let Some(p) = first.progress {
-            t.push_str(&format!(" {p}%"));
-        }
-        if let Some(e) = eta_text(first) {
-            t.push_str(&format!(" · {e}"));
-        }
-        if acts.len() > 1 {
-            t.push_str(&format!(" · +{}", acts.len() - 1));
-        }
-        left.push(Span::styled(" job: ", Style::default().fg(DIM).bg(BAR)));
-        left.push(Span::styled(
-            circle(app).to_string(),
-            Style::default().fg(AMBER).bg(BAR),
-        ));
-        left.push(Span::styled(
-            format!(" {t} "),
-            Style::default().fg(TEXT).bg(BAR),
-        ));
-    } else if let Some(cmd) = &app.bar_running {
-        left.push(Span::styled(
-            format!(
-                " {} sv {} ",
-                spinner(app),
-                cmd.chars().take(40).collect::<String>()
-            ),
-            Style::default().fg(AMBER).bg(BAR),
-        ));
-    } else if let Some(p) = p {
-        if p.running {
-            let secs = p.started.map(|s| s.elapsed().as_secs()).unwrap_or(0);
-            let cmd: String = p.command.chars().take(40).collect();
-            left.push(Span::styled(
-                format!(" {} {cmd} {} ", spinner(app), fmt_secs(secs)),
+    // focus layout: the strip below has CPU and memory (board 3)
+    if !app.tabs[app.active].focus_mode {
+        if app.low_power {
+            right.push(Span::styled(
+                "◌ low power",
                 Style::default().fg(AMBER).bg(BAR),
             ));
-        } else if let Some(code) = p.last_exit {
-            let (txt, c) = if code == 0 {
-                ("✔".to_string(), GREEN)
-            } else {
-                (format!("✖ {code}"), RED)
-            };
-            left.push(Span::styled(
-                format!(" {txt} "),
-                Style::default().fg(c).bg(BAR),
-            ));
+        } else {
+            right.push(Span::styled("● live", Style::default().fg(GREEN).bg(BAR)));
+        }
+        right.push(Span::styled(
+            format!("  CPU {:.0}%  MEM {:.0}%  ", app.usage.cpu, app.usage.mem),
+            Style::default().fg(DIM).bg(BAR),
+        ));
+    }
+    let clock = if app.low_power {
+        crate::osinfo::clock()
+    } else {
+        crate::osinfo::clock_secs()
+    };
+    right.push(Span::styled(
+        format!("{clock} "),
+        Style::default().fg(TEXT).bg(BAR),
+    ));
+    let lw: usize = left.iter().map(|s| s.content.chars().count()).sum();
+    let mut rw: usize = right.iter().map(|s| s.content.chars().count()).sum();
+    // narrow: drop the least useful first (live, CPU / MEM, agents), keep
+    // downloads and the clock; then the pid, then the folder
+    for drop in ["● live", "◌ low power", "  CPU", "◆ "] {
+        if rw + lw + 2 <= r.width as usize {
+            break;
+        }
+        if let Some(i) = right.iter().position(|s| s.content.starts_with(drop)) {
+            rw -= right.remove(i).content.chars().count();
+            if drop == "◆ " && i < right.len() && right[i].content == "  " {
+                rw -= right.remove(i).content.chars().count();
+            }
         }
     }
-    let right = format!(
-        " {}mem {} · ctrl+] menu · F1 help · {} ",
-        if app.low_power {
-            "◌ low-power · "
+    let mut lw = lw;
+    while lw + rw + 2 > r.width as usize && left.len() > 1 {
+        lw -= left.pop().map(|s| s.content.chars().count()).unwrap_or(0);
+    }
+    f.render_widget(Paragraph::new(Line::from(left)), r);
+    if rw < r.width as usize {
+        f.render_widget(
+            Paragraph::new(Line::from(right)),
+            Rect::new(r.right() - rw as u16, r.y, rw as u16, 1),
+        );
+    }
+}
+
+/// The tab strip (board 12): the active tab amber, the others on chips with
+/// their state first (◐ running, ✖ 1 failed, • new output, ◆ agent…).
+fn draw_tabs(f: &mut Frame, app: &App, r: Rect) {
+    use crate::palette::{Role, role};
+    f.render_widget(Paragraph::new("").style(Style::default().bg(BAR)), r);
+    let chip = role(Role::TabChip);
+    let mut spans = Vec::new();
+    let compact = tabs_compact(app, r.width);
+    for i in 0..app.tabs.len() {
+        let (label, icon) = tab_label(app, i);
+        let label = if compact { (i + 1).to_string() } else { label };
+        let active = i == app.active;
+        let base = if active {
+            Style::default()
+                .bg(AMBER)
+                .fg(INK)
+                .add_modifier(Modifier::BOLD)
         } else {
-            ""
-        },
-        crate::osinfo::self_memory(),
-        crate::osinfo::clock()
-    );
-    let left_w: usize = left.iter().map(|s| s.content.chars().count()).sum();
-    f.render_widget(
-        Paragraph::new(Line::from(left)).style(Style::default().bg(BAR)),
-        r,
+            Style::default().bg(chip).fg(TEXT)
+        };
+        spans.push(Span::styled(" ", base));
+        if let Some((s, c)) = icon {
+            spans.push(Span::styled(
+                format!("{s} "),
+                if active { base } else { base.fg(c) },
+            ));
+        }
+        spans.push(Span::styled(format!("{label} "), base));
+        spans.push(Span::styled(" ", Style::default().bg(BAR)));
+    }
+    spans.push(Span::styled(" + new ▾", Style::default().bg(BAR).fg(DIM)));
+    f.render_widget(Paragraph::new(Line::from(spans)), r);
+    let n = app.tabs.len();
+    let right = format!(
+        "{n} tab{} · {} ",
+        if n == 1 { "" } else { "s" },
+        crate::osinfo::self_memory()
     );
     let w = right.chars().count() as u16;
-    if r.width > w + 30 {
-        f.buffer_mut().set_string(
-            r.x + r.width - w,
-            r.y,
-            &right,
-            Style::default().fg(DIM).bg(BAR),
-        );
+    let used: u16 = (0..n)
+        .map(|i| tab_width_in(app, i, compact) + 1)
+        .sum::<u16>()
+        + 9;
+    if used + w + 2 <= r.width {
+        f.buffer_mut()
+            .set_string(r.right() - w, r.y, &right, Style::default().fg(DIM).bg(BAR));
     }
-    // Pane keys in the middle when there's room (from the live keymap).
-    let mut hints: Vec<Span> = Vec::new();
-    for (action, label) in [
-        ("toggle_files", "files"),
-        ("toggle_system", "system"),
-        ("toggle_flow", "flow"),
-        ("explore_table", "table"),
-        ("command_bar", "sv bar"),
-    ] {
-        let k = app.keymap().shown(action);
-        if let Some(first) = k.split(" · ").next().filter(|s| !s.is_empty()) {
-            hints.push(Span::styled(
-                first.to_uppercase().replace("ALT+", "alt+"),
-                Style::default().fg(AMBER).bg(BAR),
+}
+
+/// Many tabs: the strip shows numbers only.
+fn tabs_compact(app: &App, width: u16) -> bool {
+    let full: u16 = (0..app.tabs.len())
+        .map(|i| tab_width_in(app, i, false) + 1)
+        .sum::<u16>()
+        + 9;
+    full + 14 > width
+}
+
+fn tab_width_in(app: &App, i: usize, compact: bool) -> u16 {
+    if !compact {
+        return tab_width(app, i);
+    }
+    let (_, icon) = tab_label(app, i);
+    let icon_w = icon.map(|(s, _)| s.chars().count() + 1).unwrap_or(0);
+    ((i + 1).to_string().len() + icon_w + 2) as u16
+}
+
+/// The key strip at the bottom: the keys for what has the focus (board 1
+/// for shells, board 9 for files, board 2 for flow…).
+fn draw_keys(f: &mut Frame, app: &App, r: Rect) {
+    f.render_widget(Paragraph::new("").style(Style::default().bg(BAR)), r);
+    if app.tabs[app.active].focus_mode {
+        draw_focus_strip(f, app, r);
+        return;
+    }
+    let target = app.input_target();
+    let k = |a: &str, fallback: &str| {
+        let s = key_label(app, a);
+        if s.is_empty() {
+            fallback.to_string()
+        } else {
+            s
+        }
+    };
+    let keys: Vec<(String, &str)> = match app.tools.get(&target) {
+        Some(Tool::Files(_)) => vec![
+            ("tab".into(), "Cycle views"),
+            ("1-8".into(), "Views"),
+            ("i c e".into(), "Insert · cd · edit"),
+            ("/".into(), "Filter"),
+            (".".into(), "Hidden files"),
+            ("p".into(), "Preview on/off"),
+            (k("zoom", "F5"), "Zoom"),
+        ],
+        Some(Tool::Flow(_)) => vec![
+            ("s".into(), "Send pipeline to shell"),
+            ("r".into(), "Run again with sv flow"),
+            ("^C".into(), "Stop (in the shell)"),
+            (k("zoom", "F5"), "Zoom"),
+            (k("toggle_flow", "F8"), "Flow pane"),
+        ],
+        Some(Tool::System(_)) => vec![
+            ("t".into(), "Thermal"),
+            ("s".into(), "Sort CPU / memory"),
+            (k("zoom", "F5"), "Zoom"),
+            (k("toggle_system", "F3"), "Close"),
+        ],
+        Some(Tool::Remote(_)) => vec![
+            ("⏎".into(), "Open"),
+            ("⌫".into(), "Up"),
+            ("d".into(), "Download"),
+            ("drop files".into(), "Upload"),
+        ],
+        None if app.panes.get(&target).is_some_and(|p| p.agent.is_some()) => vec![
+            (k("agents", "F9"), "Agents ⇄ Workspace"),
+            (k("approvals", "alt+a"), "Approvals"),
+            (k("agent_board", "alt+g"), "Agent board"),
+            ("^] D".into(), "Review"),
+            (k("zoom", "F5"), "Zoom agent"),
+            (k("quit", "^Q"), "Quit"),
+        ],
+        None => vec![
+            (k("help", "F1"), "Help"),
+            (k("toggle_files", "F2"), "Files"),
+            (k("toggle_system", "F3"), "System"),
+            (k("explore_table", "F4"), "Table"),
+            (k("zoom", "F5"), "Zoom"),
+            (k("next_pane", "F6"), "Next pane"),
+            (k("next_layout", "F7"), "Rearrange"),
+            (k("toggle_flow", "F8"), "Flow"),
+            (k("command_bar", "alt+;"), "Command bar"),
+            (k("quit", "^Q"), "Quit"),
+        ],
+    };
+    let mut spans = vec![Span::styled(" ", Style::default().bg(BAR))];
+    let mut w = 1usize;
+    for (key, label) in &keys {
+        let add = key.chars().count() + label.chars().count() + 4;
+        if w + add > r.width as usize {
+            break;
+        }
+        spans.push(Span::styled(
+            key.clone(),
+            Style::default().fg(AMBER).bg(BAR),
+        ));
+        spans.push(Span::styled(
+            format!(" {label}   "),
+            Style::default().fg(DIM).bg(BAR),
+        ));
+        w += add;
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), r);
+}
+
+/// Focus layout's status strip (board 3): the folder, branch, the job, CPU,
+/// memory and network, with F7 / F1 on the right.
+fn draw_focus_strip(f: &mut Frame, app: &App, r: Rect) {
+    let target = app.input_target();
+    let p = app.panes.get(&target).or_else(|| {
+        app.paired_shell(app.active)
+            .and_then(|id| app.panes.get(&id))
+    });
+    let sep = Span::styled("│", Style::default().fg(Color::Indexed(240)).bg(BAR));
+    let mut spans = vec![Span::styled(
+        " SHELL ",
+        Style::default()
+            .fg(INK)
+            .bg(AMBER)
+            .add_modifier(Modifier::BOLD),
+    )];
+    if let Some(p) = p {
+        spans.push(Span::styled(
+            format!("  {}  ", short_path(&p.cwd)),
+            Style::default().fg(CYAN).bg(BAR),
+        ));
+        spans.push(sep.clone());
+        if let Some((branch, changed)) = app.branch_of(&p.cwd) {
+            spans.push(Span::styled(
+                format!("   {branch}"),
+                Style::default().fg(Color::Indexed(176)).bg(BAR),
             ));
-            hints.push(Span::styled(
-                format!(" {label}  "),
-                Style::default().fg(DIM).bg(BAR),
+            if changed > 0 {
+                spans.push(Span::styled(
+                    format!(" +{changed}"),
+                    Style::default().fg(AMBER).bg(BAR),
+                ));
+            }
+            spans.push(Span::styled("  ", Style::default().bg(BAR)));
+            spans.push(sep.clone());
+        }
+        let job = if let Some((_, a, _)) = app.activities().first() {
+            let pct = a.progress.map(|x| format!(" {x}%")).unwrap_or_default();
+            Some((format!("{} {}{pct}", circle(app), a.label), AMBER))
+        } else if p.running {
+            let secs = p.started.map(|s| s.elapsed().as_secs()).unwrap_or(0);
+            // the command that is running: the last of a `a; b` / `a && b` chain
+            let last = p
+                .command
+                .rsplit([';', '&', '|'])
+                .map(str::trim)
+                .find(|c| !c.is_empty())
+                .unwrap_or("");
+            let cmd: String = if last.chars().count() > 24 {
+                last.chars().take(23).chain(['…']).collect()
+            } else {
+                last.to_string()
+            };
+            Some((format!("{cmd} ▶ {}", fmt_secs(secs)), GREEN))
+        } else {
+            None
+        };
+        if let Some((j, c)) = job {
+            spans.push(Span::styled("  job: ", Style::default().fg(TEXT).bg(BAR)));
+            spans.push(Span::styled(
+                format!("{j}  "),
+                Style::default().fg(c).bg(BAR),
             ));
+            spans.push(sep.clone());
         }
     }
-    let hints_w: usize = hints.iter().map(|s| s.content.chars().count()).sum();
-    if !hints.is_empty() && left_w + hints_w + w as usize + 4 <= r.width as usize {
-        let x = r.x + left_w as u16 + 2;
-        f.render_widget(
-            Paragraph::new(Line::from(hints)),
-            Rect::new(x, r.y, hints_w as u16, 1),
-        );
+    spans.push(Span::styled(
+        format!("  CPU {:.0}%  ", app.usage.cpu),
+        Style::default().fg(TEXT).bg(BAR),
+    ));
+    spans.push(sep.clone());
+    spans.push(Span::styled(
+        format!("  MEM {:.0}%  ", app.usage.mem),
+        Style::default().fg(TEXT).bg(BAR),
+    ));
+    spans.push(sep);
+    f.render_widget(Paragraph::new(Line::from(spans)), r);
+    let hint = format!(
+        "{} layout · {} help ",
+        key_label(app, "next_layout"),
+        key_label(app, "help")
+    );
+    let w = hint.chars().count() as u16;
+    if r.width > w + 60 {
+        f.buffer_mut()
+            .set_string(r.right() - w, r.y, &hint, Style::default().fg(DIM).bg(BAR));
     }
 }
 

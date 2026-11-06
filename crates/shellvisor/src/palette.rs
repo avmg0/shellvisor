@@ -62,6 +62,8 @@ pub enum Role {
     AddBg,
     /// Behind a removed line in a diff (#22151a).
     DelBg,
+    /// An inactive tab in the tab strip (#1a2029).
+    TabChip,
 }
 
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -94,6 +96,7 @@ pub fn role(r: Role) -> Color {
         Role::Warn => (0x1f, 0x1a, 0x10),
         Role::AddBg => (0x13, 0x20, 0x18),
         Role::DelBg => (0x22, 0x15, 0x1a),
+        Role::TabChip => (0x1a, 0x20, 0x29),
     };
     match MODE.load(Ordering::Relaxed) {
         2 => Color::Rgb(c.0, c.1, c.2),
@@ -117,6 +120,7 @@ pub fn role(r: Role) -> Color {
             Role::Warn => Color::Indexed(94),
             Role::AddBg => Color::Indexed(22),
             Role::DelBg => Color::Indexed(52),
+            Role::TabChip => Color::Indexed(236),
         },
     }
 }

@@ -139,16 +139,25 @@ pub enum Preset {
     Files,
     /// Shell on the left, the Flow pane on the right.
     Data,
+    /// One shell, the other panes on a rail, a status strip (board 3).
+    Focus,
 }
 
 impl Preset {
-    pub const ALL: [Preset; 4] = [Preset::Dev, Preset::Monitor, Preset::Files, Preset::Data];
+    pub const ALL: [Preset; 5] = [
+        Preset::Dev,
+        Preset::Monitor,
+        Preset::Files,
+        Preset::Data,
+        Preset::Focus,
+    ];
     pub fn name(self) -> &'static str {
         match self {
             Preset::Dev => "dev",
             Preset::Monitor => "monitor",
             Preset::Files => "files",
             Preset::Data => "data",
+            Preset::Focus => "focus",
         }
     }
     pub fn parse(s: &str) -> Option<Preset> {

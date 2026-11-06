@@ -404,18 +404,37 @@ impl Session {
 }
 
 fn top(t: &str) -> &str {
-    t.lines().next().unwrap_or("")
+    // row 0 is the header, row 1 the tab strip
+    t.lines().nth(1).unwrap_or("")
 }
 
 #[test]
 fn full_view_has_tab_bar_border_and_status_bar() {
     let mut s = Session::start_full("full");
     s.wait_for("PROMPT>");
-    let first = s.line(0);
-    assert!(first.contains("1 bash"), "tab bar: {first:?}");
-    assert!(s.line(1).starts_with('╭'), "border: {:?}", s.line(1));
-    s.wait_for(&format!("▍{}", NAME_LOWER));
-    s.wait_for("F1 help");
+    // the boards' chrome: header, tab strip, panes, key strip
+    assert!(
+        s.line(0).contains(&format!("▍{}", NAME_LOWER)),
+        "header: {:?}",
+        s.line(0)
+    );
+    assert!(
+        s.line(0).contains("CPU") && s.line(0).contains("MEM"),
+        "header: {:?}",
+        s.line(0)
+    );
+    let tabs = s.line(1);
+    assert!(
+        tabs.contains("1 bash") && tabs.contains("+ new"),
+        "tab strip: {tabs:?}"
+    );
+    assert!(
+        s.line(2).starts_with('╭') && s.line(2).contains("SHELL · bash"),
+        "border: {:?}",
+        s.line(2)
+    );
+    s.wait_for("F1 Help");
+    s.wait_for("F2 Files");
 }
 
 #[test]
@@ -444,7 +463,7 @@ fn split_side_by_side_and_type_into_each() {
     s.wait_for("PROMPT>");
     s.send("\x1b\\"); // alt+\ → split right
     s.wait_until("two panes", |t| {
-        t.lines().nth(1).unwrap_or("").matches('╭').count() == 2
+        t.lines().nth(2).unwrap_or("").matches('╭').count() == 2
     });
     s.send("echo RIGHT-SIDE\r");
     s.wait_for("RIGHT-SIDE");
@@ -464,7 +483,7 @@ fn split_side_by_side_and_type_into_each() {
     // The right shell really is 48 columns wide (100/2 minus borders).
     s.send("\x1b[1;3C");
     s.send("stty size\r");
-    s.wait_until("stty", |t| t.contains("│20 48 "));
+    s.wait_until("stty", |t| t.contains("│19 48 "));
 }
 
 #[test]
@@ -498,9 +517,9 @@ fn closing_a_busy_tab_asks_first() {
     s.send("n");
     s.wait_until("dialog gone", |t| !t.contains("is still running"));
     assert!(
-        s.line(0).contains("2 "),
+        s.line(1).contains("2 "),
         "tab must survive 'n': {:?}",
-        s.line(0)
+        s.line(1)
     );
     s.send("\x1bw");
     s.wait_for("is still running");
@@ -591,7 +610,7 @@ fn session_is_restored_after_quitting() {
     });
     s.send("\x1b2");
     s.wait_until("split restored", |t| {
-        t.lines().nth(1).unwrap_or("").matches('╭').count() == 2
+        t.lines().nth(2).unwrap_or("").matches('╭').count() == 2
     });
     s.send("pwd\r");
     s.wait_for("││/usr");
@@ -643,7 +662,7 @@ fn f7_rearranges_splits() {
     s.send("\x1b[18~"); // F7 → columns
     s.wait_for("layout: columns");
     s.wait_until("three columns", |t| {
-        t.lines().nth(1).unwrap_or("").matches('╭').count() == 3
+        t.lines().nth(2).unwrap_or("").matches('╭').count() == 3
     });
     s.send("\x1b[18~"); // → rows
     s.wait_for("layout: rows");
@@ -791,7 +810,7 @@ fn downloads_show_a_loading_circle_and_a_toast() {
     s.run("curl() { printf 'got 42%%\\n'; sleep 2; }");
     s.send("curl https://example.invalid/file\r");
     s.wait_until("progress bar in the pane title", |t| {
-        let title = t.lines().nth(1).unwrap_or("");
+        let title = t.lines().nth(2).unwrap_or("");
         title.contains(" curl ━") && title.contains(" 42%")
     });
     s.wait_for("✔ curl finished");
@@ -808,7 +827,7 @@ fn activity_list_speed_files_mark_and_toast_actions() {
     );
     s.send("git clone https://example.invalid/me/repo.git\r");
     s.wait_until("bar in the title, the header badge", |t| {
-        let title = t.lines().nth(1).unwrap_or("");
+        let title = t.lines().nth(2).unwrap_or("");
         let header = t.lines().next().unwrap_or("");
         title.contains("git clone ━")
             && title.contains(" 42%")
@@ -1570,7 +1589,7 @@ fn layout_editor_builds_saves_and_reopens_a_folder_layout() {
     s.send("\r"); // save & use
     s.wait_for("saved layout code");
     s.wait_until("applied", |t| {
-        t.contains("files ·") && t.contains("system ·")
+        t.contains("F2 · FILES") && t.contains("F3 · SYSTEM")
     });
     let saved = std::fs::read_to_string(s.dir.join("layouts/code.yaml")).unwrap();
     assert!(
@@ -1588,7 +1607,7 @@ fn layout_editor_builds_saves_and_reopens_a_folder_layout() {
     // starting in that folder again opens the layout
     let mut s = Session::launch("bash", dir);
     s.wait_until("folder layout", |t| {
-        t.contains("files ·") && t.contains("system ·")
+        t.contains("F2 · FILES") && t.contains("F3 · SYSTEM")
     });
     s.wait_for("PROMPT>");
     // and by name from any shell
@@ -1772,7 +1791,7 @@ fn sv_resize_moves_the_border_and_sets_a_share() {
     s.wait_for("PROMPT>");
     // the column of the second pane's top-left corner on the top border row
     let divider = |s: &Session| -> usize {
-        let line = s.text().lines().nth(1).unwrap_or("").to_string();
+        let line = s.text().lines().nth(2).unwrap_or("").to_string();
         line.chars()
             .skip(1)
             .position(|c| c == '╭')
@@ -1781,7 +1800,7 @@ fn sv_resize_moves_the_border_and_sets_a_share() {
     };
     s.send("\x1b\\"); // alt+\ : split side by side, focus goes to the new (right) pane
     s.wait_until("two panes", |t| {
-        t.lines().nth(1).unwrap_or("").matches('╭').count() == 2
+        t.lines().nth(2).unwrap_or("").matches('╭').count() == 2
     });
     s.wait_until("prompt in the new pane", |t| {
         t.matches("PROMPT>").count() >= 2
@@ -1789,7 +1808,7 @@ fn sv_resize_moves_the_border_and_sets_a_share() {
     let half = divider(&s);
     s.run("sv resize 30%");
     s.wait_until("right pane at 30%", |t| {
-        let line = t.lines().nth(1).unwrap_or("").to_string();
+        let line = t.lines().nth(2).unwrap_or("").to_string();
         let d = line
             .chars()
             .skip(1)
@@ -1801,7 +1820,7 @@ fn sv_resize_moves_the_border_and_sets_a_share() {
     let thirty = divider(&s);
     s.run("sv resize left 2");
     s.wait_until("right pane grew by 10%", |t| {
-        let line = t.lines().nth(1).unwrap_or("").to_string();
+        let line = t.lines().nth(2).unwrap_or("").to_string();
         let d = line
             .chars()
             .skip(1)
@@ -1957,7 +1976,7 @@ fn saved_sessions_reconnect_and_logging() {
     s.send("sv ssh prod\r");
     s.wait_for("fake-ssh -o ServerAliveInterval=30 -p 2222 deploy@10.0.0.5");
     assert!(
-        s.text().lines().next().unwrap_or("").contains("prod"),
+        s.text().lines().nth(1).unwrap_or("").contains("prod"),
         "tab named prod"
     );
     s.wait_for("the ssh connection closed");
@@ -2006,7 +2025,7 @@ fn saved_sessions_reconnect_and_logging() {
     s.send("sv ssh all prod stage\r");
     s.wait_until("two hosts", |t| {
         t.contains("2 hosts")
-            && t.lines().nth(1).unwrap_or("").matches("⇶ broad").count() == 2
+            && t.lines().nth(2).unwrap_or("").matches("⇶ broad").count() == 2
             && t.contains("-p 2222 de")
             && t.contains("ServerAliveInterval=30 deploy@10.")
     });
@@ -2041,7 +2060,7 @@ fn palette_broadcast_and_failed_command_card() {
     s.wait_for("Split side by side");
     s.send("\r");
     s.wait_until("two panes", |t| {
-        t.lines().nth(1).unwrap_or("").matches('╭').count() == 2
+        t.lines().nth(2).unwrap_or("").matches('╭').count() == 2
     });
     s.wait_until("prompt in the new pane", |t| {
         t.matches("PROMPT>").count() >= 2
@@ -2120,7 +2139,7 @@ fn serial_console_talks_to_a_device() {
     s.send(&format!("sv serial {path} 9600\r"));
     s.wait_for("connected to");
     assert!(
-        s.text().lines().next().unwrap_or("").contains("serial ·"),
+        s.text().lines().nth(1).unwrap_or("").contains("serial ·"),
         "own tab"
     );
     s.send("hello");

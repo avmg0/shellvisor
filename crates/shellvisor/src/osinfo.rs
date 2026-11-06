@@ -163,6 +163,68 @@ pub fn hostname_short() -> String {
         .unwrap_or_else(|| "host".into())
 }
 
+/// Whole-machine CPU and memory for the header, read every few seconds.
+pub struct Usage {
+    sys: Option<sysinfo::System>,
+    /// CPU % (all cores) and memory used %.
+    pub cpu: f32,
+    pub mem: f32,
+    last: Option<std::time::Instant>,
+}
+
+impl Default for Usage {
+    fn default() -> Self {
+        Usage {
+            sys: None,
+            cpu: 0.0,
+            mem: 0.0,
+            last: None,
+        }
+    }
+}
+
+impl Usage {
+    /// Read again if `every` has passed; true when it did.
+    pub fn refresh(&mut self, every: std::time::Duration) -> bool {
+        if self.last.is_some_and(|t| t.elapsed() < every) {
+            return false;
+        }
+        self.last = Some(std::time::Instant::now());
+        if self.sys.is_none() {
+            self.sys = sysinfo::System::new().ok();
+        }
+        let Some(s) = self.sys.as_mut() else {
+            return false;
+        };
+        s.refresh_cpu_usage();
+        s.refresh_memory();
+        self.cpu = s.global_cpu_usage();
+        let total = s.total_memory().max(1) as f64;
+        self.mem = (s.used_memory() as f64 / total * 100.0) as f32;
+        true
+    }
+
+    /// When the next reading is due.
+    pub fn due_in(&self, every: std::time::Duration) -> std::time::Duration {
+        match self.last {
+            None => std::time::Duration::ZERO,
+            Some(t) => every.saturating_sub(t.elapsed()),
+        }
+    }
+}
+
+/// Local time as "HH:MM:SS".
+pub fn clock_secs() -> String {
+    unsafe {
+        let t = libc::time(std::ptr::null_mut());
+        let mut tm: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(&t, &mut tm).is_null() {
+            return String::new();
+        }
+        format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

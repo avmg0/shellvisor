@@ -91,6 +91,7 @@ pub const MENU: &[(&str, Cmd)] = &[
     ("Layout: monitor", Cmd::Preset(Preset::Monitor)),
     ("Layout: files", Cmd::Preset(Preset::Files)),
     ("Layout: data", Cmd::Preset(Preset::Data)),
+    ("Layout: focus", Cmd::Preset(Preset::Focus)),
     ("Flow pane", Cmd::ToggleFlow),
     ("New agent", Cmd::NewAgent),
     ("Make this an agent column", Cmd::AttachAgent),
@@ -631,6 +632,12 @@ pub const TOUR: [(&str, &[&str], &str); 4] = [
     ),
 ];
 
+/// Width of focus layout's rail of other panes.
+pub const RAIL: u16 = 6;
+
+/// Cached `git status` per folder: (branch, changed files), when read.
+type GitEntry = (Option<(String, usize)>, Instant);
+
 /// Earlier downloads listed in the activity list.
 pub const PAST_SHOWN: usize = 30;
 
@@ -799,6 +806,12 @@ pub struct App {
     pub mcp: Option<crate::mcpscreen::McpScreen>,
     /// Board 21: reviewing an agent's work.
     pub review: Option<crate::review::Review>,
+    /// Whole-machine CPU and memory for the header.
+    pub usage: crate::osinfo::Usage,
+    /// The header clock's second, last drawn.
+    clock_drawn: String,
+    /// Branch and changed-file count per folder, for the focus strip (read at most every 5 s).
+    git_cache: std::cell::RefCell<HashMap<String, GitEntry>>,
     /// Board 20: the port forwards screen, and the forwards running.
     pub fwd: Option<crate::forwards::FwdScreen>,
     pub forwards: Vec<crate::forwards::Live>,
@@ -926,6 +939,9 @@ pub fn run(opts: Options) -> io::Result<i32> {
         tour: None,
         mcp: None,
         review: None,
+        usage: crate::osinfo::Usage::default(),
+        clock_drawn: String::new(),
+        git_cache: std::cell::RefCell::new(HashMap::new()),
         fwd: None,
         forwards: Vec::new(),
         mcp_scan_at: Instant::now(),
@@ -1130,6 +1146,7 @@ impl App {
                 zoomed: t.zoomed && panes.len() > 1,
                 name: t.name.clone(),
                 arrangement: None,
+                focus_mode: false,
                 root,
             });
         }
@@ -1391,6 +1408,12 @@ impl App {
         match self.view {
             View::Basic => (None, s, None),
             View::Full if s.height < 4 => (None, s, None),
+            // the boards: a header row and the tab strip on top, keys below
+            View::Full if s.height >= 12 => (
+                Some(Rect::new(s.x, s.y, s.width, 2)),
+                Rect::new(s.x, s.y + 2, s.width, s.height - 3),
+                Some(Rect::new(s.x, s.y + s.height - 1, s.width, 1)),
+            ),
             View::Full => (
                 Some(Rect::new(s.x, s.y, s.width, 1)),
                 Rect::new(s.x, s.y + 1, s.width, s.height - 2),
@@ -1399,13 +1422,54 @@ impl App {
         }
     }
 
+    /// Where the panes go: the content area, less the rail in focus layout.
+    pub fn pane_area(&self, content: Rect) -> Rect {
+        if self.tabs[self.active].focus_mode && content.width > 40 {
+            Rect::new(content.x, content.y, content.width - RAIL, content.height)
+        } else {
+            content
+        }
+    }
+
+    /// The git branch of a folder and how many files changed (cached 5 s).
+    pub fn branch_of(&self, cwd: &str) -> Option<(String, usize)> {
+        if let Some((v, at)) = self.git_cache.borrow().get(cwd) {
+            if at.elapsed() < Duration::from_secs(5) {
+                return v.clone();
+            }
+        }
+        let out = std::process::Command::new("git")
+            .args(["-C", cwd, "status", "--porcelain", "--branch"])
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|o| o.status.success());
+        let v = out.map(|o| {
+            let text = String::from_utf8_lossy(&o.stdout).into_owned();
+            let mut lines = text.lines();
+            let head = lines.next().unwrap_or("");
+            let branch = head
+                .trim_start_matches("## ")
+                .split("...")
+                .next()
+                .unwrap_or("")
+                .trim_start_matches("No commits yet on ")
+                .to_string();
+            (branch, lines.count())
+        });
+        self.git_cache
+            .borrow_mut()
+            .insert(cwd.to_string(), (v.clone(), Instant::now()));
+        v
+    }
+
     /// Visible panes: (id, outer rect, inner rect where the terminal is drawn).
     pub fn visible(&self) -> Vec<(PaneId, Rect, Rect)> {
         let (_, content, _) = self.regions();
         match self.view {
             View::Basic => vec![(self.basic_pane(), content, content)],
             View::Full => self.tabs[self.active]
-                .layout(content)
+                .layout(self.pane_area(content))
                 .into_iter()
                 .map(|(id, r)| (id, r, shrink(r)))
                 .collect(),
@@ -1577,6 +1641,25 @@ impl App {
             if let Some((_, at)) = &self.notice {
                 if at.elapsed() >= NOTICE {
                     self.notice = None;
+                    self.dirty = true;
+                }
+            }
+            if self.view == View::Full {
+                let every = if self.low_power {
+                    Duration::from_secs(5)
+                } else {
+                    Duration::from_secs(2)
+                };
+                if self.usage.refresh(every) {
+                    self.dirty = true;
+                }
+                let clock = if self.low_power {
+                    crate::osinfo::clock()
+                } else {
+                    crate::osinfo::clock_secs()
+                };
+                if clock != self.clock_drawn {
+                    self.clock_drawn = clock;
                     self.dirty = true;
                 }
             }
@@ -2093,6 +2176,25 @@ impl App {
             return FRAME.saturating_sub(last_draw.elapsed());
         }
         let mut t = Duration::from_secs(60); // clock in the status bar
+        if self.view == View::Full {
+            // the header's clock (seconds) and CPU / memory
+            let ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_millis() as u64)
+                .unwrap_or(0);
+            let tick = if self.low_power {
+                Duration::from_secs(5)
+            } else {
+                Duration::from_millis(1000 - ms + 5)
+            };
+            t = t.min(tick);
+            let every = if self.low_power {
+                Duration::from_secs(5)
+            } else {
+                Duration::from_secs(2)
+            };
+            t = t.min(self.usage.due_in(every).max(Duration::from_millis(5)));
+        }
         if self.spinning() {
             t = t.min(
                 self.spin_every()
@@ -6627,7 +6729,17 @@ impl App {
             }
         }
         if let Some(bar) = tabbar {
-            if ev.y == bar.y {
+            if bar.height >= 2 && ev.y == bar.y {
+                if ev.is_left_press()
+                    && ev.x > bar.x + bar.width / 2
+                    && !self.activities().is_empty()
+                {
+                    self.acts_list = Some(0);
+                    self.dirty = true;
+                }
+                return Ok(());
+            }
+            if ev.y == bar.y + bar.height - 1 {
                 if ev.is_left_press() {
                     if let Some(i) = ui::tab_at(self, ev.x) {
                         self.switch_tab(i);
@@ -7076,6 +7188,9 @@ impl App {
 
     /// Open (or focus; with `toggle`, close if focused) a tool pane in this tab.
     fn show_tool(&mut self, kind: &str, toggle: bool) -> io::Result<()> {
+        // opening a pane from focus layout's rail leaves focus layout
+        let a = self.active;
+        self.tabs[a].focus_mode = false;
         let tab = self.active;
         let existing = self.tabs[tab]
             .root
@@ -7383,7 +7498,7 @@ impl App {
                         a: leaf(shell),
                         b: Box::new(Node::Split {
                             axis: Axis::Vertical,
-                            ratio: 0.6,
+                            ratio: 0.5,
                             a: leaf(s),
                             b: leaf(fl),
                         }),
@@ -7417,8 +7532,10 @@ impl App {
                     b: leaf(fl),
                 }
             }
+            Preset::Focus => Node::Leaf(shell),
         };
         let t = &mut self.tabs[tab];
+        t.focus_mode = p == Preset::Focus;
         t.root = root;
         t.focus = shell;
         t.zoomed = false;
@@ -7549,6 +7666,7 @@ impl App {
                 self.modal = Modal::Rename(current);
             }
             Cmd::SplitRight | Cmd::SplitDown => {
+                self.tabs[tab].focus_mode = false;
                 let axis = if cmd == Cmd::SplitRight {
                     Axis::Horizontal
                 } else {

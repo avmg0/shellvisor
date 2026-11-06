@@ -381,6 +381,8 @@ pub struct Tab {
     pub name: Option<String>,
     /// Last arrangement applied with F7, so the next press moves on.
     pub arrangement: Option<Arrangement>,
+    /// Focus layout (board 3): one shell, a rail of the other panes, a status strip.
+    pub focus_mode: bool,
 }
 
 impl Tab {
@@ -391,6 +393,7 @@ impl Tab {
             zoomed: false,
             name: None,
             arrangement: None,
+            focus_mode: false,
         }
     }
 

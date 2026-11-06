@@ -319,6 +319,11 @@ impl Pane {
         self.scroll = 0;
     }
 
+    /// The shell's process id.
+    pub fn pid(&self) -> Option<u32> {
+        self.pid
+    }
+
     pub fn screen(&self) -> &vt100::Screen {
         self.parser.screen()
     }
