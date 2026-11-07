@@ -19,6 +19,7 @@ mod cli;
 mod config;
 mod connect;
 mod data;
+mod doctor;
 mod files;
 mod flow;
 mod flowrun;

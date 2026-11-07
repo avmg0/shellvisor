@@ -75,6 +75,12 @@ pub struct Settings {
     pub right_click: String,
     /// When a command fails, a card with its last lines, copy and run again.
     pub fail_card: bool,
+    /// A desktop notification when a long command or an agent finishes (or
+    /// an agent needs you) while you're looking elsewhere.
+    pub notifications: bool,
+    /// Save each shell's scrollback with the session and show it again on
+    /// restore (plain text, on this machine only).
+    pub scrollback_restore: bool,
 }
 
 impl Default for Settings {
@@ -95,6 +101,8 @@ impl Default for Settings {
             mouse: "shellvisor".into(),
             right_click: "menu".into(),
             fail_card: true,
+            notifications: true,
+            scrollback_restore: false,
         }
     }
 }
@@ -179,7 +187,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
-const ROWS: [&str; 15] = [
+const ROWS: [&str; 17] = [
     "Folder colour in the prompt",
     "Folder in the prompt bold",
     "Commands you type",
@@ -195,6 +203,8 @@ const ROWS: [&str; 15] = [
     "Mouse",
     "Right-click",
     "Failed command card",
+    "Desktop notifications",
+    "Restore scrollback",
 ];
 
 /// The settings' names, in order (for the command palette).
@@ -262,6 +272,8 @@ impl Screen {
             12 => s.mouse = cycle(&["shellvisor", "terminal"], &s.mouse, by),
             13 => s.right_click = cycle(&["menu", "paste"], &s.right_click, by),
             14 => s.fail_card = !s.fail_card,
+            15 => s.notifications = !s.notifications,
+            16 => s.scrollback_restore = !s.scrollback_restore,
             _ => {
                 let cur = if s.theme.is_empty() {
                     "config"
@@ -303,6 +315,18 @@ impl Screen {
                 _ => "auto · 256 (no 24-bit from this terminal)".into(),
             },
             14 => on(s.fail_card),
+            15 => if s.notifications {
+                "on · long commands and agents, when you're looking elsewhere"
+            } else {
+                "off"
+            }
+            .to_string(),
+            16 => if s.scrollback_restore {
+                "on · each shell's history comes back with the session"
+            } else {
+                "off · restore brings folders, splits and names back"
+            }
+            .to_string(),
             13 => if s.right_click == "paste" {
                 "paste (like PuTTY) · ctrl+right-click for the menu"
             } else {
@@ -647,10 +671,16 @@ mod tests {
         }
         sc.key(b" ");
         assert!(!sc.s.ls_table);
-        for _ in 0..10 {
+        for _ in 0..20 {
             sc.key(b"\x1b[B");
         }
-        assert_eq!(sc.sel, 14, "stops at the last row");
+        assert_eq!(sc.sel, 16, "stops at the last row");
+        sc.key(b"\r");
+        assert!(sc.s.scrollback_restore);
+        sc.key(b"\x1b[A");
+        sc.key(b"\r");
+        assert!(!sc.s.notifications);
+        sc.key(b"\x1b[A");
         sc.key(b"\r");
         assert!(!sc.s.fail_card);
         sc.key(b"\x1b[A");

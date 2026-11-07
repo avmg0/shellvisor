@@ -218,6 +218,13 @@ Deliverables
 
 - The rest of the boards (done): sync scroll across agent columns (`ctrl+] Y`); an approval policy per dispatch in Plan (`p`: auto · ask · full auto, with `deny:` in team.yaml); Tree indent guides; Columns type-to-jump; Grid card sizes (`+` / `−`); Recent `u` undoes an agent's edit (asks, keeps a copy in the Trash); Preview, Agents and Activity as pane kinds (`sv pane …`, the layout editor); plain `c` / `o` on the finish toast at an empty prompt. A second tool pane now stacks under the first instead of narrowing the shell.
 
+
+## v1.0.8 · after the boards — ✅ done 2026-11-07
+- `sv doctor` (done): versions running and on PATH (old copies named), 24-bit colour of the terminal around Shellvisor, UTF-8, shell hooks, mouse, autostart, F-keys on a Mac, and an Option-as-Alt key test; each with its fix.
+- One-command release (done): `scripts/release.sh X` sets the version, commits, pushes, tags, waits for the Release workflow, updates the Homebrew tap and upgrades.
+- Desktop notifications (done): long commands (≥ 10 s) and agents (finished, failed, needs approval) when you aren't looking — focus reports from the terminal, or the split off screen; Notification Center / notify-send; a setting; muted tabs excluded.
+- Scrollback restore (done, off by default): each shell's last 5000 lines saved every 2 min and on quit (state/scrollback, 0700) and shown again on restore under a marker line.
+
 ---
 
 ## Cross-cutting, every phase

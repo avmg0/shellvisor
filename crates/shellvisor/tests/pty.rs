@@ -86,6 +86,8 @@ impl Session {
         cmd.env("TERM", "xterm-256color");
         cmd.env("SHELL", "/bin/sh");
         cmd.env("SHELLVISOR_STATE_DIR", dir.join("state"));
+        cmd.env("SHELLVISOR_NOTIFY_LOG", dir.join("notify.log"));
+        cmd.env("SHELLVISOR_NOTIFY_AFTER", "1");
         // the first-run tour only where a test asks for it
         if !dir.join("tour").exists() {
             cmd.env("SHELLVISOR_TOUR", "0");
@@ -574,6 +576,39 @@ fn quit_with_running_command_asks() {
 }
 
 // ------------------------------------------------------------------ P1b
+
+#[test]
+fn scrollback_comes_back_with_the_session_when_turned_on() {
+    let dir = scratch("scrollback");
+    std::fs::write(dir.join("config.yaml"), "start_view: full\n").unwrap();
+    std::fs::create_dir_all(dir.join("state")).unwrap();
+    std::fs::write(
+        dir.join("state/settings.yaml"),
+        "scrollback_restore: true\n",
+    )
+    .unwrap();
+    let mut s = Session::launch("bash", dir);
+    s.wait_for("PROMPT>");
+    s.run("echo remember-this-line");
+    s.wait_for("remember-this-line");
+    s.send("\x1bt"); // a second tab, so the session is worth restoring
+    s.wait_until("tab 2", |t| top(t).contains("2 bash"));
+    s.pump(Duration::from_millis(1500));
+    s.send("\x11");
+    assert_eq!(s.wait_exit(), 0);
+    s.keep = true;
+    let dir = s.dir.clone();
+    drop(s);
+    assert!(dir.join("state/scrollback").is_dir());
+    let mut s = Session::launch("bash", dir);
+    s.wait_for("Restore last session");
+    s.wait_for("splits, names and scrollback");
+    s.send("y");
+    s.send("\x1b1");
+    s.wait_until("history back", |t| {
+        t.contains("remember-this-line") && t.contains("restored from the last session")
+    });
+}
 
 #[test]
 fn session_is_restored_after_quitting() {
@@ -1618,6 +1653,29 @@ fn auto_plan_dispatches_stages_then_review_and_merges_from_the_tree() {
     s.pump(Duration::from_millis(300));
     s.send("clear; sv agent log | grep -c 'tests.done'\r");
     s.wait_for("1");
+}
+
+#[test]
+fn long_commands_notify_only_when_you_look_elsewhere() {
+    let mut s = Session::start_full("notify");
+    s.wait_for("PROMPT>");
+    let log = s.dir.join("notify.log");
+    // looking at it: no notification
+    s.run("sleep 1.2; echo one-done");
+    s.wait_for("one-done");
+    s.pump(Duration::from_millis(300));
+    assert!(!log.exists(), "no notification while you watch");
+    // the terminal goes to the background (focus out), then it finishes
+    s.send("\x1b[O");
+    s.run("sleep 1.2; echo two-done");
+    s.wait_for("two-done");
+    s.pump(Duration::from_millis(300));
+    let text = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        text.contains("✔ sleep 1.2; echo two-done | tab 1 · took"),
+        "{text}"
+    );
+    s.send("\x1b[I");
 }
 
 #[test]

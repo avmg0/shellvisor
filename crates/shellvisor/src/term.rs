@@ -174,7 +174,7 @@ impl InputModes {
 
     /// Sequences that turn every mode off (used on exit).
     pub fn reset() -> &'static [u8] {
-        b"\x1b>\x1b[?1l\x1b[?2004l\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l"
+        b"\x1b>\x1b[?1l\x1b[?2004l\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1004l"
     }
 }
 

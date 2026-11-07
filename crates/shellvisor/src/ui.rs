@@ -2962,7 +2962,15 @@ fn draw_restore(
     let picked = checked.iter().filter(|c| **c).count();
     lines.push(Line::raw(""));
     lines.push(Line::styled(
-        " Restores folder, shell, splits and names. Commands are not re-run.",
+        if saved
+            .tabs
+            .iter()
+            .any(|t| t.scrollback.iter().any(|s| !s.is_empty()))
+        {
+            " Restores folder, shell, splits, names and scrollback. Commands are not re-run."
+        } else {
+            " Restores folder, shell, splits and names. Commands are not re-run."
+        },
         Style::default().fg(DIM),
     ));
     lines.push(Line::raw(""));

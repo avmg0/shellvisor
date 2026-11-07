@@ -928,12 +928,16 @@ pub struct App {
     pub basic_since: Option<Instant>,
     /// Board 5: scrolling one agent column scrolls them all.
     pub sync_scroll: bool,
+    /// The terminal window has focus (focus reports, ESC [ I / ESC [ O).
+    pub term_focused: bool,
     quit: Option<i32>,
     dirty: bool,
     session_dirty: bool,
     /// Don't overwrite the saved session while we're still asking about it.
     session_locked: bool,
     last_save: Instant,
+    /// When scrollback was last written (setting "Restore scrollback").
+    scrollback_at: Instant,
 }
 
 static RESTORED: AtomicBool = AtomicBool::new(false);
@@ -1041,11 +1045,13 @@ pub fn run(opts: Options) -> io::Result<i32> {
         option_hint_shown: false,
         basic_since: None,
         sync_scroll: false,
+        term_focused: true,
         quit: None,
         dirty: true,
         session_dirty: false,
         session_locked: false,
         last_save: Instant::now(),
+        scrollback_at: Instant::now(),
     };
     crate::loading::set_style(&app.ui.spinner);
     crate::loading::set_bar(app.ui.progress_bar);
@@ -1146,6 +1152,9 @@ pub fn run(opts: Options) -> io::Result<i32> {
     }
     let _ = std::fs::remove_file(&app.opts.bus_path);
     app.save_session();
+    if !app.session_locked {
+        app.save_scrollback();
+    }
     for p in app.panes.values_mut() {
         p.pane.kill();
     }
@@ -1159,6 +1168,8 @@ pub fn run(opts: Options) -> io::Result<i32> {
 fn fresh_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
     let mut out = io::stdout();
     execute!(out, terminal::Clear(terminal::ClearType::All))?;
+    // focus in / out reports, so notifications know when you look elsewhere
+    out.write_all(b"\x1b[?1004h")?;
     Terminal::new(CrosstermBackend::new(out))
 }
 
@@ -1217,6 +1228,26 @@ impl App {
         for t in &saved.tabs {
             let root = t.layout.rebuild(&mut |l: &Leaf| self.new_leaf(l))?;
             let panes = root.panes();
+            // the history each shell showed last time, above its new prompt
+            let dir = crate::paths::state_dir().join("scrollback");
+            for (id, name) in panes.iter().zip(&t.scrollback) {
+                if name.is_empty() || name.contains('/') {
+                    continue;
+                }
+                let Ok(text) = std::fs::read_to_string(dir.join(name)) else {
+                    continue;
+                };
+                if text.trim().is_empty() {
+                    continue;
+                }
+                if let Some(p) = self.panes.get_mut(id) {
+                    let mut bytes = text.replace('\n', "\r\n").into_bytes();
+                    bytes.extend_from_slice(
+                        "\r\n\x1b[2m── restored from the last session ──\x1b[0m\r\n".as_bytes(),
+                    );
+                    let _ = p.pane.feed(&bytes);
+                }
+            }
             tabs.push(Tab {
                 focus: panes[t.focus.min(panes.len() - 1)],
                 zoomed: t.zoomed && panes.len() > 1,
@@ -1281,6 +1312,21 @@ impl App {
                     zoomed: t.zoomed,
                     pinned: t.pinned,
                     muted: t.muted,
+                    scrollback: if self.ui.scrollback_restore {
+                        t.root
+                            .panes()
+                            .iter()
+                            .map(|p| {
+                                if self.panes.get(p).is_some_and(|q| q.agent.is_none()) {
+                                    format!("pane-{p}.txt")
+                                } else {
+                                    String::new()
+                                }
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    },
                     focus: t
                         .root
                         .panes()
@@ -1294,6 +1340,49 @@ impl App {
     }
 
     /// Write the session now (or delete it if no tabs are left).
+    /// Write each shell's scrollback (plain text, last 5000 lines) for the
+    /// next start (setting "Restore scrollback"); every 2 min and on exit.
+    fn save_scrollback(&mut self) {
+        self.scrollback_at = Instant::now();
+        let dir = crate::paths::state_dir().join("scrollback");
+        if !self.ui.scrollback_restore {
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        if std::fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        }
+        let mut keep = Vec::new();
+        for (id, p) in &self.panes {
+            if p.agent.is_some() {
+                continue;
+            }
+            let mut lines = p.pane.screen().all_lines();
+            while lines.last().is_some_and(|l| l.trim().is_empty()) {
+                lines.pop();
+            }
+            // the prompt the shell is showing now comes back by itself
+            lines.pop();
+            let lines = &lines[lines.len().saturating_sub(5000)..];
+            let name = format!("pane-{id}.txt");
+            let _ = std::fs::write(dir.join(&name), lines.join("\n"));
+            keep.push(name);
+        }
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for e in rd.flatten() {
+                let n = e.file_name().to_string_lossy().into_owned();
+                if !keep.contains(&n) {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
+    }
+
     fn save_session(&mut self) {
         self.session_dirty = false;
         self.last_save = Instant::now();
@@ -1621,6 +1710,55 @@ impl App {
         self.session_dirty = true;
     }
 
+    /// A desktop notification (setting "Desktop notifications"), only when
+    /// you're not looking: the terminal is in the background, or `pane`
+    /// isn't on screen. macOS: Notification Center; Linux: notify-send.
+    fn notify(&self, pane: PaneId, title: &str, body: &str) {
+        if !self.ui.notifications {
+            return;
+        }
+        let seen = self.term_focused && self.visible().iter().any(|(v, _, _)| *v == pane);
+        if seen || self.tab_of(pane).is_some_and(|t| self.tabs[t].muted) {
+            return;
+        }
+        let (title, body) = (title.to_string(), body.to_string());
+        // tests (and the curious) can read them from a file instead
+        if let Some(path) = std::env::var_os("SHELLVISOR_NOTIFY_LOG") {
+            use std::io::Write as _;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
+                let _ = writeln!(f, "{title} | {body}");
+            }
+            return;
+        }
+        let _ = spawn_thread("notify".into(), move || {
+            let q = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+            if cfg!(target_os = "macos") {
+                let script = format!(
+                    "display notification \"{}\" with title \"Shellvisor\" subtitle \"{}\"",
+                    q(&body),
+                    q(&title)
+                );
+                let _ = std::process::Command::new("osascript")
+                    .args(["-e", &script])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            } else if crate::shell::find_in_path("notify-send").is_some() {
+                let _ = std::process::Command::new("notify-send")
+                    .args(["-a", "Shellvisor", &title, &body])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+        });
+    }
+
     fn notice(&mut self, msg: impl Into<String>) {
         self.notice = Some((msg.into(), Instant::now()));
         self.dirty = true;
@@ -1795,6 +1933,12 @@ impl App {
             }
             if self.spinning() && last_draw.elapsed() >= self.spin_every() {
                 self.dirty = true;
+            }
+            if self.ui.scrollback_restore
+                && !self.session_locked
+                && self.scrollback_at.elapsed() >= Duration::from_secs(120)
+            {
+                self.save_scrollback();
             }
             if self.session_dirty && self.last_save.elapsed() >= SAVE_EVERY {
                 self.save_session();
@@ -2553,6 +2697,13 @@ impl App {
                         a.status = agents::Status::Exited(code);
                         (a.name.clone(), a.files_summary(), a.branch.clone())
                     });
+                // a long command (10 s or more) gets a desktop notification
+                let min = std::env::var("SHELLVISOR_NOTIFY_AFTER")
+                    .ok()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(10);
+                let notify_cmd = (p.agent.is_none() && took >= min && !p.command.is_empty())
+                    .then(|| p.command.clone());
                 let first = p.command.split_whitespace().next().unwrap_or("");
                 let dropped = (first == "ssh" || first == "mosh") && code == Some(255);
                 // a failed command: its last lines, for the card
@@ -2605,6 +2756,19 @@ impl App {
                 self.dirty = true;
                 if dropped {
                     self.notice("the ssh connection closed · ctrl+] R (or right-click) reconnects");
+                }
+                if let Some(cmd) = notify_cmd {
+                    let short: String = cmd.chars().take(60).collect();
+                    let tab = self.tab_of(id).map(|t| t + 1).unwrap_or(0);
+                    let title = match code {
+                        Some(0) | None => format!("✔ {short}"),
+                        Some(c) => format!("✖ {short} (exit {c})"),
+                    };
+                    self.notify(
+                        id,
+                        &title,
+                        &format!("tab {tab} · took {}", ui::fmt_secs(took)),
+                    );
                 }
                 // a muted tab (board 12 tab menu) shows no cards or toasts
                 let muted = self.tab_of(id).is_some_and(|t| self.tabs[t].muted);
@@ -2763,6 +2927,11 @@ impl App {
         }
         let mut forward: Vec<u8> = Vec::new();
         for key in keys::tokenize(bytes) {
+            // the terminal window gained or lost focus
+            if key == b"\x1b[I" || key == b"\x1b[O" {
+                self.term_focused = key == b"\x1b[I";
+                continue;
+            }
             if self.fwd.is_some() && self.modal == Modal::None && key != [0x1d] {
                 self.flush_forward(&mut forward)?;
                 let snap = self.fwd_snap();
@@ -5201,6 +5370,35 @@ impl App {
                     events.push((a.name.clone(), "exited"));
                 }
                 _ => {}
+            }
+        }
+        for (name, ev) in &events {
+            if matches!(*ev, "done" | "needs_approval" | "failed") {
+                if let Some(pane) = self.agent_pane(name) {
+                    let (title, body) = match *ev {
+                        "needs_approval" => {
+                            let what = self
+                                .panes
+                                .get(&pane)
+                                .and_then(|p| p.agent.as_ref())
+                                .and_then(|a| a.approval())
+                                .map(|ap| ap.what.clone())
+                                .unwrap_or_default();
+                            (format!("⚑ {name} needs you"), what)
+                        }
+                        "failed" => (format!("✖ {name} stopped with an error"), String::new()),
+                        _ => {
+                            let files = self
+                                .panes
+                                .get(&pane)
+                                .and_then(|p| p.agent.as_ref())
+                                .map(|a| a.files_summary())
+                                .unwrap_or_default();
+                            (format!("✔ {name} finished"), files)
+                        }
+                    };
+                    self.notify(pane, &title, &body);
+                }
             }
         }
         for (name, ev) in events {

@@ -33,6 +33,10 @@ pub struct SavedTab {
     pub pinned: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub muted: bool,
+    /// Saved scrollback per split, in reading order ("" for none): file
+    /// names in the state folder's `scrollback/` (setting "Restore scrollback").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scrollback: Vec<String>,
     pub layout: SavedNode,
 }
 
@@ -262,6 +266,7 @@ mod tests {
                     focus: 2,
                     pinned: true,
                     muted: false,
+                    scrollback: Vec::new(),
                     layout: SavedNode::capture(&sample_tree(), &|id| Leaf {
                         cwd: format!("/p/{id}"),
                         tool: (id == 2).then(|| "system".to_string()),
@@ -273,6 +278,7 @@ mod tests {
                     focus: 0,
                     pinned: false,
                     muted: true,
+                    scrollback: Vec::new(),
                     layout: SavedNode::Pane {
                         cwd: "/tmp".into(),
                         tool: None,
@@ -321,6 +327,7 @@ mod tests {
                 focus: 0,
                 pinned: false,
                 muted: false,
+                scrollback: Vec::new(),
                 layout: SavedNode::Pane {
                     cwd: "/home/a".into(),
                     tool: None,

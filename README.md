@@ -63,7 +63,8 @@ shellvisor --shell bash    # or pick: zsh, bash, or a full path
 | `ctrl+]` then a letter | leader key — every shortcut, in every terminal (`ctrl+] ?` lists them) |
 | mouse | click a tab or split to focus it · drag the border between splits to resize · wheel scrolls back |
 | `ctrl+q` · `sv exit` | quit Shellvisor |
-| `sv status` | is Shellvisor running here? which shell? |
+| `sv status` | is Shellvisor running here? which shell? which version is running? |
+| `sv doctor` | checks this terminal: versions (and old copies on PATH), 24-bit colour, UTF-8, shell hooks, mouse, autostart, and — press alt+1 when asked — Option-as-Alt; says how to fix each (`--no-keys` skips the key test) |
 | `sv power on\|off\|auto` | low-power mode (auto: on while on battery) |
 | `sv theme light\|dark\|auto` | Shellvisor's own colours for a light or dark terminal |
 
@@ -71,7 +72,9 @@ shellvisor --shell bash    # or pick: zsh, bash, or a full path
 
 The top row says where you are and how the machine is doing: the folder, shell and pid on the left; downloads, agents, approvals waiting, live / low power, CPU, memory and a clock on the right. Under it, the tabs: each says what it's doing — a spinner while a command runs (with a download's %), `✔` when a long one finished, `✖ 1` when one failed, `?` when a command asks for a password or yes / no, `•` new output, `!` a bell, `◆` an agent. Pinned tabs are just an icon and stay at the left; muted tabs show no marks or toasts. A tab kept in the background leaves the bar for a `◌ 1 in background` chip (click it, or `alt+N`, to bring it back). The bottom row lists the keys for the pane you're in. `sv layout focus` is one shell with a rail of the other panes and a strip for the folder, branch, job, CPU and memory.
 
-On start, *Restore last session?* lists the saved tabs with a tick each (ssh panes start unticked): `space` ticks, ⏎ restores them, `n` starts fresh.
+On start, *Restore last session?* lists the saved tabs with a tick each (ssh panes start unticked): `space` ticks, ⏎ restores them, `n` starts fresh. With *Restore scrollback* on in settings (off by default), each shell's history comes back too, above a `restored from the last session` line; it's kept as plain text in Shellvisor's state folder (`scrollback/`, readable only by you) and written every 2 minutes and on quit.
+
+**Desktop notifications** (settings, on by default): when a command that ran 10 s or more finishes, or an agent finishes, fails or needs your approval, and you aren't looking at it — the terminal window is in the background, or that split isn't on screen — Shellvisor sends a notification (Notification Center on a Mac, `notify-send` on Linux). Muted tabs don't.
 
 ### Files pane
 

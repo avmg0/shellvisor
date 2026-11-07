@@ -794,7 +794,13 @@ pub fn is_option_char(key: &[u8]) -> bool {
 
 /// How to switch Option to Alt in the user's terminal.
 pub fn option_fix_hint() -> &'static str {
-    match std::env::var("TERM_PROGRAM").as_deref().unwrap_or("") {
+    // inside Shellvisor, TERM_PROGRAM is ours: ask about the terminal around it
+    let term = std::env::var("SHELLVISOR_OUTER_TERM")
+        .ok()
+        .filter(|t| !t.is_empty())
+        .or_else(|| std::env::var("TERM_PROGRAM").ok())
+        .unwrap_or_default();
+    match term.as_str() {
         "Apple_Terminal" => {
             "Terminal → Settings → Profiles → Keyboard → tick “Use Option as Meta key”"
         }

@@ -40,6 +40,7 @@ usage:
   sv agents    the agents as a table · sv connect   CLIs, logins, MCP servers, ssh hosts
   sv data      list the data commands (ls, ps, open, where, sort-by, to csv…)
   sv status    is Shellvisor running in this terminal?
+  sv doctor    check this terminal: colours, UTF-8, hooks, Option-as-Alt, old copies (--no-keys)
   sv version   print the version
   sv help      this help
 ";
@@ -189,6 +190,7 @@ pub fn run(args: &[String]) -> i32 {
             send_seq(request_sequence(&req))
         }
         "autostart" => crate::autostart::run(&args[1..]),
+        "doctor" => crate::doctor::run(&args[1..]),
         "mcp" => {
             if !inside() {
                 // outside Shellvisor: list what's configured

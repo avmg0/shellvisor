@@ -1,5 +1,11 @@
 # Releasing Shellvisor
 
+**One command:** `scripts/release.sh 1.0.8` sets the version, commits, pushes, tags,
+waits for the Release workflow, updates the Homebrew tap (`../homebrew-tap`, or
+`$SV_TAP`) and runs `brew upgrade` (`--no-brew` skips that). It stops at the first
+problem: not on main, uncommitted changes, an existing tag, no tap checkout, or no
+release after 40 minutes. The steps it runs, by hand:
+
 1. Update `version` in the root `Cargo.toml` (`[workspace.package]`), run `cargo build` so `Cargo.lock` follows, and commit.
 2. Tag and push: `git tag v1.0.0 && git push origin main v1.0.0`.
 3. The **Release** workflow builds macOS (arm64 and x86_64, both on one Mac runner) and Linux (x86_64, arm64) binaries, packs each as `shellvisor-v1.0.0-<target>.tar.gz` with a `.sha256`, writes `SHA256SUMS`, attaches a signed build-provenance attestation to every archive (Sigstore, via GitHub), and publishes a GitHub release with generated notes.
