@@ -11,7 +11,8 @@
 #   3. pushes main, then an annotated tag vX and pushes it
 #   4. waits for the Release workflow's SHA256SUMS (up to 40 min)
 #   5. writes the formula in ../homebrew-tap (or $SV_TAP), commits, pushes
-#   6. brew update && brew upgrade avmg0/tap/shellvisor
+#   6. the AUR package, when ../aur-shellvisor-bin (or $SV_AUR) is checked out
+#   7. brew update && brew upgrade avmg0/tap/shellvisor
 set -eu
 v="${1:?usage: $0 <version, e.g. 1.0.8> [--no-brew]}"
 brew=1
@@ -65,6 +66,13 @@ echo
 say "Homebrew formula"
 "$here/scripts/brew-formula.sh" "$v" "$tap/Formula/shellvisor.rb"
 (cd "$tap" && git add Formula/shellvisor.rb && git commit -q -m "shellvisor $v" && git push -q)
+
+aur="${SV_AUR:-$here/../aur-shellvisor-bin}"
+if [ -d "$aur/.git" ]; then
+  say "AUR package"
+  "$here/scripts/aur-pkgbuild.sh" "$v" "$aur"
+  (cd "$aur" && git add PKGBUILD .SRCINFO && git commit -q -m "shellvisor-bin $v" && git push -q)
+fi
 
 if [ "$brew" = 1 ] && command -v brew >/dev/null; then
   say "brew upgrade"

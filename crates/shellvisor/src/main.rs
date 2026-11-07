@@ -39,6 +39,7 @@ mod palette;
 mod paths;
 mod remote;
 mod review;
+mod selftest;
 mod serial;
 mod session;
 mod sessionlog;

@@ -12,6 +12,28 @@ release after 40 minutes. The steps it runs, by hand:
 4. Homebrew: in the tap repository `github.com/avmg0/homebrew-tap`, run
    `scripts/brew-formula.sh 1.0.0 ../homebrew-tap/Formula/shellvisor.rb` (from this repo) and commit there. It refuses to write anything until the release is published. Users install with `brew install avmg0/tap/shellvisor`.
 
+5. Debian / Ubuntu: the Release workflow also builds `shellvisor_<version>_amd64.deb` and `_arm64.deb` (`scripts/package-deb.sh`) and lists them in `SHA256SUMS`.
+6. AUR (`shellvisor-bin`): `scripts/aur-pkgbuild.sh <version> ../aur-shellvisor-bin` writes `PKGBUILD` and `.SRCINFO` from the release's checksums into a checkout of `ssh://aur@aur.archlinux.org/shellvisor-bin.git`; commit and push there. The first time, create the package by pushing to that URL from an AUR account with your SSH key added. `scripts/release.sh` does this step too when `../aur-shellvisor-bin` (or `$SV_AUR`) exists.
+
+## Hands-on pass before a release
+
+CI builds and tests on Linux and macOS, but not how it feels. On a Mac, in each of
+Terminal.app, iTerm2 and Ghostty:
+
+1. `sv selftest` — every shell ✔ (bash 3.2, your zsh with its plugins, your login shell).
+2. `sv doctor` — no ✖; answer the Option-as-Alt key test.
+3. Start `shellvisor`: the prompt looks like your normal one; `alt+t`, `alt+\`, `alt+-`, `F2`, `F3`, `F9` work; right-click opens the menu and stays open.
+4. Run `sleep 12` and switch to another app: one notification arrives when it ends. Run it again while looking: none.
+5. `vim`, `less`, `fzf` (or `ctrl+r`), `ssh` to some host, mouse scrolling, copy with the mouse.
+6. Quit with `ctrl+q`, start again: the tabs come back.
+
+## README pictures
+
+`docs/images/` holds the GIF and screenshots. They are made in a throwaway demo
+account (home `/home/johnsmith`, prompt `john@mbp`, git author John Smith
+<john@example.com>) so no real name, user name or host name shows. Remake them the
+same way, never from a personal machine's session.
+
 ## Checking a download
 
 ```sh

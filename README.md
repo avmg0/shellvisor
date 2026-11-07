@@ -2,6 +2,8 @@
 
 **Your real shell, plus a workspace around it — inside the terminal you already use.**
 
+![Shellvisor: a bash tab with an `ls` table, then the files pane following the shell and previewing a file](docs/images/demo.gif)
+
 Shellvisor is a full-screen terminal app (like `tmux`, `htop` or `vim`) that runs your own zsh or bash in tabs and splits, and — as it grows — adds panes for files, live system stats, a data-flow view of your pipelines, and coding agents working side by side. Every command, alias and full-screen program you use today keeps working unchanged.
 
 > **Status: early development (P0–P4 of 7 done).**
@@ -23,6 +25,10 @@ curl -fsSL https://raw.githubusercontent.com/avmg0/shellvisor/main/scripts/insta
 cargo install --git https://github.com/avmg0/shellvisor shellvisor                           # or: build it (Rust 1.85+)
 ```
 
+**Debian / Ubuntu** (x86_64 and arm64; glibc 2.39 or newer, e.g. Ubuntu 24.04, Debian 13): download `shellvisor_<version>_amd64.deb` (or `_arm64.deb`) from the [latest release](https://github.com/avmg0/shellvisor/releases/latest) and `sudo apt install ./shellvisor_*_amd64.deb`.
+
+**Arch Linux:** the AUR package `shellvisor-bin` (`yay -S shellvisor-bin`, or `git clone https://aur.archlinux.org/shellvisor-bin.git && cd shellvisor-bin && makepkg -si`).
+
 Then run `shellvisor`. Inside it, `sv` is always available; Homebrew and the install script also put `sv` next to `shellvisor` so `sv on` works from a plain terminal (after `cargo install`, link it once: `ln -s "$(command -v shellvisor)" ~/.cargo/bin/sv`).
 
 `sv autostart on` starts Shellvisor in every new terminal window (it adds a short, marked block to `~/.zshrc` or `~/.bashrc`; it skips tmux, SSH sessions and editor terminals, and quitting Shellvisor leaves you in your normal shell). `sv autostart off` removes it.
@@ -30,6 +36,8 @@ Then run `shellvisor`. Inside it, `sv` is always available; Homebrew and the ins
 Release archives are checksummed and carry a signed build-provenance attestation — see [docs/RELEASING.md](docs/RELEASING.md).
 
 ## Use
+
+![A shell and the files pane side by side: git log, an ls table, and the folder tree with changed files marked](docs/images/hero.png)
 
 ```sh
 shellvisor                 # start with your login shell
@@ -65,6 +73,7 @@ shellvisor --shell bash    # or pick: zsh, bash, or a full path
 | `ctrl+q` · `sv exit` | quit Shellvisor |
 | `sv status` | is Shellvisor running here? which shell? which version is running? |
 | `sv doctor` | checks this terminal: versions (and old copies on PATH), 24-bit colour, UTF-8, shell hooks, mouse, autostart, and — press alt+1 when asked — Option-as-Alt; says how to fix each (`--no-keys` skips the key test) |
+| `sv selftest [shell…]` | starts your shells (on macOS also the built-in bash 3.2) the way Shellvisor does, with the hooks and your own rc files, out of sight, and checks the prompt and how long it takes, `cd` tracking, exit codes, the command text and running/finished; paste the output into an issue if something fails |
 | `sv power on\|off\|auto` | low-power mode (auto: on while on battery) |
 | `sv theme light\|dark\|auto` | Shellvisor's own colours for a light or dark terminal |
 
@@ -185,6 +194,10 @@ sv flow 'cat access.log | grep " 500 " | cut -d" " -f7 | sort | uniq -c | sort -
 runs the pipeline with a meter between every stage (`sv flow save errors '…'` saves it, `sv flow errors` runs it again, `sv flow list`, `sv flow rm errors`) — lines and bytes in and out, % kept, rate, the stage holding everything up (◀ slowest), each stage's errors and the last lines of output — and prints a summary at the end. The **Flow pane** (`F8`, or `sv layout data`; `F5` to zoom) shows it live as on the design board: a card per stage (status, in / out / rate / kept, a sparkline, its latest line) with arrows showing what each keeps, a throughput chart between stages over the last 30 s, the slowest stage and why, the output, and stderr from every stage, tagged; narrow panes get a compact table; when nothing is metered it shows the job your shell is running right now: its processes, CPU, memory, read/write rates and pipes (rates and pipes on Linux).
 
 ## Agents
+
+![The agent board: three agents in their own git worktrees, one waiting for approval, and the message bus below](docs/images/agents.png)
+
+<sub>The agents in this screenshot are a scripted stand-in; any CLI agent fills the columns the same way.</sub>
 
 ```sh
 sv agent new claude --name api 'add a POST /alerts endpoint'   # or codex, gemini, aider

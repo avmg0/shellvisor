@@ -41,6 +41,7 @@ usage:
   sv data      list the data commands (ls, ps, open, where, sort-by, to csv…)
   sv status    is Shellvisor running in this terminal?
   sv doctor    check this terminal: colours, UTF-8, hooks, Option-as-Alt, old copies (--no-keys)
+  sv selftest  start your shells with the hooks and your rc files, check prompt, cd, exit codes
   sv version   print the version
   sv help      this help
 ";
@@ -191,6 +192,7 @@ pub fn run(args: &[String]) -> i32 {
         }
         "autostart" => crate::autostart::run(&args[1..]),
         "doctor" => crate::doctor::run(&args[1..]),
+        "selftest" => crate::selftest::run(&args[1..]),
         "mcp" => {
             if !inside() {
                 // outside Shellvisor: list what's configured

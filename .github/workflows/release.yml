@@ -75,14 +75,30 @@ jobs:
             cp target/$t/release/shellvisor LICENSE NOTICE README.md "dist/$NAME/"
             tar -C dist -czf "dist/$NAME.tar.gz" "$NAME"
             (cd dist && shasum -a 256 "$NAME.tar.gz" > "$NAME.tar.gz.sha256")
+            # Debian / Ubuntu package next to the archive
+            case "$t" in
+              x86_64-unknown-linux-gnu) ARCH=amd64 ;;
+              aarch64-unknown-linux-gnu) ARCH=arm64 ;;
+              *) ARCH= ;;
+            esac
+            if [ -n "$ARCH" ]; then
+              DEB=$(scripts/package-deb.sh "${GITHUB_REF_NAME#v}" "target/$t/release/shellvisor" "$ARCH" dist)
+              (cd dist && shasum -a 256 "$(basename "$DEB")" > "$(basename "$DEB").sha256")
+            fi
           done
       - uses: actions/attest-build-provenance@v3
         with:
           subject-path: dist/*.tar.gz
+      - uses: actions/attest-build-provenance@v3
+        if: runner.os == 'Linux'
+        with:
+          subject-path: dist/*.deb
       - uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.name }}
-          path: dist/*.tar.gz*
+          path: |
+            dist/*.tar.gz*
+            dist/*.deb*
 
   release:
     needs: build
@@ -98,5 +114,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/SHA256SUMS \
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.deb dist/SHA256SUMS \
             --repo "$GITHUB_REPOSITORY" --title "Shellvisor $GITHUB_REF_NAME" --generate-notes

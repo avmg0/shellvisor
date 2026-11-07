@@ -1,0 +1,26 @@
+# Template for the AUR package `shellvisor-bin` (prebuilt release binaries).
+# scripts/aur-pkgbuild.sh <version> <out dir> fills in the version and
+# checksums from the release's SHA256SUMS and writes PKGBUILD + .SRCINFO.
+pkgname=shellvisor-bin
+pkgver=VERSION
+pkgrel=1
+pkgdesc="Multi-pane terminal workspace: your real shell plus files, system, data flow and coding agents"
+arch=('x86_64' 'aarch64')
+url="https://github.com/avmg0/shellvisor"
+license=('Apache-2.0')
+depends=('glibc')
+provides=('shellvisor')
+conflicts=('shellvisor')
+source_x86_64=("https://github.com/avmg0/shellvisor/releases/download/v${pkgver}/shellvisor-v${pkgver}-x86_64-unknown-linux-gnu.tar.gz")
+source_aarch64=("https://github.com/avmg0/shellvisor/releases/download/v${pkgver}/shellvisor-v${pkgver}-aarch64-unknown-linux-gnu.tar.gz")
+sha256sums_x86_64=('SHA_X86_64')
+sha256sums_aarch64=('SHA_AARCH64')
+
+package() {
+  cd "shellvisor-v${pkgver}-${CARCH}-unknown-linux-gnu"
+  install -Dm755 shellvisor "$pkgdir/usr/bin/shellvisor"
+  ln -s shellvisor "$pkgdir/usr/bin/sv"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/shellvisor/README.md"
+  install -Dm644 NOTICE "$pkgdir/usr/share/doc/shellvisor/NOTICE"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/shellvisor-bin/LICENSE"
+}

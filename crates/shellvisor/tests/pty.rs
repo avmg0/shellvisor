@@ -384,6 +384,36 @@ fn sv_outside_shellvisor() {
     assert_eq!(out.status.code(), Some(1));
 }
 
+#[test]
+fn selftest_checks_bash_and_zsh_with_a_fresh_home() {
+    let home = std::env::temp_dir().join(format!("sv-selftest-{}", std::process::id()));
+    std::fs::create_dir_all(&home).unwrap();
+    for shell in ["bash", "zsh"] {
+        if std::process::Command::new(shell)
+            .arg("-c")
+            .arg("true")
+            .status()
+            .is_err()
+        {
+            continue;
+        }
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_shellvisor"))
+            .args(["sv", "selftest", shell])
+            .env("HOME", &home)
+            .env("SHELLVISOR_STATE_DIR", home.join("state"))
+            .env_remove("SHELLVISOR")
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "{shell}: {text}");
+        assert!(
+            text.contains("cd is followed") && text.contains("all good"),
+            "{text}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&home);
+}
+
 // ------------------------------------------------------------------ P1a
 
 impl Session {
