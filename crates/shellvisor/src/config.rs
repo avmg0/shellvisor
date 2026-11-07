@@ -71,6 +71,10 @@ pub struct AgentsConfig {
     /// Command that turns a goal into a plan (prompt on stdin, JSON out).
     /// Default: `claude -p`, `codex exec -` or `gemini`, whichever is installed.
     pub planner: Option<String>,
+    /// Record each agent for `sv agent replay` (kept on this computer).
+    pub replay: bool,
+    /// Test command for `sv agent queue` (default: found from the project).
+    pub test: Option<String>,
 }
 
 /// `agents.limits` — how big agent trees may grow.
@@ -110,6 +114,8 @@ impl Default for AgentsConfig {
             approvals: HashMap::new(),
             limits: LimitsConfig::default(),
             planner: None,
+            replay: true,
+            test: None,
         }
     }
 }

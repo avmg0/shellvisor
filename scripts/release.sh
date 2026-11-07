@@ -12,7 +12,9 @@
 #   4. waits for the Release workflow's SHA256SUMS (up to 40 min)
 #   5. writes the formula in ../homebrew-tap (or $SV_TAP), commits, pushes
 #   6. the AUR package, when ../aur-shellvisor-bin (or $SV_AUR) is checked out
-#   7. brew update && brew upgrade avmg0/tap/shellvisor
+#   7. adds the release's bench.json to docs/bench/history.json, redraws
+#      docs/images/bench.svg, commits "Benchmarks X" and pushes main
+#   8. brew update && brew upgrade avmg0/tap/shellvisor
 set -eu
 v="${1:?usage: $0 <version, e.g. 1.0.8> [--no-brew]}"
 brew=1
@@ -72,6 +74,15 @@ if [ -d "$aur/.git" ]; then
   say "AUR package"
   "$here/scripts/aur-pkgbuild.sh" "$v" "$aur"
   (cd "$aur" && git add PKGBUILD .SRCINFO && git commit -q -m "shellvisor-bin $v" && git push -q)
+fi
+
+bench="https://github.com/avmg0/shellvisor/releases/download/v$v/bench.json"
+if command -v python3 >/dev/null && curl -fsSL -o "$here/.bench-$v.json" "$bench" 2>/dev/null; then
+  say "benchmark chart"
+  python3 "$here/scripts/bench-history.py" add "$here/.bench-$v.json" >/dev/null
+  rm -f "$here/.bench-$v.json"
+  git add docs/bench/history.json docs/images/bench.svg
+  git commit -q -m "Benchmarks $v" && git push -q origin main
 fi
 
 if [ "$brew" = 1 ] && command -v brew >/dev/null; then

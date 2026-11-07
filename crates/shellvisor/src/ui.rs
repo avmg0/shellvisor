@@ -244,6 +244,7 @@ fn draw_all(f: &mut Frame, app: &App) {
                     Tool::Flow(_) => ("toggle_flow", "FLOW"),
                     Tool::Remote(_) => ("", "REMOTE"),
                     Tool::Info(i) => ("info", i.kind.title()),
+                    Tool::Svc(sv) => ("info", sv.kind.title()),
                 };
                 let key = key_label(app, action);
                 let mut title = if action == "info" {
@@ -270,6 +271,14 @@ fn draw_all(f: &mut Frame, app: &App) {
                     r.render(inner, f.buffer_mut(), folder, is_focus)
                 }
                 Tool::Info(i) => draw_info(f, app, id, i, inner, is_focus),
+                Tool::Svc(sv) => {
+                    let pids = if sv.kind == crate::svc::Kind::Ports {
+                        app.shell_pids()
+                    } else {
+                        Default::default()
+                    };
+                    sv.render(inner, f.buffer_mut(), is_focus, &pids)
+                }
             }
             continue;
         }
@@ -1395,6 +1404,12 @@ fn draw_keys(f: &mut Frame, app: &App, r: Rect) {
         }
     };
     let keys: Vec<(String, &str)> = match app.tools.get(&target) {
+        Some(Tool::Svc(sv)) => sv
+            .kind
+            .keys()
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
         Some(Tool::Info(i)) => match i.kind {
             crate::infopane::InfoKind::Preview => vec![
                 ("↑↓".into(), "Scroll"),
@@ -1744,7 +1759,7 @@ fn draw_help(f: &mut Frame, app: &App) {
 fn draw_new_agent(f: &mut Frame, app: &App, form: &NewAgentForm) {
     // board 8: CLI cards, two columns of fields, the first instruction,
     // approvals and limits, a detected CLI to attach, Cancel / Start agent
-    let h = 31u16;
+    let h = 33u16;
     let w = 100u16.min(app.screen.width.saturating_sub(2));
     if app.screen.height < h + 2 || w < 70 {
         return draw_new_agent_compact(f, app, form);
@@ -2018,6 +2033,34 @@ fn draw_new_agent(f: &mut Frame, app: &App, form: &NewAgentForm) {
         d,
     );
     y += 2;
+    // a ready-made team instead of one agent (sv agent templates)
+    buf.set_string(x0, y, "team", lab(8));
+    let (tname, tabout) = match form.team() {
+        Some((n, a)) => (format!("◂ {n} ▸"), a.clone()),
+        None => (
+            "◂ just this agent ▸".to_string(),
+            "or a ready-made team: the instruction becomes its goal".into(),
+        ),
+    };
+    let (ax, _) = buf.set_stringn(
+        x0 + 12,
+        y,
+        &tname,
+        24,
+        if on(8) {
+            Style::default().fg(AMBER).add_modifier(Modifier::BOLD)
+        } else {
+            t
+        },
+    );
+    buf.set_stringn(
+        ax + 2,
+        y,
+        &tabout,
+        (x0 + iw).saturating_sub(ax + 2) as usize,
+        d,
+    );
+    y += 2;
     // detected CLI → attach
     if let Some((_, what)) = &form.detected {
         let bst = Style::default().fg(Color::Indexed(238));
@@ -2040,7 +2083,7 @@ fn draw_new_agent(f: &mut Frame, app: &App, form: &NewAgentForm) {
         let (nx, _) = buf.set_stringn(x0 + 2, y + 1, "◆ Detected ", 12, Style::default().fg(AMBER));
         buf.set_stringn(nx, y + 1, what, (iw - 30) as usize, t);
         let btn = " Attach as column ";
-        let st = if on(8) {
+        let st = if on(9) {
             Style::default()
                 .bg(AMBER)
                 .fg(INK)
@@ -2052,7 +2095,11 @@ fn draw_new_agent(f: &mut Frame, app: &App, form: &NewAgentForm) {
     }
     // buttons
     let by = r.bottom() - 2;
-    let start = " Start agent ⏎ ";
+    let start = if form.team().is_some() {
+        " Start team ⏎ "
+    } else {
+        " Start agent ⏎ "
+    };
     let cancel = " esc Cancel ";
     let sx = x0 + iw - start.chars().count() as u16;
     buf.set_string(
@@ -2105,7 +2152,11 @@ fn draw_new_agent_compact(f: &mut Frame, app: &App, form: &NewAgentForm) {
             Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
         ))
         .title_bottom(Span::styled(
-            " tab next field · ←→ choose · ⏎ start · esc cancel ",
+            if form.team().is_some() {
+                " tab next field · ←→ choose · ⏎ Start team · esc cancel "
+            } else {
+                " tab next field · ←→ choose · ⏎ start · esc cancel "
+            },
             Style::default().fg(DIM),
         ));
     let inner = block.inner(area);
@@ -2219,9 +2270,16 @@ fn draw_new_agent_compact(f: &mut Frame, app: &App, form: &NewAgentForm) {
             cursor(7)
         )),
     ]));
+    lines.push(Line::from(vec![
+        label(8, "team"),
+        Span::raw(match form.team() {
+            Some((n, a)) => format!("  ◂ {n} ▸ {a}"),
+            None => "  ◂ just this agent ▸".to_string(),
+        }),
+    ]));
     if let Some((_, what)) = &form.detected {
         lines.push(Line::from(vec![
-            label(8, "attach"),
+            label(9, "attach"),
             Span::raw(format!("  ⏎ {what}")),
         ]));
     }

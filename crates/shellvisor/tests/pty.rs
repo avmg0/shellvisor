@@ -385,6 +385,269 @@ fn sv_outside_shellvisor() {
 }
 
 #[test]
+fn team_templates_from_the_form_and_the_command_line() {
+    let mut s = Session::start_full("templates");
+    s.wait_for("PROMPT>");
+    s.run("sv agent templates | head -3");
+    s.wait_for("bug-hunt   reproducer writes a failing test");
+    s.send("clear; sv agent run --template review --cli codex -n 'look at the login change'\r");
+    s.wait_until("dry run", |t| {
+        t.contains("team review — look at the login change")
+            && t.contains("correctness  codex · starts now")
+    });
+    s.send("\x1b[20;2~"); // shift+F9: New agent
+    s.wait_for("New agent");
+    s.send("\t\t\t"); // instruction → approvals → stop after → team
+    s.send("\x1b[C");
+    s.wait_until("a template picked", |t| {
+        t.contains("◂ feature ▸") && t.contains("Start team")
+    });
+    s.send("\r"); // no goal yet
+    s.wait_for("type what the team should do");
+    s.send("\x1b"); // close
+    s.pump(Duration::from_millis(200));
+}
+
+#[test]
+fn merge_queue_rebases_tests_and_stops_at_the_first_conflict() {
+    let dir = std::env::temp_dir().join(format!("sv-queue-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git_repo(&repo);
+    let g = |d: &std::path::Path, args: &[&str]| {
+        let o = std::process::Command::new("git")
+            .arg("-C")
+            .arg(d)
+            .args(["-c", "user.email=a@b", "-c", "user.name=t"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            o.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+    };
+    let mut rows = Vec::new();
+    for (name, file, text, commit) in [
+        ("api", "api.txt", "api\n", true),
+        ("ui", "ui.txt", "ui\n", false),          // left uncommitted
+        ("docs", "README.md", "# other\n", true), // conflicts with main's README
+    ] {
+        let wt = dir.join(format!("wt-{name}"));
+        g(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                &format!("agent/{name}"),
+                wt.to_str().unwrap(),
+            ],
+        );
+        std::fs::write(wt.join(file), text).unwrap();
+        if commit {
+            g(&wt, &["add", "-A"]);
+            g(&wt, &["commit", "-qm", &format!("{name} work")]);
+        }
+        rows.push(serde_json::json!({
+            "name": name, "branch": format!("agent/{name}"), "status": "done",
+            "folder": wt.display().to_string(), "worktree": wt.display().to_string(),
+        }));
+    }
+    // main moves on: README changes, so docs' README edit conflicts
+    std::fs::write(repo.join("README.md"), "# demo, changed on main\n").unwrap();
+    g(&repo, &["commit", "-qam", "main moves"]);
+    let state = dir.join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::write(
+        state.join("agents.json"),
+        serde_json::to_string(&rows).unwrap(),
+    )
+    .unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_shellvisor"))
+        .args(["sv", "agent", "queue", "--test", "test -f README.md"])
+        .env("SHELLVISOR_STATE_DIR", &state)
+        .env("SHELLVISOR_CONFIG", dir.join("none.yaml"))
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "a@b")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "a@b")
+        .env_remove("SHELLVISOR")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{text}");
+    assert!(text.contains("✔ merged api (1 commit(s))"), "{text}");
+    assert!(
+        text.contains("commit what ui left uncommitted (1 file(s))"),
+        "{text}"
+    );
+    assert!(text.contains("✔ merged ui"), "{text}");
+    assert!(
+        text.contains("✖ docs: conflicts with main in README.md — the rebase was undone"),
+        "{text}"
+    );
+    assert!(
+        text.contains("stopped · merged: api, ui · not reached: docs"),
+        "{text}"
+    );
+    assert!(repo.join("api.txt").exists() && repo.join("ui.txt").exists());
+    // a failing test stops before merging
+    let wt = dir.join("wt-lint");
+    g(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "agent/lint",
+            wt.to_str().unwrap(),
+        ],
+    );
+    std::fs::write(wt.join("lint.txt"), "x\n").unwrap();
+    g(&wt, &["add", "-A"]);
+    g(&wt, &["commit", "-qm", "lint work"]);
+    rows.push(serde_json::json!({
+        "name": "lint", "branch": "agent/lint", "status": "done",
+        "folder": wt.display().to_string(), "worktree": wt.display().to_string(),
+    }));
+    std::fs::write(
+        state.join("agents.json"),
+        serde_json::to_string(&rows).unwrap(),
+    )
+    .unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_shellvisor"))
+        .args([
+            "sv",
+            "agent",
+            "queue",
+            "lint",
+            "--test",
+            "echo 3 failed; false",
+        ])
+        .env("SHELLVISOR_STATE_DIR", &state)
+        .env("SHELLVISOR_CONFIG", dir.join("none.yaml"))
+        .env_remove("SHELLVISOR")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("✖ lint: tests fail after the rebase (exit 1):\n    3 failed"),
+        "{text}"
+    );
+    assert!(
+        !repo.join("lint.txt").exists(),
+        "nothing merged when tests fail"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ports_logs_http_and_docker_panes() {
+    let mut s = Session::start_full("svcpanes");
+    s.wait_for("PROMPT>");
+    // a server started from this tab
+    std::fs::write(
+        s.dir.join("work/hello.json"),
+        "{\"hello\": \"world\", \"n\": 1}",
+    )
+    .unwrap();
+    s.run("python3 -m http.server 18765 --bind 127.0.0.1 >/dev/null 2>&1 &");
+    s.pump(Duration::from_millis(800));
+    s.run("sv pane ports");
+    s.wait_until("the port and the tab that started it", |t| {
+        t.contains(":18765") && t.contains("python3") && t.contains("tab 1")
+    });
+    s.send("\x1b\x1b[D"); // back to the shell
+    s.pump(Duration::from_millis(200));
+    // HTTP: ask that server
+    s.run("sv pane http http://127.0.0.1:18765/hello.json");
+    s.wait_for("⏎ sends it");
+    s.send("\r");
+    s.wait_until("the answer", |t| {
+        t.contains("HTTP/1.0 200 OK") && t.contains("\"hello\": \"world\",")
+    });
+    s.send("m"); // GET → POST
+    s.wait_for(" POST ");
+    s.send("\x1b\x1b[D");
+    s.pump(Duration::from_millis(200));
+    // Logs: two files, one written to as we watch, filtered with the table engine
+    std::fs::write(
+        s.dir.join("work/api.log"),
+        "12:00:01 INFO up\n12:00:02 ERROR db down\n",
+    )
+    .unwrap();
+    std::fs::write(s.dir.join("work/jobs.log"), "12:00:03 WARN slow\n").unwrap();
+    s.run("sv pane logs api.log jobs.log");
+    s.wait_until("both files", |t| {
+        t.contains("■ api.log") && t.contains("■ jobs.log") && t.contains("WARN slow")
+    });
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(s.dir.join("work/api.log"))
+            .unwrap();
+        writeln!(f, "12:00:04 ERROR again").unwrap();
+    }
+    s.wait_for("ERROR again");
+    s.send("\x1b[15~"); // F5: zoom the logs pane
+    s.pump(Duration::from_millis(200));
+    s.send("/where level == error\r");
+    s.wait_until("only errors", |t| {
+        t.contains("2 match") && t.contains("db down") && !t.contains("WARN slow")
+    });
+    s.send("\x1b[15~");
+    s.pump(Duration::from_millis(200));
+    s.send("\x1b\x1b[D");
+    s.pump(Duration::from_millis(200));
+    // Docker: not installed or not running on a test machine — the pane says which
+    s.run("sv pane docker");
+    s.wait_until("docker pane", |t| {
+        t.contains("isn't installed") || t.contains("isn't running") || t.contains("NAME")
+    });
+    s.send("\x1b\x1b[D");
+    s.pump(Duration::from_millis(200));
+    s.run("kill %1");
+}
+
+#[test]
+fn a_crash_is_saved_locally_and_sv_bug_fills_an_issue() {
+    let state = std::env::temp_dir().join(format!("sv-crash-{}", std::process::id()));
+    let run = |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_shellvisor"))
+            .args(args)
+            .env("SHELLVISOR_STATE_DIR", &state)
+            .env("HOME", &state)
+            .env_remove("SHELLVISOR")
+            .output()
+            .unwrap()
+    };
+    let out = run(&["sv", "__panic"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("report was saved") && err.contains("Nothing was sent"),
+        "{err}"
+    );
+    // the home folder is written as ~
+    assert!(err.contains("~/crashes/crash-"), "{err}");
+    let out = run(&["sv", "bug", "--print"]);
+    let body = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        body.contains("### Setup") && body.contains("panic: test panic"),
+        "{body}"
+    );
+    let out = run(&["sv", "crashes"]);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("crash-"));
+    let _ = std::fs::remove_dir_all(&state);
+}
+
+#[test]
 fn selftest_checks_bash_and_zsh_with_a_fresh_home() {
     let home = std::env::temp_dir().join(format!("sv-selftest-{}", std::process::id()));
     std::fs::create_dir_all(&home).unwrap();
@@ -1611,6 +1874,7 @@ fn auto_plan_dispatches_stages_then_review_and_merges_from_the_tree() {
         &worker,
         "#!/bin/bash\necho \"worker $SHELLVISOR_AGENT: ${SHELLVISOR_TASK:0:30}\"\n\
          echo \"$SHELLVISOR_AGENT\" > \"$SHELLVISOR_AGENT.txt\"\ngit add -A >/dev/null 2>&1\n\
+         sv agent usage $(( ${#SHELLVISOR_AGENT} * 10000 ))\n\
          git commit -qm \"$SHELLVISOR_AGENT work\" >/dev/null 2>&1\necho \"$SHELLVISOR_AGENT finished\"\nread -p '> ' x\n",
     )
     .unwrap();
@@ -1657,6 +1921,11 @@ fn auto_plan_dispatches_stages_then_review_and_merges_from_the_tree() {
     s.wait_until("stage 1 done, tests and review ran", |t| {
         t.contains("tests") && t.matches("done").count() >= 4
     });
+    // tokens per step: tests (5 letters × 10k) used the most
+    s.wait_until("tokens per step", |t| {
+        t.contains("▲ 50K tok · done")
+            && t.contains("▲ tests used the most tokens: 50K of 100K (50%)")
+    });
     s.send("\t"); // tree
     s.wait_until("tree", |t| {
         t.contains("◆ review") && t.contains("branch") && t.contains("agents")
@@ -1677,6 +1946,23 @@ fn auto_plan_dispatches_stages_then_review_and_merges_from_the_tree() {
         work.join("api.txt").exists(),
         "api's work is in the main checkout"
     );
+    // R: replay what api did, in a new tab
+    s.send("R");
+    s.wait_until("the replay viewer", |t| {
+        t.contains("◆ replay · api-") && t.contains("● done")
+    });
+    s.send("G"); // the end: its last screen and the file it changed
+    s.wait_until("the last frame", |t| {
+        t.contains("worker api") && t.contains("api.txt  +1 −0")
+    });
+    s.send("q");
+    s.pump(Duration::from_millis(300));
+    s.send("\x1b[20~"); // F9: back to the agents
+    s.pump(Duration::from_millis(300));
+    s.send("\x1bg"); // the board again
+    s.wait_for("agent board");
+    s.send("\t"); // tree
+    s.wait_for("◆ review");
     s.send("\x1b"); // close the board
     s.pump(Duration::from_millis(300));
     s.send("\x1b1");

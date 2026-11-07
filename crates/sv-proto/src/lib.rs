@@ -200,6 +200,62 @@ mod tests {
     }
 
     #[test]
+    fn random_osc_payloads_never_panic() {
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let words: &[&[u8]] = &[
+            b"7",
+            b"7770",
+            b"start",
+            b"prompt",
+            b"end",
+            b"cmd",
+            b"mode",
+            b"table",
+            b"flow",
+            b"exit",
+            b"file://",
+            b"file://h/%",
+            b"file://h/%zz",
+            b"file://h/%e4%b8",
+            b"/tmp",
+            b"bHM=",
+            b"====",
+            b"!!",
+            b"-1",
+            b"99999999999999999999",
+            b"",
+            "\u{4e16}".as_bytes(),
+            b"\xff\xfe",
+        ];
+        for _ in 0..200_000 {
+            let n = (next() % 6) as usize;
+            let mut parts: Vec<Vec<u8>> = Vec::new();
+            for _ in 0..n {
+                if next() % 4 == 0 {
+                    let len = (next() % 10) as usize;
+                    parts.push((0..len).map(|_| next() as u8).collect());
+                } else {
+                    let mut w = words[(next() % words.len() as u64) as usize].to_vec();
+                    if next() % 3 == 0 {
+                        w.extend_from_slice(words[(next() % words.len() as u64) as usize]);
+                    }
+                    parts.push(w);
+                }
+            }
+            let refs: Vec<&[u8]> = parts.iter().map(|p| p.as_slice()).collect();
+            if let Some(ShellEvent::Cwd(p)) = parse_osc(&refs) {
+                assert!(!p.is_empty());
+            }
+        }
+    }
+
+    #[test]
     fn cwd() {
         assert_eq!(
             parse_osc(&split("7;file://mbp/Users/a/My%20Dir")),

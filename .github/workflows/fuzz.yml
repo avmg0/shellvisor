@@ -1,0 +1,37 @@
+name: Fuzz
+
+# Longer runs of the random-input tests than CI does on every push: the
+# terminal emulator (escape sequences cut anywhere, resizes, wide characters)
+# and the shell hooks' messages. A different seed every week; a failure names
+# the seed, and SV_FUZZ_LOG=1 with that seed prints every step to replay it.
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      rounds:
+        description: rounds per seed
+        default: "50000"
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2.9.0
+      - name: Terminal emulator and hooks
+        env:
+          SV_FUZZ_ROUNDS: ${{ github.event.inputs.rounds || '50000' }}
+        run: |
+          export SV_FUZZ_SEED=$(( GITHUB_RUN_NUMBER * 10 + ${{ matrix.part }} ))
+          echo "seed $SV_FUZZ_SEED, $SV_FUZZ_ROUNDS rounds"
+          cargo test --release -p shellvisor --bin shellvisor random_input -- --nocapture
+          cargo test --release -p sv-proto random_osc

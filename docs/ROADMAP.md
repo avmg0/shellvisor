@@ -231,6 +231,16 @@ Deliverables
 - README pictures (done): a short GIF and two screenshots, made from a demo account (`john@mbp`) with made-up project data.
 - Still to do by hand: a pass in Terminal.app, iTerm2 and Ghostty with your own zsh setup (checklist in RELEASING.md).
 
+## v1.0.10 · agents, service panes, quality — ✅ done 2026-11-08
+- Tokens per plan step (done): each dispatched step's tokens (its agent and sub-agents), the heaviest marked ▲, overruns of the estimate.
+- Team templates (done): feature, bug-hunt, review, refactor, docs; `--cli` / `--cmd`; your own with `sv agent template save`; a team row in the New agent form.
+- Agent replay (done): screens, status, files and approvals recorded per agent (local, 0600); `sv agent replay`, `R` on the Tree.
+- Merge queue (done): `sv agent queue`, `Q` on the Tree — commit leftovers, rebase, test, fast-forward; stops at the first conflict or failing test.
+- Service panes (done): Ports (who started it, open, stop), Docker (logs in a split, start / stop / restart, a shell inside), Logs (several files, levels, filters with the data commands, F4 table), HTTP (request runner with history and copy as curl).
+- Crash reports (done): saved locally with home and user name scrubbed; `sv bug` opens a pre-filled issue, `sv crashes` lists them.
+- Random-input tests (done): the terminal emulator and the hook messages; they found three panics in vt100 (wide characters on narrow screens, resizes), now fixed. Weekly longer runs in CI.
+- Benchmarks per release (done): measured by the Release workflow, kept in docs/bench/history.json and charted in the README by `scripts/release.sh`.
+
 ---
 
 ## Cross-cutting, every phase

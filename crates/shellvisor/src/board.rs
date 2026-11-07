@@ -239,6 +239,46 @@ pub const POLICIES: [(&str, &[&str], &[&str]); 3] = [
     ),
 ];
 
+/// Is `name` the agent `root` or one it started (any depth)?
+fn under(nodes: &[Node], name: &str, root: &str) -> bool {
+    let mut cur = Some(name.to_string());
+    for _ in 0..16 {
+        match cur {
+            Some(ref c) if c == root => return true,
+            Some(ref c) => {
+                cur = nodes
+                    .iter()
+                    .find(|n| &n.name == c)
+                    .and_then(|n| n.parent.clone())
+            }
+            None => return false,
+        }
+    }
+    false
+}
+
+/// Tokens each plan step has used so far: its agent plus every sub-agent it
+/// started. Same order as `tasks`.
+pub fn step_tokens(tasks: &[Task], nodes: &[Node]) -> Vec<u64> {
+    tasks
+        .iter()
+        .map(|t| {
+            nodes
+                .iter()
+                .filter(|n| under(nodes, &n.name, &t.id))
+                .filter_map(|n| n.tokens)
+                .sum()
+        })
+        .collect()
+}
+
+/// A short note on a step's use against its estimate: "×1.8 of estimate".
+pub fn over_estimate(used: u64, est: Option<u64>) -> Option<String> {
+    let e = est.filter(|e| *e > 0)?;
+    let r = used as f64 / e as f64;
+    (r >= 1.25).then(|| format!("×{r:.1} of estimate"))
+}
+
 pub fn plan_to_team(
     name: &str,
     tasks: &[Task],
@@ -430,6 +470,10 @@ pub enum BoardAct {
     Merge(String),
     /// Board 21 for that agent.
     Review(String),
+    /// Step through what it did (sv agent replay).
+    Replay(String),
+    /// Rebase, test and merge the finished agents one by one (sv agent queue).
+    Queue,
     /// Ask the planner (the goal is in the plan).
     Plan,
     Dispatch,
@@ -729,6 +773,12 @@ impl Board {
                     self.input = Some((Input::Message(name), String::new()));
                 }
             }
+            b"R" if self.view == View::Tree => {
+                if let Some(name) = self.selected_name(snap) {
+                    return (true, Some(BoardAct::Replay(name)));
+                }
+            }
+            b"Q" if self.view == View::Tree => return (true, Some(BoardAct::Queue)),
             b"d" if self.view == View::Tree => {
                 if let Some(name) = self.selected_name(snap) {
                     return (true, Some(BoardAct::Review(name)));
@@ -997,7 +1047,7 @@ impl Board {
                     Phase::Dispatched(_) => "tab tree / timeline / log · g new goal · esc close",
                 },
                 View::Tree => {
-                    "↑↓ agent · ←/→ fold branch · i message · + spawn child · c promote to column · p pause · k stop branch · d review · m merge · ⏎ open · tab view"
+                    "↑↓ agent · ←/→ fold branch · i message · + spawn child · c promote to column · p pause · k stop branch · d review · m merge · Q merge queue · R replay · ⏎ open · tab view"
                 }
                 View::Timeline => {
                     "↑↓ agent · ⏎ go to it · ━ working · ─ waiting · ⚑ approval · ┄ paused · tab view · esc close"
@@ -1113,6 +1163,18 @@ impl Board {
         }
         let stages = p.tasks.iter().map(|t| t.stage).max().unwrap_or(0);
         let live = matches!(p.phase, Phase::Dispatched(_));
+        // tokens per step once dispatched; the heaviest one is marked ▲
+        let step_used = if live {
+            step_tokens(&p.tasks, &snap.nodes)
+        } else {
+            Vec::new()
+        };
+        let heaviest = step_used
+            .iter()
+            .enumerate()
+            .filter(|(_, u)| **u > 0)
+            .max_by_key(|(_, u)| **u)
+            .map(|(i, _)| i);
         let head = if live {
             format!(
                 "Running · {} tasks · {} stages{}",
@@ -1198,7 +1260,13 @@ impl Board {
             );
             let lx = r.x + 1 + left.chars().count() as u16;
             let right = if live {
-                status.clone()
+                let used = step_used.get(i).copied().unwrap_or(0);
+                if used > 0 {
+                    let top = if Some(i) == heaviest { "▲ " } else { "" };
+                    format!("{top}{} · {status}", fmt_tokens(used))
+                } else {
+                    status.clone()
+                }
             } else {
                 t.est
                     .map(|e| format!("~{}", fmt_tokens(e)))
@@ -1263,6 +1331,24 @@ impl Board {
             put(buf, r.x + 1, y, lw, &line, Style::default().fg(FAINT));
         }
         if side == 0 {
+            // no room for the settings column: the tokens summary on one line
+            if let (Some(h), true) = (heaviest, y + 2 < bottom) {
+                let total: u64 = step_used.iter().sum();
+                put(
+                    buf,
+                    r.x + 1,
+                    y + 1,
+                    lw,
+                    &format!(
+                        "▲ {} used the most tokens: {} of {} ({}%)",
+                        p.tasks[h].id,
+                        fmt_tokens(step_used[h]).trim_end_matches(" tok"),
+                        fmt_tokens(total).trim_end_matches(" tok"),
+                        step_used[h] * 100 / total.max(1)
+                    ),
+                    Style::default().fg(AMBER),
+                );
+            }
             return;
         }
         // settings column
@@ -1372,6 +1458,82 @@ impl Board {
                     Style::default().fg(AMBER),
                 );
                 sy += 1;
+            }
+        }
+        let total: u64 = step_used.iter().sum();
+        if live && total > 0 && sy + 2 < r.bottom() {
+            sy += 1;
+            put(
+                buf,
+                sx,
+                sy,
+                side,
+                "Tokens per step",
+                Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+            );
+            sy += 1;
+            let most = step_used.iter().copied().max().unwrap_or(1).max(1);
+            let bar_w = side.saturating_sub(24).max(4) as u64;
+            for (i, t) in p.tasks.iter().enumerate() {
+                if sy + 1 >= r.bottom() {
+                    break;
+                }
+                let used = step_used[i];
+                let filled = (used * bar_w).div_ceil(most) as usize;
+                let bar = format!(
+                    "{}{}",
+                    "━".repeat(filled),
+                    "─".repeat(bar_w as usize - filled.min(bar_w as usize))
+                );
+                let pct = used * 100 / total.max(1);
+                let col = if Some(i) == heaviest { AMBER } else { CYAN };
+                put(buf, sx, sy, 10, &t.id, Style::default().fg(TEXT));
+                put(
+                    buf,
+                    sx + 10,
+                    sy,
+                    bar_w as u16,
+                    &bar,
+                    Style::default().fg(col),
+                );
+                put(
+                    buf,
+                    sx + 11 + bar_w as u16,
+                    sy,
+                    side.saturating_sub(11 + bar_w as u16),
+                    &format!("{} {pct}%", fmt_tokens(used)),
+                    Style::default().fg(DIM),
+                );
+                sy += 1;
+                if let Some(note) = over_estimate(used, t.est) {
+                    if sy + 1 < r.bottom() {
+                        put(
+                            buf,
+                            sx + 2,
+                            sy,
+                            side - 2,
+                            &format!("↑ {note}"),
+                            Style::default().fg(AMBER),
+                        );
+                        sy += 1;
+                    }
+                }
+            }
+            if let Some(h) = heaviest {
+                if sy + 1 < r.bottom() {
+                    put(
+                        buf,
+                        sx,
+                        sy,
+                        side,
+                        &format!(
+                            "▲ {} used the most — its prompt is the first to tune",
+                            p.tasks[h].id
+                        ),
+                        Style::default().fg(FAINT),
+                    );
+                    sy += 1;
+                }
             }
         }
         if let Some(t) = snap.team.as_ref().filter(|_| live) {
@@ -2015,6 +2177,31 @@ mod tests {
         );
         let cyc = "{\"tasks\":[{\"id\":\"a\",\"title\":\"x\",\"deps\":[\"b\"]},{\"id\":\"b\",\"title\":\"y\",\"deps\":[\"a\"]}]}";
         assert!(parse_plan(cyc, "claude").unwrap_err().contains("circle"));
+    }
+
+    #[test]
+    fn tokens_roll_up_per_plan_step() {
+        let t = parse_plan(REPLY, "claude").unwrap();
+        let node = |name: &str, parent: Option<&str>, tok: u64| Node {
+            name: name.into(),
+            parent: parent.map(String::from),
+            tokens: Some(tok),
+            ..Default::default()
+        };
+        let nodes = vec![
+            node("api", None, 50_000),
+            node("api-helper", Some("api"), 30_000),
+            node("deep", Some("api-helper"), 5_000),
+            node("ui", None, 12_000),
+            node("stranger", None, 99_999),
+        ];
+        assert_eq!(step_tokens(&t, &nodes), vec![85_000, 12_000, 0, 0]);
+        assert_eq!(
+            over_estimate(85_000, Some(60_000)).as_deref(),
+            Some("×1.4 of estimate")
+        );
+        assert_eq!(over_estimate(61_000, Some(60_000)), None);
+        assert_eq!(over_estimate(61_000, None), None);
     }
 
     #[test]

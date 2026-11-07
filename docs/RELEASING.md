@@ -15,6 +15,8 @@ release after 40 minutes. The steps it runs, by hand:
 5. Debian / Ubuntu: the Release workflow also builds `shellvisor_<version>_amd64.deb` and `_arm64.deb` (`scripts/package-deb.sh`) and lists them in `SHA256SUMS`.
 6. AUR (`shellvisor-bin`): `scripts/aur-pkgbuild.sh <version> ../aur-shellvisor-bin` writes `PKGBUILD` and `.SRCINFO` from the release's checksums into a checkout of `ssh://aur@aur.archlinux.org/shellvisor-bin.git`; commit and push there. The first time, create the package by pushing to that URL from an AUR account with your SSH key added. `scripts/release.sh` does this step too when `../aur-shellvisor-bin` (or `$SV_AUR`) exists.
 
+7. Benchmarks: the Release workflow measures the build (3 tabs, dev layout, ubuntu-latest) and attaches `bench.json`; `scripts/release.sh` adds it to `docs/bench/history.json`, redraws `docs/images/bench.svg` (`scripts/bench-history.py`) and pushes "Benchmarks X".
+
 ## Hands-on pass before a release
 
 CI builds and tests on Linux and macOS, but not how it feels. On a Mac, in each of

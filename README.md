@@ -58,6 +58,7 @@ shellvisor --shell bash    # or pick: zsh, bash, or a full path
 | `F3` · `sv sys` | system pane: open · focus · close |
 | `F8` · `sv flowpane` | flow pane: the job running in the shell, or `sv flow` meters |
 | `sv pane preview\|agents\|activity` | more pane kinds (also in the layout editor and the palette): the file picked in the files pane, every agent's state and changes, downloads and installs. A second tool pane stacks under the first |
+| `sv pane ports\|docker\|logs\|http` | panes for the services you run — see [Service panes](#service-panes) |
 | `F4` | explore the last `sv` table: sort, filter, copy |
 | `alt+;` | command bar: `ls \| where size > 1mb \| sort-by size -r` → table |
 | `F9` · `shift+F9` | agents tab · new agent |
@@ -73,6 +74,7 @@ shellvisor --shell bash    # or pick: zsh, bash, or a full path
 | `ctrl+q` · `sv exit` | quit Shellvisor |
 | `sv status` | is Shellvisor running here? which shell? which version is running? |
 | `sv doctor` | checks this terminal: versions (and old copies on PATH), 24-bit colour, UTF-8, shell hooks, mouse, autostart, and — press alt+1 when asked — Option-as-Alt; says how to fix each (`--no-keys` skips the key test) |
+| `sv bug` · `sv crashes` | a crash saves a report on this computer (version, OS, terminal, shell, the panic and a backtrace, with your home folder and user name replaced) — nothing is sent. `sv bug` shows it and opens a new GitHub issue with it filled in, for you to read and submit; `--print` only prints it |
 | `sv selftest [shell…]` | starts your shells (on macOS also the built-in bash 3.2) the way Shellvisor does, with the hooks and your own rc files, out of sight, and checks the prompt and how long it takes, `cd` tracking, exit codes, the command text and running/finished; paste the output into an issue if something fails |
 | `sv power on\|off\|auto` | low-power mode (auto: on while on battery) |
 | `sv theme light\|dark\|auto` | Shellvisor's own colours for a light or dark terminal |
@@ -286,7 +288,35 @@ Four views over everything agents are doing (`tab` switches; `sv agent board tre
 
 The planner is `claude -p`, `codex exec -` or `gemini`, whichever is installed; set `agents.planner` in config.yaml to use another command (it gets the prompt on stdin and prints JSON).
 
+### Ready-made teams
+
+`sv agent templates` lists teams you can start without writing a file — **feature** (lead splits the goal · builder · tests · reviewer), **bug-hunt** (reproducer writes a failing test · fixer · verifier), **review** (two read-only reviewers), **refactor** (planner and two parallel workers, tests after) and **docs** (writer · checker that runs every example):
+
+```sh
+sv agent run --template bug-hunt 'login fails when the email has a +'
+sv agent run --template feature --cli codex 'add CSV export' --dry-run
+sv agent run --init --template review           # start from one: writes .shellvisor/team.yaml
+sv agent template save my-team                  # your own (from .shellvisor/team.yaml), next to the built-in ones
+```
+
+The New agent form (`shift+F9`) has a **team** row: pick a template with `←` `→` and the instruction becomes the team's goal.
+
+### Tokens, replay and the merge queue
+
+- **Tokens per step.** Once a plan is dispatched, every step shows the tokens it used (its agent plus the sub-agents it started), the heaviest is marked ▲, and steps that went past their estimate say by how much — the first prompts worth tuning.
+- **Replay.** Each agent is recorded while it runs: its screen when it changes, status changes, the files it touched and every approval with who answered it. `sv agent replay NAME` (or `R` on the board's Tree) steps through it: `←` `→` frame by frame, `]` `[` to the next event, `space` plays. Recordings stay on this computer (the newest 40; `agents.replay: false` turns them off).
+- **Merge queue.** `sv agent queue` (or `Q` on the Tree) takes the finished agents one at a time: commits what they left uncommitted, rebases their branch onto yours, runs the tests (`--test 'cmd'`, `agents.test` in config.yaml, or cargo / npm / pytest / go / make, whichever the project uses) and fast-forwards your branch. It stops at the first conflict (the rebase is undone and the files named) or failing test, so everything merged has passed. `--dry-run` shows what it would do.
+
 When agents ask for permission, `alt+a` lists every waiting prompt; `y` / `n` / `a` answers it — Shellvisor types the right key for that CLI. Already running an agent in a normal tab? `sv agent attach` turns that split into an agent column.
+
+## Service panes
+
+Open them with `sv pane …`, the layout editor (`alt+e`) or the palette:
+
+- **Ports** (`sv pane ports`) — what is listening, the process and the tab that started it. `⏎` opens it in the browser, `t` goes to that tab, `k` stops it (`K` kills), `c` copies the URL.
+- **Docker** (`sv pane docker`) — containers from docker or podman. `l` follows a container's logs in a split, `x` opens a shell inside it, `s` starts / stops, `r` restarts, `a` shows stopped ones too.
+- **Logs** (`sv pane logs app.log worker.log`, or every `*.log` here and in `logs/`) — follows several files at once, a colour per file, errors red and warnings amber. `/` filters by text or with the data commands (`where level == error`, `where message =~ timeout | last 50`), `F4` opens what is shown in the table viewer, `space` pauses, `a` / `x` add or remove a file.
+- **HTTP** (`sv pane http http://localhost:3000/alerts`) — a small request runner: `m` method, `u` URL, `h` headers, `b` body, `⏎` sends. The answer shows status, time, size and pretty JSON; `↑` `↓` go through earlier requests; `c` copies it as a curl command.
 
 ## Configuration
 
@@ -337,7 +367,12 @@ The hooks print invisible escape sequences (`OSC 7` for the folder, Shellvisor's
 cargo test --all                                       # unit + end-to-end tests (real bash/zsh in a PTY)
 cargo build --release
 cargo run --release --example bench -- --check         # performance budget
+SV_FUZZ_ROUNDS=50000 cargo test --release random_input # longer random-input run (weekly in CI)
 ```
+
+Every release is measured on the same GitHub runner and charted:
+
+![Binary size, idle memory, first frame and idle CPU per release](docs/images/bench.svg)
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — how it is built
 - [docs/ROADMAP.md](docs/ROADMAP.md) — phases P0 → P6

@@ -456,6 +456,223 @@ mod tests {
         vt100::Parser::new_with_callbacks(5, 20, 100, Hooks::default())
     }
 
+    /// Small deterministic generator, so a failure can be replayed.
+    pub(crate) struct Rng(u64);
+    impl Rng {
+        pub(crate) fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        pub(crate) fn below(&mut self, n: usize) -> usize {
+            (self.next() % n.max(1) as u64) as usize
+        }
+    }
+
+    /// Terminal-ish noise: escape sequences cut at any point, our own hook
+    /// OSCs with good and bad payloads, UTF-8 (wide, combining, broken),
+    /// control characters and plain random bytes.
+    fn noise(r: &mut Rng) -> Vec<u8> {
+        const BITS: &[&[u8]] = &[
+            b"\x1b[",
+            b"\x1b]",
+            b"\x1bP",
+            b"\x1b\\",
+            b"\x07",
+            b"\x1b(0",
+            b"\x1b)B",
+            b"\x1b7",
+            b"\x1b8",
+            b"\x1bc",
+            b"\x1bM",
+            b"\x1b[?1049h",
+            b"\x1b[?1049l",
+            b"\x1b[?25l",
+            b"\x1b[?1000h",
+            b"\x1b[?1006h",
+            b"\x1b[?2004h",
+            b"\x1b[r",
+            b"\x1b[3;5r",
+            b"\x1b[2J",
+            b"\x1b[3J",
+            b"\x1b[K",
+            b"\x1b[@",
+            b"\x1b[P",
+            b"\x1b[L",
+            b"\x1b[M",
+            b"\x1b[S",
+            b"\x1b[T",
+            b"\x1b[6n",
+            b"\x1b[c",
+            b"\x1b[>c",
+            b"\x1b[38;2;1;2;3m",
+            b"\x1b[48;5;200m",
+            b"\x1b[1;4;7m",
+            b"\x1b[0m",
+            b"\x1b[999;999H",
+            b"\x1b[65535;65535H",
+            b"\x1b[0;0H",
+            b"\x1b[99999999999X",
+            b"\x1b[4h",
+            b"\x1b[4l",
+            b"\x1b[20h",
+            b"\x1b[?7l",
+            b"\x1b[?6h",
+            b"\x1b]7;file://host/tmp/a%20b\x07",
+            b"\x1b]7;file://\x07",
+            b"\x1b]7770;start\x07",
+            b"\x1b]7770;prompt\x1b\\",
+            b"\x1b]7770;end;1\x07",
+            b"\x1b]7770;end;x\x07",
+            b"\x1b]7770;end;99999999999999\x07",
+            b"\x1b]7770;cmd;bHMgLWxh\x07",
+            b"\x1b]7770;cmd;!!!\x07",
+            b"\x1b]7770;mode;exit\x07",
+            b"\x1b]7770;mode;zzz\x07",
+            b"\x1b]7770;table;W10=\x07",
+            b"\x1b]7770;flow;e30=\x07",
+            b"\x1b]7770\x07",
+            b"\x1b]2;title\x1b[31m\x07",
+            b"\x1b]52;c;aGk=\x07",
+            b"\x1b]8;;http://x\x07",
+            b"\x1b]133;A\x07",
+            "\u{4e16}\u{754c}".as_bytes(),
+            "e\u{301}".as_bytes(),
+            "\u{1f600}".as_bytes(),
+            b"\xf0\x9f",
+            b"\xc3",
+            b"\xff\xfe",
+            b"\t",
+            b"\r\n",
+            b"\n",
+            b"\x08",
+            b"\x0e",
+            b"\x0f",
+            b"\x00",
+            b"\x7f",
+            b"\x9b",
+            b"abc",
+            b"0123456789",
+            b";",
+            b"?",
+            b":",
+        ];
+        let mut v = Vec::new();
+        for _ in 0..r.below(40) {
+            if r.below(5) == 0 {
+                for _ in 0..r.below(12) {
+                    v.push(r.next() as u8);
+                }
+            } else {
+                let b = BITS[r.below(BITS.len())];
+                // sometimes only part of it: sequences split across reads
+                let n = if r.below(4) == 0 {
+                    r.below(b.len() + 1)
+                } else {
+                    b.len()
+                };
+                v.extend_from_slice(&b[..n]);
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn random_input_never_panics_or_leaks_escapes_to_the_terminal() {
+        // SV_FUZZ_SEED / SV_FUZZ_ROUNDS for longer runs (the weekly CI job);
+        // SV_FUZZ_LOG=1 prints every step so a failure can be replayed.
+        let seed = std::env::var("SV_FUZZ_SEED")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0x5eed_5eed_1234_5678u64);
+        let rounds = std::env::var("SV_FUZZ_ROUNDS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1500);
+        let mut r = Rng(seed.max(1));
+        for round in 0..rounds {
+            let rows = 1 + r.below(40) as u16;
+            let cols = 1 + r.below(120) as u16;
+            let sb = r.below(200);
+            let mut p = vt100::Parser::new_with_callbacks(rows, cols, sb, Hooks::default());
+            if std::env::var("SV_FUZZ_LOG").is_ok() {
+                eprintln!("R{round} new {rows}x{cols} {sb}");
+            }
+            for _ in 0..1 + r.below(6) {
+                let bytes = noise(&mut r);
+                // fed in random pieces, like reads from a pty
+                let mut i = 0;
+                while i < bytes.len() {
+                    let n = 1 + r.below(bytes.len() - i);
+                    if std::env::var("SV_FUZZ_LOG").is_ok() {
+                        eprintln!(
+                            "P {}",
+                            bytes[i..i + n]
+                                .iter()
+                                .map(|b| format!("{b:02x}"))
+                                .collect::<String>()
+                        );
+                    }
+                    p.process(&bytes[i..i + n]);
+                    i += n;
+                }
+                if r.below(3) == 0 {
+                    let (nr, nc) = (1 + r.below(50) as u16, 1 + r.below(150) as u16);
+                    if std::env::var("SV_FUZZ_LOG").is_ok() {
+                        eprintln!("S {nr}x{nc}");
+                    }
+                    p.screen_mut().set_size(nr, nc);
+                }
+                if r.below(4) == 0 {
+                    let n = r.below(300);
+                    if std::env::var("SV_FUZZ_LOG").is_ok() {
+                        eprintln!("B {n}");
+                    }
+                    p.screen_mut().set_scrollback(n);
+                }
+                let (h, w) = p.screen().size();
+                let (cy, cx) = p.screen().cursor_position();
+                assert!(
+                    cy < h && cx <= w,
+                    "round {round}: cursor {cy},{cx} outside {h}x{w}"
+                );
+                let _ = p.screen().contents();
+                let _ = p.screen().contents_formatted();
+                let fx = std::mem::take(&mut p.callbacks_mut().fx);
+                // What goes to the real terminal is only our own frames:
+                // title, icon name, clipboard (ESC ] … BEL) and the bell.
+                // Nothing a program prints may smuggle other escapes out.
+                let mut k = 0;
+                while k < fx.outer.len() {
+                    match fx.outer[k] {
+                        0x07 => k += 1,
+                        0x1b => {
+                            assert_eq!(
+                                fx.outer.get(k + 1),
+                                Some(&b']'),
+                                "round {round}: {:?}",
+                                fx.outer
+                            );
+                            let end = fx.outer[k..]
+                                .iter()
+                                .position(|b| *b == 0x07)
+                                .expect("framed");
+                            let body = &fx.outer[k + 2..k + end];
+                            assert!(
+                                !body.contains(&0x1b),
+                                "round {round}: ESC inside {:?}",
+                                body
+                            );
+                            k += end + 1;
+                        }
+                        b => panic!("round {round}: stray byte {b} in {:?}", fx.outer),
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn shellvisor_osc_becomes_event_and_is_not_drawn() {
         let mut p = parser();

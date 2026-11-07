@@ -483,6 +483,235 @@ on:
     text: \"fix the failing tests: {log}\"
 ";
 
+// ------------------------------------------------------------------ templates
+
+/// Ready-made teams: (name, what it does, team.yaml with `{cli}` for the
+/// agent CLI). `sv agent templates` lists them with your own, saved in
+/// `~/.config/shellvisor/teams/` (`sv agent template save NAME`).
+pub const TEMPLATES: &[(&str, &str, &str)] = &[
+    (
+        "feature",
+        "lead splits the goal · builder writes it · tests after · reviewer last",
+        "\
+team:
+  name: feature
+  budget_tokens: 2000000
+  max_agents: 6
+agents:
+  - id: lead
+    cli: {cli}
+    role: orchestrator
+    can_spawn: [builder]
+    task: split the goal into the code change and say exactly what builder should do; do not edit files yourself
+  - id: builder
+    cli: {cli}
+    worktree: true
+    max_children: 2
+    approve: [read, edit, test, lint]
+    deny: [delete, push]
+  - id: tests
+    cli: {cli}
+    worktree: true
+    start: after:builder
+    approve: [read, edit, test]
+    deny: [delete, push]
+    task: write tests for what builder changed and run them; sv agent emit failed \"…\" when they fail
+  - id: reviewer
+    cli: {cli}
+    start: after:tests
+    approve: [read]
+    deny: [edit, delete, push]
+    task: review the builder and tests branches for bugs, missing cases and style; report, don't edit
+on:
+  - event: tests.failed
+    send: builder
+    text: \"tests fail: {log}\"
+",
+    ),
+    (
+        "bug-hunt",
+        "reproducer writes a failing test · fixer makes it pass · verifier checks around it",
+        "\
+team:
+  name: bug-hunt
+  budget_tokens: 1500000
+  max_agents: 4
+agents:
+  - id: reproducer
+    cli: {cli}
+    worktree: true
+    approve: [read, edit, test]
+    deny: [delete, push]
+    task: find the smallest reproduction of the bug and write a test that fails because of it; do not fix it
+  - id: fixer
+    cli: {cli}
+    worktree: true
+    start: after:reproducer
+    approve: [read, edit, test, lint]
+    deny: [delete, push]
+    task: make the reproducer's failing test pass with the smallest correct change
+  - id: verifier
+    cli: {cli}
+    start: after:fixer
+    approve: [read, test]
+    deny: [edit, delete, push]
+    task: run the whole test suite on fixer's branch and look for other places with the same bug; report
+on:
+  - event: verifier.failed
+    send: fixer
+    text: \"the fix is not done yet: {log}\"
+",
+    ),
+    (
+        "review",
+        "two reviewers read the current branch from different angles; nothing is edited",
+        "\
+team:
+  name: review
+  budget_tokens: 800000
+  max_agents: 2
+agents:
+  - id: correctness
+    cli: {cli}
+    approve: [read, test]
+    deny: [edit, delete, push, install]
+    task: review the changes on this branch against main for bugs, edge cases and missing tests; list findings with file and line
+  - id: design
+    cli: {cli}
+    approve: [read]
+    deny: [edit, delete, push, install]
+    task: review the changes on this branch against main for naming, structure, duplication and docs; list findings with file and line
+",
+    ),
+    (
+        "refactor",
+        "planner maps the change · two workers move in parallel · tests guard it",
+        "\
+team:
+  name: refactor
+  budget_tokens: 2500000
+  max_agents: 5
+agents:
+  - id: planner
+    cli: {cli}
+    role: orchestrator
+    can_spawn: [part-a, part-b]
+    task: plan the refactor in two parts that touch different files and start part-a and part-b with exact instructions; do not edit files
+  - id: part-a
+    cli: {cli}
+    worktree: true
+    start: spawned
+    approve: [read, edit, test, lint]
+    deny: [delete, push]
+  - id: part-b
+    cli: {cli}
+    worktree: true
+    start: spawned
+    approve: [read, edit, test, lint]
+    deny: [delete, push]
+  - id: tests
+    cli: {cli}
+    start: after:part-a,part-b
+    approve: [read, test]
+    deny: [edit, delete, push]
+    task: run the full test suite on both branches and report anything that changed behaviour
+",
+    ),
+    (
+        "docs",
+        "writer updates the docs for the change · checker runs every example",
+        "\
+team:
+  name: docs
+  budget_tokens: 600000
+  max_agents: 2
+agents:
+  - id: writer
+    cli: {cli}
+    worktree: true
+    approve: [read, edit]
+    deny: [delete, push]
+    task: update README and docs for the goal, in the project's own style; keep examples runnable
+  - id: checker
+    cli: {cli}
+    start: after:writer
+    approve: [read, test, command]
+    deny: [edit, delete, push]
+    task: run every command and example in what writer changed and report the ones that fail
+",
+    ),
+];
+
+/// Where saved templates live.
+pub fn templates_dir() -> std::path::PathBuf {
+    crate::paths::config_file()
+        .parent()
+        .map(|p| p.join("teams"))
+        .unwrap_or_default()
+}
+
+/// Every template: (name, about, yaml, saved by you). Yours first; one of
+/// yours with a built-in's name replaces it.
+pub fn templates() -> Vec<(String, String, String, bool)> {
+    let mut v: Vec<(String, String, String, bool)> = Vec::new();
+    if let Ok(d) = std::fs::read_dir(templates_dir()) {
+        let mut files: Vec<_> = d.flatten().map(|e| e.path()).collect();
+        files.sort();
+        for p in files {
+            if !p.extension().is_some_and(|x| x == "yaml" || x == "yml") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&p) else {
+                continue;
+            };
+            let name = p
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            // "# about: …" on any line describes it
+            let about = text
+                .lines()
+                .find_map(|l| l.trim().strip_prefix("# about:"))
+                .map(|a| a.trim().to_string())
+                .unwrap_or_else(|| "saved team".into());
+            v.push((name, about, text, true));
+        }
+    }
+    for (n, a, y) in TEMPLATES {
+        if !v.iter().any(|(m, ..)| m == n) {
+            v.push((n.to_string(), a.to_string(), y.to_string(), false));
+        }
+    }
+    v
+}
+
+/// A template's team.yaml for one CLI (`claude`, `codex`…) or, with
+/// `custom`, a command every agent runs.
+pub fn fill_template(yaml: &str, cli: &str, custom: Option<&str>) -> String {
+    match custom.filter(|c| !c.trim().is_empty()) {
+        Some(cmd) => {
+            let quoted = format!("'{}'", cmd.replace('\'', "''"));
+            yaml.replace("cli: {cli}", &format!("cmd: {quoted}"))
+        }
+        None => yaml.replace("{cli}", cli),
+    }
+}
+
+/// Look a template up by name and fill it.
+pub fn template(name: &str, cli: &str, custom: Option<&str>) -> Result<String, String> {
+    let all = templates();
+    match all.iter().find(|(n, ..)| n == name) {
+        Some((_, _, y, _)) => Ok(fill_template(y, cli, custom)),
+        None => Err(format!(
+            "no template `{name}` — there are: {}",
+            all.iter()
+                .map(|(n, ..)| n.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -550,6 +779,18 @@ on:
             "fix: 2 failed"
         );
         parse(STARTER).unwrap();
+        for (name, _, yaml) in TEMPLATES {
+            for cli in ["claude", "codex", "gemini", "aider"] {
+                let t = parse(&fill_template(yaml, cli, None))
+                    .unwrap_or_else(|e| panic!("template {name} with {cli}: {e}"));
+                assert!(t.agents.iter().all(|m| m.cli == cli), "{name}");
+            }
+            let t = parse(&fill_template(yaml, "claude", Some("./agent.sh --it's"))).unwrap();
+            assert!(
+                t.agents.iter().all(|m| m.cmd == "./agent.sh --it's"),
+                "{name}"
+            );
+        }
     }
 
     #[test]

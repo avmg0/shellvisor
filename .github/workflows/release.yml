@@ -100,8 +100,30 @@ jobs:
             dist/*.tar.gz*
             dist/*.deb*
 
+  # Performance numbers for this release, always on the same runner type so
+  # releases compare; scripts/release.sh adds them to docs/bench/history.json.
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2.9.0
+      - run: cargo build --release
+      - name: Measure
+        env:
+          BENCH_TABS: "3"
+          BENCH_LAYOUT: dev
+          BENCH_IDLE_SECS: "10"
+        run: |
+          mkdir -p dist
+          cargo run --release --example bench -- --json dist/bench.json
+      - uses: actions/upload-artifact@v6
+        with:
+          name: bench
+          path: dist/bench.json
+
   release:
-    needs: build
+    needs: [build, bench]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v7
@@ -114,5 +136,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.deb dist/SHA256SUMS \
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.deb dist/SHA256SUMS dist/bench.json \
             --repo "$GITHUB_REPOSITORY" --title "Shellvisor $GITHUB_REF_NAME" --generate-notes

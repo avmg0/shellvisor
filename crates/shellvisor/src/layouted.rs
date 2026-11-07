@@ -42,7 +42,7 @@ pub struct Kind {
 }
 
 /// The palette.
-pub const KINDS: [Kind; 9] = [
+pub const KINDS: [Kind; 13] = [
     Kind {
         name: "Shell",
         tool: None,
@@ -87,6 +87,26 @@ pub const KINDS: [Kind; 9] = [
         name: "Activity",
         tool: Some("activity"),
         note: "downloads · installs",
+    },
+    Kind {
+        name: "Ports",
+        tool: Some("ports"),
+        note: "listening · open · stop",
+    },
+    Kind {
+        name: "Docker",
+        tool: Some("docker"),
+        note: "containers · logs",
+    },
+    Kind {
+        name: "Logs",
+        tool: Some("logs"),
+        note: "follow files · filter",
+    },
+    Kind {
+        name: "HTTP",
+        tool: Some("http"),
+        note: "send requests",
     },
 ];
 
@@ -782,7 +802,14 @@ impl Editor {
                     Style::default()
                 },
             );
-            put(buf, area.x + 2, y, pal_w - 2, k.name, st);
+            // no room for a note line: being carried shows on the name's line
+            let carried_here = !roomy && self.carry.is_some_and(|(c, _)| c == i);
+            let label = if carried_here {
+                format!("{} · dragging", k.name)
+            } else {
+                k.name.to_string()
+            };
+            put(buf, area.x + 2, y, pal_w - 2, &label, st);
             if used.contains(k) {
                 let tag = "●";
                 put(

@@ -14,3 +14,10 @@ Upstream: https://github.com/doy/vt100-rust (MIT, see LICENSE).
    and `Screen::scrollback_lines()` for searching a pane's history, and ED 3
    (`ESC [ 3 J`, what `clear` sends) clears the scrollback like xterm and
    Terminal.app.
+
+3. **No panics on odd input** (`src/grid.rs` `col_wrap`, `src/screen.rs`
+   `text`, `src/row.rs` `resize`), found by Shellvisor's random-input tests:
+   a wide character on a one-column screen is dropped instead of breaking the
+   cell invariants; a row made narrower clears a wide character cut in half;
+   wrapping after a resize with a stale scroll region saturates instead of
+   underflowing.

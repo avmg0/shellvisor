@@ -18,6 +18,7 @@ mod bus;
 mod cli;
 mod config;
 mod connect;
+mod crash;
 mod data;
 mod doctor;
 mod files;
@@ -33,11 +34,13 @@ mod layouted;
 mod loading;
 mod mcp;
 mod mcpscreen;
+mod mergeq;
 mod mouse;
 mod osinfo;
 mod palette;
 mod paths;
 mod remote;
+mod replay;
 mod review;
 mod selftest;
 mod serial;
@@ -46,6 +49,7 @@ mod sessionlog;
 mod sessions;
 mod settings;
 mod shell;
+mod svc;
 mod sysmon;
 mod tableview;
 mod team;
@@ -116,6 +120,7 @@ fn install_sv_link(cache: &Path) -> Option<PathBuf> {
 }
 
 fn main() {
+    crash::install();
     let argv0 = std::env::args_os()
         .next()
         .map(PathBuf::from)
@@ -237,6 +242,7 @@ fn main() {
             }
         },
         agent_worktree: cfg.agents.worktree,
+        agent_replay: cfg.agents.replay,
         agent_limits: cfg.agents.limits.get(),
         planner: cfg.agents.planner.clone(),
         bus_path,

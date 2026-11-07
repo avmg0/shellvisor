@@ -9,6 +9,8 @@
 //! `BENCH_LAYOUT=dev` lays the last tab out as a preset (files + system panes);
 //! the RSS budget is then the P2 one (15 MB).
 //! With `--check`, exits 1 if any budget is exceeded.
+//! With `--json FILE`, also writes the numbers there (the release workflow
+//! attaches it to each release; `scripts/bench-history.py` charts them).
 
 use portable_pty::{CommandBuilder, PtySize};
 use std::io::Read;
@@ -210,6 +212,21 @@ fn main() {
         format!("≤ {MAX_IDLE_CPU_PCT} %"),
         idle_cpu <= MAX_IDLE_CPU_PCT,
     );
+
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "--json") {
+        let path = args.get(i + 1).expect("--json FILE");
+        let json = format!(
+            "{{\"version\":\"{}\",\"os\":\"{}-{}\",\"tabs\":{tabs},\"layout\":\"{}\",\"binary_mb\":{size_mb:.3},\"first_frame_ms\":{},\"prompt_ms\":{},\"rss_mb\":{rss_mb:.2},\"idle_cpu_pct\":{idle_cpu:.3}}}\n",
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            layout.as_deref().unwrap_or(""),
+            first_frame.as_millis(),
+            prompt.as_millis(),
+        );
+        std::fs::write(path, json).expect("write --json file");
+    }
 
     if check && !ok {
         std::process::exit(1);

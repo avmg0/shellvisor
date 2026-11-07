@@ -70,6 +70,8 @@ pub struct Options {
     pub light: bool,
     /// New agents get their own git worktree.
     pub agent_worktree: bool,
+    /// Record agents for `sv agent replay`.
+    pub agent_replay: bool,
     pub agent_limits: agents::Limits,
     pub planner: Option<String>,
     /// The agent message bus socket (`sv agent …`).
@@ -127,6 +129,8 @@ pub enum Tool {
     Remote(crate::remote::RemotePane),
     /// Preview, Agents or Activity (board 4's other pane kinds).
     Info(crate::infopane::InfoPane),
+    /// Ports, Docker, Logs or HTTP.
+    Svc(crate::svc::SvcPane),
 }
 
 impl Tool {
@@ -139,6 +143,7 @@ impl Tool {
             Tool::Flow(_) => "flow",
             Tool::Remote(_) => "remote",
             Tool::Info(i) => i.kind.name(),
+            Tool::Svc(s) => s.kind.name(),
         }
     }
 
@@ -149,6 +154,7 @@ impl Tool {
             Tool::Flow(f) => f.title(),
             Tool::Remote(r) => r.title(),
             Tool::Info(i) => i.title(),
+            Tool::Svc(s) => s.title(),
         }
     }
 }
@@ -791,14 +797,26 @@ pub struct NewAgentForm {
     pub stop_after: String,
     /// An agent CLI already running in a shell split: (pane, "claude in shell tab 2 (bash) pid 50122").
     pub detected: Option<(PaneId, String)>,
+    /// Team templates offered: (name, what it does). 0 in `template` is
+    /// "just this agent".
+    pub templates: Vec<(String, String)>,
+    pub template: usize,
     /// 0 CLI · 1 name · 2 folder · 3 isolation · 4 runs in · 5 instruction /
-    /// command · 6 approvals · 7 stop after · 8 attach (when detected)
+    /// command · 6 approvals · 7 stop after · 8 team template · 9 attach
+    /// (when detected)
     pub field: usize,
     pub error: Option<String>,
 }
 
 impl NewAgentForm {
-    pub const FIELDS: usize = 8;
+    pub const FIELDS: usize = 9;
+
+    /// The chosen team template, if any.
+    pub fn team(&self) -> Option<&(String, String)> {
+        self.template
+            .checked_sub(1)
+            .and_then(|i| self.templates.get(i))
+    }
 
     pub fn cli(&self) -> Cli {
         self.clis[self.cli]
@@ -852,6 +870,10 @@ pub struct App {
     team: Option<TeamRun>,
     /// The agent board (alt+g).
     pub board: Option<crate::board::Board>,
+    /// Replay recordings of the agents, by name.
+    replays: HashMap<String, crate::replay::Recorder>,
+    /// Files / URL for the next Logs or HTTP pane (`sv pane logs a.log`).
+    svc_args: Vec<String>,
     /// Dragging a split's divider with the mouse: its path in the tree.
     drag: Option<Vec<bool>>,
     /// The layout editor (alt+e).
@@ -997,6 +1019,8 @@ pub fn run(opts: Options) -> io::Result<i32> {
         waiters: Vec::new(),
         team: None,
         board: None,
+        replays: HashMap::new(),
+        svc_args: Vec::new(),
         plan_kept: None,
         drag: None,
         editor: None,
@@ -1280,9 +1304,11 @@ impl App {
             Some(t) => Leaf {
                 cwd: match t {
                     Tool::Files(f) => f.root.display().to_string(),
-                    Tool::System(_) | Tool::Flow(_) | Tool::Remote(_) | Tool::Info(_) => {
-                        String::new()
-                    }
+                    Tool::System(_)
+                    | Tool::Flow(_)
+                    | Tool::Remote(_)
+                    | Tool::Info(_)
+                    | Tool::Svc(_) => String::new(),
                 },
                 tool: Some(t.kind().to_string()),
             },
@@ -1514,6 +1540,9 @@ impl App {
             Tool::Flow(FlowPane::new())
         } else if let Some(k) = crate::infopane::InfoKind::parse(kind) {
             Tool::Info(crate::infopane::InfoPane::new(k))
+        } else if let Some(k) = crate::svc::Kind::parse(kind) {
+            let args = std::mem::take(&mut self.svc_args);
+            Tool::Svc(crate::svc::SvcPane::new(k, &cwd, &args))
         } else {
             let (mut f, mut jobs) = FilesPane::new(cwd);
             f.folder_style = Self::folder_style(&self.ui);
@@ -2367,6 +2396,7 @@ impl App {
                     }
                     out.redraw = true;
                 }
+                Some(Tool::Svc(sv)) => out.redraw = sv.poll(low),
                 Some(Tool::System(_)) | Some(Tool::Remote(_)) => {}
                 // agents and downloads change on their own: keep them drawn
                 Some(Tool::Info(_)) => out.redraw = true,
@@ -2516,6 +2546,7 @@ impl App {
                 Tool::Remote(_) => continue,
                 Tool::Info(_) if self.low_power => Duration::from_secs(5),
                 Tool::Info(_) => Duration::from_secs(1),
+                Tool::Svc(sv) => sv.due_in(self.low_power),
                 Tool::Files(_) if self.low_power => continue,
                 Tool::Files(f) => f.poll_due_in(),
             };
@@ -5559,6 +5590,14 @@ impl App {
                 self.close_board();
                 self.open_review(&name);
             }
+            Some(BoardAct::Replay(name)) => {
+                self.close_board();
+                self.run_in_new_tab(&format!("sv agent replay {name}"));
+            }
+            Some(BoardAct::Queue) => {
+                self.close_board();
+                self.run_in_new_tab("sv agent queue");
+            }
             Some(BoardAct::Send(name, text)) => match self.send_to_agent(&name, &text, "you") {
                 Ok(()) => self.notice(format!("sent to {name}")),
                 Err(e) => self.notice(e),
@@ -6743,6 +6782,11 @@ impl App {
             full_auto: false,
             stop_after: String::new(),
             detected,
+            templates: crate::team::templates()
+                .into_iter()
+                .map(|(n, a, ..)| (n, a))
+                .collect(),
+            template: 0,
             field: 5,
             error: none.then(|| "no agent CLI found on PATH (claude, codex, gemini, aider) — run any command as a custom agent".to_string()),
         };
@@ -6805,13 +6849,73 @@ impl App {
             }
             b" " if f.field == 6 => f.full_auto = !f.full_auto,
             _ if arrow && f.field == 6 => f.full_auto = !f.full_auto,
-            b"\r" if f.field == 8 => {
+            _ if (arrow || key == b" ") && f.field == 8 => {
+                let k = f.templates.len() + 1;
+                f.template = if left && arrow {
+                    (f.template + k - 1) % k
+                } else {
+                    (f.template + 1) % k
+                };
+                f.error = None;
+            }
+            b"\r" if f.field == 9 => {
                 // "Attach as column": the CLI already running in that split
                 if let Some((id, _)) = f.detected {
                     self.modal = Modal::None;
                     self.focus_pane(id);
                     self.attach_agent();
                     return;
+                }
+            }
+            b"\r" if f.team().is_some() => {
+                // a ready-made team with this CLI; the instruction is its goal
+                if !f.installed[f.cli] {
+                    f.error = Some(format!(
+                        "{} isn't installed — pick another, or Custom",
+                        f.cli().label()
+                    ));
+                    self.modal = Modal::NewAgent(Box::new(f));
+                    return;
+                }
+                let name = f.team().map(|t| t.0.clone()).unwrap_or_default();
+                let generic = f.cli() == Cli::Generic;
+                if generic {
+                    f.error = Some(format!(
+                        "a team of custom commands: sv agent run --template {name} --cmd '…' \"goal\""
+                    ));
+                    self.modal = Modal::NewAgent(Box::new(f));
+                    return;
+                }
+                let goal = f.prompt.trim().to_string();
+                if goal.is_empty() {
+                    f.error = Some("type what the team should do (the instruction)".into());
+                    f.field = 5;
+                    self.modal = Modal::NewAgent(Box::new(f));
+                    return;
+                }
+                let yaml = crate::team::template(
+                    &name,
+                    f.cli().name(),
+                    generic.then_some(f.custom.as_str()),
+                );
+                let team = yaml.and_then(|y| crate::team::parse(&y));
+                let folder = {
+                    let t = f.folder.trim();
+                    let home = std::env::var("HOME").unwrap_or_default();
+                    let p = match t.strip_prefix("~") {
+                        Some(rest) => PathBuf::from(format!("{home}{rest}")),
+                        None => PathBuf::from(t),
+                    };
+                    (!t.is_empty() && !t.contains('…') && p.is_dir()).then_some(p)
+                }
+                .or_else(|| self.focused_cwd())
+                .unwrap_or_default();
+                match team.and_then(|t| self.begin_team(t, goal, folder, None, None)) {
+                    Ok(_) => {
+                        self.modal = Modal::None;
+                        return;
+                    }
+                    Err(e) => f.error = Some(e),
                 }
             }
             b"\r" => {
@@ -7156,6 +7260,13 @@ impl App {
         a.status = agents::Status::Working;
         p.agent_quiet_until = Instant::now() + Duration::from_millis(800);
         self.dirty = true;
+        let how = match ans {
+            Answer::Allow => "you allowed",
+            Answer::Always => "you allowed always",
+            Answer::Deny => "you denied",
+        };
+        let name = a.name.clone();
+        self.replay_note(&name, "answer", &format!("{how}: {}", ap.what));
     }
 
     /// Look at an agent's screen for an approval prompt (≤ 5×/s).
@@ -7232,6 +7343,16 @@ impl App {
             }
         }
         if let Some(n) = notice {
+            if !n.starts_with('⚑') {
+                // answered without you: the replay says by whom
+                let name = self
+                    .panes
+                    .get(&id)
+                    .and_then(|p| p.agent.as_ref())
+                    .map(|a| a.name.clone())
+                    .unwrap_or_default();
+                self.replay_note(&name, "answer", &n);
+            }
             self.notice(n);
         }
     }
@@ -7261,6 +7382,7 @@ impl App {
                     "waiting": a.approval().map(|x| x.what.clone()).unwrap_or_default(),
                     "started": crate::data::value::iso_date(now - a.started.elapsed().as_secs() as i64),
                     "folder": p.cwd,
+                    "worktree": a.worktree.as_ref().map(|w| w.display().to_string()).unwrap_or_default(),
                 }))
             })
             .collect();
@@ -7310,8 +7432,150 @@ impl App {
         }
     }
 
+    /// What a Ports, Docker, Logs or HTTP pane asked for.
+    fn svc_acts(&mut self, id: PaneId, acts: Vec<crate::svc::Act>) {
+        use crate::svc::Act;
+        for a in acts {
+            match a {
+                Act::OpenUrl(u) => self.open_url(&u),
+                Act::Copy(t) => {
+                    crate::osinfo::copy_to_clipboard(&t);
+                }
+                Act::Notice(n) => self.notice(n),
+                Act::Table(title, d) => self.table = Some(TableView::new(title, d)),
+                Act::Signal(pid, sig) => {
+                    let r = unsafe { libc::kill(pid as libc::pid_t, sig) };
+                    self.notice(if r == 0 {
+                        format!(
+                            "sent {} to {pid}",
+                            if sig == libc::SIGKILL { "kill" } else { "stop" }
+                        )
+                    } else {
+                        format!("couldn't signal {pid}: {}", io::Error::last_os_error())
+                    });
+                }
+                Act::FocusPid(chain) => {
+                    let hit = self
+                        .panes
+                        .iter()
+                        .find(|(_, p)| p.pane.pid().is_some_and(|sp| chain.contains(&(sp as i64))))
+                        .map(|(i, _)| *i);
+                    match hit {
+                        Some(pane) => self.focus_pane(pane),
+                        None => self.notice("it wasn't started from a Shellvisor tab"),
+                    }
+                }
+                Act::RunSplit(cmd) => {
+                    let Some(tab) = self.tab_of(id) else { continue };
+                    let cwd = self.focused_cwd();
+                    match self.new_pane(cwd) {
+                        Ok(new) => {
+                            let t = &mut self.tabs[tab];
+                            t.root.split(id, Axis::Vertical, new);
+                            t.focus = new;
+                            t.zoomed = false;
+                            if let Some(p) = self.panes.get_mut(&new) {
+                                let _ = p.pane.write(format!("{cmd}\r").as_bytes());
+                            }
+                            self.relayout();
+                        }
+                        Err(e) => self.notice(format!("couldn't open a split: {e}")),
+                    }
+                }
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// Shell pids → "tab 2 · bash", for the Ports pane.
+    pub fn shell_pids(&self) -> HashMap<i64, String> {
+        let mut m = HashMap::new();
+        for (ti, t) in self.tabs.iter().enumerate() {
+            for id in t.root.panes() {
+                if let Some(p) = self.panes.get(&id) {
+                    if let Some(pid) = p.pane.pid() {
+                        let name = t.name.clone().unwrap_or_else(|| p.shell.clone());
+                        m.insert(pid as i64, format!("tab {} · {name}", ti + 1));
+                    }
+                }
+            }
+        }
+        m
+    }
+
+    /// A new tab in the focused folder, running `cmd` at its prompt.
+    fn run_in_new_tab(&mut self, cmd: &str) {
+        let tab = self.active;
+        match self.new_pane(self.focused_cwd()) {
+            Ok(id) => {
+                self.tabs.insert(tab + 1, Tab::new(id));
+                self.switch_tab(tab + 1);
+                if let Some(p) = self.panes.get_mut(&id) {
+                    let _ = p.pane.write(format!("{cmd}\r").as_bytes());
+                }
+            }
+            Err(e) => self.notice(format!("couldn't open a tab: {e}")),
+        }
+    }
+
+    /// Add what changed to each agent's replay recording.
+    fn record_agents(&mut self) {
+        if !self.opts.agent_replay {
+            return;
+        }
+        let mut live: Vec<String> = Vec::new();
+        for p in self.panes.values() {
+            let Some(a) = p.agent.as_ref() else { continue };
+            live.push(a.name.clone());
+            let rec = match self.replays.get_mut(&a.name) {
+                Some(r) => r,
+                None => {
+                    let header = format!(
+                        "{} · {}{}{}",
+                        a.name,
+                        a.cli.name(),
+                        a.branch
+                            .as_ref()
+                            .map(|b| format!(" · branch {b}"))
+                            .unwrap_or_default(),
+                        if a.task.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" · task: {}", a.task)
+                        }
+                    );
+                    let Some(r) = crate::replay::Recorder::new(&a.name, &header) else {
+                        continue;
+                    };
+                    self.replays.entry(a.name.clone()).or_insert(r)
+                }
+            };
+            let rows: Vec<String> = p.pane.screen().rows(0, p.size.1).collect();
+            let files: Vec<(String, u64, u64)> = a
+                .files
+                .iter()
+                .map(|f| (f.path.clone(), f.added, f.removed))
+                .collect();
+            let asking = a.approval().map(|x| x.what.clone());
+            let status = if a.reported.is_empty() {
+                "starting"
+            } else {
+                a.reported
+            };
+            rec.observe(status, &rows, &files, asking.as_deref());
+        }
+        self.replays.retain(|n, _| live.contains(n));
+    }
+
+    fn replay_note(&mut self, agent: &str, kind: &str, text: &str) {
+        if let Some(r) = self.replays.get_mut(agent) {
+            r.note(kind, text);
+        }
+    }
+
     fn tick_agents(&mut self) {
         self.tick_mcp();
+        self.record_agents();
         // New agent "stop after": pause it when its time is up
         let due: Vec<String> = self
             .panes
@@ -7497,6 +7761,12 @@ impl App {
             }
             Some(Tool::Info(_)) => {
                 self.info_key(id, key);
+                return;
+            }
+            Some(Tool::Svc(sv)) => {
+                let (redraw, acts) = sv.key(key);
+                self.dirty |= redraw;
+                self.svc_acts(id, acts);
                 return;
             }
             None => return,
@@ -8222,8 +8492,28 @@ impl App {
             [
                 "pane",
                 kind @ ("files" | "git" | "system" | "thermal" | "flow" | "preview" | "agents"
-                | "activity"),
-            ] => self.show_tool(kind, false),
+                | "activity" | "ports" | "docker" | "logs" | "http"),
+                rest @ ..,
+            ] => {
+                // more files for a Logs pane already open
+                let tab = self.active;
+                let open_logs = self.tabs[tab].root.panes().into_iter().find(|i| {
+                    matches!(self.tools.get(i), Some(Tool::Svc(s)) if s.kind == crate::svc::Kind::Logs)
+                });
+                if let (Some(lid), "logs", false) = (open_logs, *kind, rest.is_empty()) {
+                    if let Some(Tool::Svc(s)) = self.tools.get_mut(&lid) {
+                        for f in rest.iter() {
+                            let _ = s.add_file(PathBuf::from(f));
+                        }
+                    }
+                    self.tabs[tab].focus = lid;
+                    self.dirty = true;
+                    Ok(())
+                } else {
+                    self.svc_args = rest.iter().map(|s| s.to_string()).collect();
+                    self.show_tool(kind, false)
+                }
+            }
             ["layout", "agents"] => {
                 self.toggle_agents();
                 Ok(())

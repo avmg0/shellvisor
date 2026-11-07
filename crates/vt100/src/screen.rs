@@ -731,6 +731,11 @@ impl Screen {
             .try_into()
             // width() can only return 0, 1, or 2
             .unwrap();
+        // Shellvisor: a wide character can't fit on a one-column screen;
+        // drop it instead of breaking the cell invariants below.
+        if width > size.cols {
+            return;
+        }
 
         // it doesn't make any sense to wrap if the last column in a row
         // didn't already have contents. don't try to handle the case where a

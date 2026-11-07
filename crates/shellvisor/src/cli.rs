@@ -19,6 +19,7 @@ usage:
   sv layout [name]   a preset (dev monitor files data agents) or a saved layout · no name: list them
   sv flow 'a | b | c'             run a pipeline with a meter on every stage
   sv flowpane  open the Flow pane (what the shell is running, live)
+  sv pane ports|docker|logs [files…]|http [url]   service panes (also preview, agents, activity)
   sv power on|off|auto            low-power mode (auto = on battery)
   sv theme light|dark|auto        colours of Shellvisor's own frames and panes
   sv autostart on|off|status      start Shellvisor when a terminal opens (zsh, bash)
@@ -36,11 +37,15 @@ usage:
   sv agent attach   make the agent running in this shell an agent column
   sv agent run team.yaml 'goal'   start a team of agents (team.yaml)
   sv agent plan 'goal'            plan a team from a goal · sv agent board   tree, timeline, log (alt+g)
+  sv agent run --template NAME 'goal'   a ready-made team (sv agent templates)
+  sv agent queue · sv agent replay NAME   merge finished agents one by one · step through what one did
   sv agent spawn|send|wait|tree|logs|pause|resume|stop|log|emit|budget   (sv agent for details)
   sv agents    the agents as a table · sv connect   CLIs, logins, MCP servers, ssh hosts
   sv data      list the data commands (ls, ps, open, where, sort-by, to csv…)
   sv status    is Shellvisor running in this terminal?
   sv doctor    check this terminal: colours, UTF-8, hooks, Option-as-Alt, old copies (--no-keys)
+  sv bug       open a new GitHub issue with your setup and the last crash report filled in (--print: just show it)
+  sv crashes   list the crash reports saved on this computer (never sent anywhere)
   sv selftest  start your shells with the hooks and your rc files, check prompt, cd, exit codes
   sv version   print the version
   sv help      this help
@@ -193,6 +198,10 @@ pub fn run(args: &[String]) -> i32 {
         "autostart" => crate::autostart::run(&args[1..]),
         "doctor" => crate::doctor::run(&args[1..]),
         "selftest" => crate::selftest::run(&args[1..]),
+        "bug" => crate::crash::bug(&args[1..]),
+        "crashes" => crate::crash::list(),
+        // for tests of the crash report
+        "__panic" => panic!("test panic from sv __panic"),
         "mcp" => {
             if !inside() {
                 // outside Shellvisor: list what's configured
@@ -428,6 +437,7 @@ pub fn run(args: &[String]) -> i32 {
                 return not_running(cmd);
             }
             let arg = args.get(1).map(String::as_str);
+            let mut extra: Vec<String> = Vec::new();
             let words: Vec<&str> = match (cmd, arg) {
                 ("files", None) => vec!["files"],
                 ("files", Some(v)) if crate::files::View::parse(v).is_some() => vec!["files", v],
@@ -438,10 +448,22 @@ pub fn run(args: &[String]) -> i32 {
                     "pane",
                     Some(
                         k @ ("files" | "git" | "system" | "thermal" | "flow" | "preview" | "agents"
-                        | "activity"),
+                        | "activity" | "ports" | "docker" | "logs" | "http"),
                     ),
                 ) => {
-                    vec!["pane", k]
+                    // sv pane logs a.log b.log · sv pane http URL: files made absolute
+                    let cwd = std::env::current_dir().unwrap_or_default();
+                    for a in &args[2..] {
+                        let v = if k == "logs" {
+                            cwd.join(a).display().to_string()
+                        } else {
+                            a.clone()
+                        };
+                        extra.push(v);
+                    }
+                    let mut w = vec!["pane", k];
+                    w.extend(extra.iter().map(String::as_str));
+                    w
                 }
                 ("layout", None) => {
                     println!("presets: dev monitor files data agents");
@@ -509,7 +531,15 @@ pub fn run(args: &[String]) -> i32 {
 }
 
 fn agent(args: &[String]) -> i32 {
-    if !inside() {
+    // these work in a plain terminal too: they only read and write files
+    let offline = match args.first().map(String::as_str) {
+        Some("templates" | "template" | "replay" | "queue") => true,
+        Some("run") => args
+            .iter()
+            .any(|a| a == "--init" || a == "--dry-run" || a == "-n"),
+        _ => false,
+    };
+    if !inside() && !offline {
         return not_running("agent");
     }
     let usage = AGENT_USAGE;
@@ -519,6 +549,10 @@ fn agent(args: &[String]) -> i32 {
             | "emit" | "usage" | "budget"),
         ) => agent_bus(op, &args[1..]),
         Some("run") => agent_run(&args[1..]),
+        Some("templates") => agent_templates(),
+        Some("replay") => crate::replay::run(&args[1..]),
+        Some("queue") => crate::mergeq::run(&args[1..]),
+        Some("template") => agent_template(&args[1..]),
         Some("diff" | "review") => {
             let Some(name) = args.get(1) else {
                 eprintln!("sv agent diff NAME: which agent's work to review");
@@ -628,6 +662,10 @@ usage: sv agent new [claude|codex|gemini|aider] [--name N] [--here] [\"first tas
        sv agent pause|resume|stop <name> [--tree]
        sv agent log                     what agents did to each other
        sv agent run [team.yaml] \"goal\" [--dry-run]   start a team (--init: a starter file)
+       sv agent run --template NAME [--cli codex | --cmd '…'] \"goal\"   a ready-made team
+       sv agent templates · sv agent template show|save|rm NAME [team.yaml]
+       sv agent queue [NAME…] [--test 'cmd'] [--dry-run]   rebase, test and merge finished agents one by one
+       sv agent replay [NAME | --list]   step through what an agent did (screen, files, approvals)
        sv agent emit <event> [\"details\"]  tell the team something happened (e.g. failed)
        sv agent usage <tokens>          report tokens used (agents that don't log them)
        sv agent budget [tokens]         the team's budget: show, or raise and resume
@@ -902,17 +940,124 @@ fn team_line(t: &serde_json::Value) -> String {
     s
 }
 
+/// `sv agent templates`
+fn agent_templates() -> i32 {
+    for (name, about, _, mine) in crate::team::templates() {
+        println!("{name:<10} {about}{}", if mine { "  (yours)" } else { "" });
+    }
+    println!(
+        "\nsv agent run --template NAME \"goal\"  ·  --cli codex to use another CLI  ·  your own: sv agent template save NAME [team.yaml]"
+    );
+    0
+}
+
+/// `sv agent template show|save|rm NAME [file]`
+fn agent_template(args: &[String]) -> i32 {
+    let fail = |m: String| {
+        eprintln!("sv agent template: {m}");
+        2
+    };
+    let (Some(op), Some(name)) = (args.first(), args.get(1)) else {
+        return fail("show|save|rm NAME [team.yaml]".into());
+    };
+    if !crate::agents::valid_name(name) {
+        return fail(format!("name `{name}`: letters, digits, - and _"));
+    }
+    let path = crate::team::templates_dir().join(format!("{name}.yaml"));
+    match op.as_str() {
+        "show" => match crate::team::templates().into_iter().find(|t| &t.0 == name) {
+            Some((_, _, y, _)) => {
+                print!("{y}");
+                0
+            }
+            None => fail(format!("no template `{name}`")),
+        },
+        "save" => {
+            let src = args
+                .get(2)
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from(".shellvisor/team.yaml"));
+            let text = match std::fs::read_to_string(&src) {
+                Ok(t) => t,
+                Err(e) => return fail(format!("{}: {e}", src.display())),
+            };
+            // checked with the CLI placeholder filled, so `{cli}` may stay in
+            if let Err(e) = crate::team::parse(&crate::team::fill_template(&text, "claude", None)) {
+                return fail(format!("{}: {e}", src.display()));
+            }
+            let _ = std::fs::create_dir_all(crate::team::templates_dir());
+            match std::fs::write(&path, text) {
+                Ok(()) => {
+                    println!("saved as template {name} — sv agent run --template {name} \"goal\"");
+                    0
+                }
+                Err(e) => fail(e.to_string()),
+            }
+        }
+        "rm" => match std::fs::remove_file(&path) {
+            Ok(()) => {
+                println!("removed template {name}");
+                0
+            }
+            Err(_) => fail(format!(
+                "no saved template `{name}` (built-in ones can't be removed)"
+            )),
+        },
+        _ => fail(format!("`{op}` — show, save or rm")),
+    }
+}
+
 /// `sv agent run [team.yaml] "goal" [--dry-run]` · `sv agent run --init`
 fn agent_run(args: &[String]) -> i32 {
     use crate::team::{self, Start};
     let default = std::path::Path::new(".shellvisor/team.yaml");
+    // --template NAME [--cli claude|codex|…] [--cmd 'command']
+    let val = |k: &str| {
+        args.iter()
+            .position(|a| a == k)
+            .and_then(|i| args.get(i + 1))
+            .cloned()
+    };
+    let valued = ["--template", "-t", "--cli", "--cmd"];
+    let template_name = val("--template").or_else(|| val("-t"));
+    let tcli = val("--cli").unwrap_or_else(|| "claude".into());
+    let tcmd = val("--cmd");
+    let from_template = match &template_name {
+        Some(n) => match team::template(n, &tcli, tcmd.as_deref()) {
+            Ok(y) => Some(y),
+            Err(e) => {
+                eprintln!("sv agent run: {e}");
+                return 2;
+            }
+        },
+        None => None,
+    };
+    let args: Vec<String> = {
+        let mut out = Vec::new();
+        let mut skip = false;
+        for a in args {
+            if skip {
+                skip = false;
+                continue;
+            }
+            if valued.contains(&a.as_str()) {
+                skip = true;
+                continue;
+            }
+            out.push(a.clone());
+        }
+        out
+    };
     if args.iter().any(|a| a == "--init") {
         if default.exists() {
             eprintln!("sv agent run: {} already exists", default.display());
             return 1;
         }
         let _ = std::fs::create_dir_all(".shellvisor");
-        return match std::fs::write(default, team::STARTER) {
+        let text = from_template
+            .clone()
+            .unwrap_or_else(|| team::STARTER.to_string());
+        return match std::fs::write(default, text) {
             Ok(()) => {
                 println!(
                     "wrote {} — edit it, then: sv agent run \"what the team should do\"",
@@ -932,6 +1077,13 @@ fn agent_run(args: &[String]) -> i32 {
         .filter(|a| !a.starts_with("--") && *a != "-n")
         .collect();
     let (file, goal) = match words.first() {
+        _ if from_template.is_some() => (
+            std::path::PathBuf::from(format!(
+                "template {}",
+                template_name.as_deref().unwrap_or("")
+            )),
+            &words[..],
+        ),
         Some(f) if f.ends_with(".yaml") || f.ends_with(".yml") => {
             (std::path::PathBuf::from(f.as_str()), &words[1..])
         }
@@ -943,7 +1095,11 @@ fn agent_run(args: &[String]) -> i32 {
         .map(|s| s.as_str())
         .collect::<Vec<_>>()
         .join(" ");
-    let text = match std::fs::read_to_string(&file) {
+    let text = match from_template
+        .clone()
+        .map(Ok)
+        .unwrap_or_else(|| std::fs::read_to_string(&file))
+    {
         Ok(t) => t,
         Err(e) => {
             eprintln!(
