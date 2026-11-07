@@ -419,7 +419,7 @@ pub fn run(args: &[String]) -> i32 {
             send_seq(request_sequence(&["settings"]))
         }
         "agent" => agent(&args[1..]),
-        "files" | "sys" | "system" | "flowpane" | "layout" | "power" | "theme" => {
+        "files" | "sys" | "system" | "flowpane" | "layout" | "power" | "theme" | "pane" => {
             if !inside() {
                 return not_running(cmd);
             }
@@ -430,6 +430,15 @@ pub fn run(args: &[String]) -> i32 {
                 ("theme", Some(t @ ("light" | "dark" | "auto"))) => vec!["theme", t],
                 ("sys" | "system", None) => vec!["system"],
                 ("flowpane", None) => vec!["flow"],
+                (
+                    "pane",
+                    Some(
+                        k @ ("files" | "git" | "system" | "thermal" | "flow" | "preview" | "agents"
+                        | "activity"),
+                    ),
+                ) => {
+                    vec!["pane", k]
+                }
                 ("layout", None) => {
                     println!("presets: dev monitor files data agents");
                     let saved = crate::layouted::saved_layouts();

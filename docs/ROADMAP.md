@@ -216,7 +216,7 @@ Deliverables
 - Agent tree, board 15 (done): ← / → fold and open a branch, `c` promotes a sub-agent to its own column, `+` spawns a child of the selected agent, `i` messages it; the details show spawned by · via · worktree, the instruction and its output.
 - Layout editor drop zones, board 4 (done): drag a palette item onto a pane; a dashed zone shows where it lands. The editor's mouse (presets, panes, borders) now works from the terminal, not only in tests.
 
-Next: sync scroll, undo an agent's edit from Recent.
+- The rest of the boards (done): sync scroll across agent columns (`ctrl+] Y`); an approval policy per dispatch in Plan (`p`: auto · ask · full auto, with `deny:` in team.yaml); Tree indent guides; Columns type-to-jump; Grid card sizes (`+` / `−`); Recent `u` undoes an agent's edit (asks, keeps a copy in the Trash); Preview, Agents and Activity as pane kinds (`sv pane …`, the layout editor); plain `c` / `o` on the finish toast at an empty prompt. A second tool pane now stacks under the first instead of narrowing the shell.
 
 ---
 

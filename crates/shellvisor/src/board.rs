@@ -225,13 +225,31 @@ pub fn overlap_risk(tasks: &[Task]) -> Vec<(String, Vec<String>)> {
 
 /// The plan as a team: one member per task (own worktree), started when its
 /// deps are done, then a review member once everything is done.
+/// The approval policies a dispatch can use (board 7), with what each
+/// answers by itself and what it always refuses.
+pub const POLICIES: [(&str, &[&str], &[&str]); 3] = [
+    ("auto", &["read", "edit", "test", "lint"], &["delete"]),
+    ("ask", &[], &[]),
+    (
+        "full auto",
+        &[
+            "read", "edit", "test", "lint", "install", "network", "push", "command",
+        ],
+        &["delete"],
+    ),
+];
+
 pub fn plan_to_team(
     name: &str,
     tasks: &[Task],
     goal: &str,
     reviewer: &str,
     budget: Option<u64>,
+    policy: usize,
 ) -> Team {
+    let (_, approve, deny) = POLICIES[policy.min(POLICIES.len() - 1)];
+    let approve: Vec<String> = approve.iter().map(|s| s.to_string()).collect();
+    let deny: Vec<String> = deny.iter().map(|s| s.to_string()).collect();
     let how = |agent: &str| match Cli::parse(agent) {
         Some(c) => (c.name().to_string(), String::new()),
         None => (String::new(), agent.to_string()),
@@ -254,7 +272,8 @@ pub fn plan_to_team(
                 can_spawn: Vec::new(),
                 worktree: Some(true),
                 max_children: None,
-                approve: Vec::new(),
+                approve: approve.clone(),
+                deny: deny.clone(),
                 mcp: Vec::new(),
                 start: if t.deps.is_empty() {
                     Start::Now
@@ -288,7 +307,8 @@ pub fn plan_to_team(
             can_spawn: Vec::new(),
             worktree: Some(false),
             max_children: None,
-            approve: Vec::new(),
+            approve: approve.clone(),
+            deny: deny.clone(),
             mcp: Vec::new(),
             start: Start::After(ids),
             stage: tasks.iter().map(|t| t.stage).max().unwrap_or(0) + 1,
@@ -371,6 +391,10 @@ pub struct Plan {
     pub reviewer: String,
     pub folder: PathBuf,
     pub step: bool,
+    /// Approvals for the dispatched agents: 0 safe (auto read, edit, test,
+    /// lint · ask install, network, push · never delete) · 1 ask everything
+    /// · 2 full auto (still never delete).
+    pub policy: usize,
     /// Bumped per planner run: late answers from an older run are ignored.
     pub run: u64,
 }
@@ -823,6 +847,7 @@ impl Board {
                         drop_task(&mut p.tasks, &id);
                         p.sel = p.sel.min(p.tasks.len().saturating_sub(1));
                     }
+                    b"p" => p.policy = (p.policy + 1) % POLICIES.len(),
                     b"+" | b"=" => {
                         let i = PARALLEL.iter().position(|x| *x == p.parallel).unwrap_or(1);
                         p.parallel = PARALLEL[(i + 1).min(PARALLEL.len() - 1)];
@@ -964,7 +989,7 @@ impl Board {
                     Phase::Planning(_) => "esc cancel · tab views",
                     Phase::Failed(_) => "⏎ try again · e edit goal · esc close",
                     Phase::Ready => {
-                        "↑↓ task · e edit · a reassign · x drop · +/- at once · b budget · ⏎ dispatch · s step by step · r re-plan · g goal"
+                        "↑↓ task · e edit · a reassign · x drop · +/- at once · b budget · p approvals · ⏎ dispatch · s step by step · r re-plan · g goal"
                     }
                     Phase::Dispatched(_) if self.plan.step => {
                         "⏎ start the next stage · tab tree / timeline / log · g new goal · esc close"
@@ -1293,6 +1318,24 @@ impl Board {
             a
         };
         row(buf, &mut sy, "agents", agents.join(" · "), TEXT);
+        // approvals for this dispatch (p cycles): ✔ auto · ? ask · ✖ never
+        let (pname, auto, never) = POLICIES[p.policy.min(POLICIES.len() - 1)];
+        row(buf, &mut sy, "approvals p", pname.to_string(), AMBER);
+        let asked: Vec<&str> = [
+            "read", "edit", "test", "lint", "install", "network", "push", "command",
+        ]
+        .into_iter()
+        .filter(|a| !auto.contains(a) && !never.contains(a))
+        .collect();
+        if !auto.is_empty() {
+            row(buf, &mut sy, "  ✔ auto", auto.join(", "), GREEN);
+        }
+        if !asked.is_empty() {
+            row(buf, &mut sy, "  ? ask", asked.join(", "), AMBER);
+        }
+        if !never.is_empty() {
+            row(buf, &mut sy, "  ✖ never", never.join(", "), RED);
+        }
         row(
             buf,
             &mut sy,
@@ -1980,7 +2023,9 @@ mod tests {
         drop_task(&mut t, "ui");
         let tests = t.iter().find(|x| x.id == "tests").unwrap();
         assert_eq!(tests.deps, vec!["api".to_string()]);
-        let team = plan_to_team("plan-1", &t, "price alerts", "claude", Some(1_000_000));
+        let team = plan_to_team("plan-1", &t, "price alerts", "claude", Some(1_000_000), 0);
+        assert!(team.agents[0].approve.contains(&"test".to_string()));
+        assert_eq!(team.agents[0].deny, vec!["delete".to_string()]);
         assert_eq!(team.agents.len(), 4); // 3 tasks + review
         let api = team.member("api").unwrap();
         assert_eq!(api.start, Start::Now);
@@ -1996,7 +2041,7 @@ mod tests {
         );
         assert!(review.task.contains("agent/api"));
         assert_eq!(review.worktree, Some(false));
-        let cmd = plan_to_team("p", &t, "g", "/x/fake.sh go", None);
+        let cmd = plan_to_team("p", &t, "g", "/x/fake.sh go", None, 1);
         assert_eq!(cmd.member("review").unwrap().cmd, "/x/fake.sh go");
         assert!(planner_prompt("g", &["claude".into()]).contains("ONLY a JSON object"));
     }
@@ -2017,6 +2062,7 @@ mod tests {
             reviewer: "claude".into(),
             folder: PathBuf::from("/tmp"),
             step: false,
+            policy: 0,
             run: 0,
         };
         let mut b = Board::new(View::Plan, plan);
@@ -2076,6 +2122,7 @@ mod tests {
             reviewer: String::new(),
             folder: PathBuf::from("/tmp"),
             step: false,
+            policy: 0,
             run: 0,
         };
         let mut b = Board::new(View::Tree, plan);

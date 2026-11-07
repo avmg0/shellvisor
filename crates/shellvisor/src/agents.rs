@@ -406,6 +406,8 @@ pub struct Agent {
     /// Approvals answered by themselves for a while (review board): until
     /// when (None: until its task is done), and which kinds.
     pub approve_for: Option<(Option<Instant>, Vec<Action>)>,
+    /// Actions refused without asking (a dispatch's approval policy).
+    pub never: Vec<Action>,
     /// Pause it after this long (New agent "stop after").
     pub stop_after: Option<std::time::Duration>,
 }
@@ -555,6 +557,7 @@ impl Agent {
             reported: "",
             history: Vec::new(),
             stop_after: None,
+            never: Vec::new(),
         }
     }
 

@@ -141,6 +141,12 @@ pub enum Cmd {
     /// Board 5: pause / resume every agent.
     AgentsPause,
     AgentsResume,
+    /// Board 4's other pane kinds, as panes.
+    PreviewPane,
+    AgentsPane,
+    ActivityPane,
+    /// Board 5: scroll every agent column together.
+    SyncScroll,
 }
 
 /// Ready-made layouts for a tab.
@@ -359,6 +365,30 @@ pub const ACTIONS: &[(&str, Cmd, &[&str], &str)] = &[
         Cmd::ChangeShell,
         &[],
         "run another shell (zsh, bash, fish…) in this split, same folder",
+    ),
+    (
+        "preview_pane",
+        Cmd::PreviewPane,
+        &[],
+        "preview pane: the file selected in the files pane, beside it (also: sv pane preview)",
+    ),
+    (
+        "agents_pane",
+        Cmd::AgentsPane,
+        &[],
+        "agents pane: every agent's state, tokens and changes in one list (also: sv pane agents)",
+    ),
+    (
+        "activity_pane",
+        Cmd::ActivityPane,
+        &[],
+        "activity pane: downloads and installs, running and finished (also: sv pane activity)",
+    ),
+    (
+        "sync_scroll",
+        Cmd::SyncScroll,
+        &[],
+        "scroll every agent column together (also: ctrl+] Y)",
     ),
     (
         "agents_tell",
@@ -734,6 +764,7 @@ pub fn after_leader(key: &[u8]) -> Option<Cmd> {
         b"T" => AgentsTell,
         b"Z" => AgentsPause,
         b"U" => AgentsResume,
+        b"Y" => SyncScroll,
         b"\x1b[A" => Focus(Dir::Up),
         b"\x1b[B" => Focus(Dir::Down),
         b"\x1b[C" => Focus(Dir::Right),
@@ -743,7 +774,7 @@ pub fn after_leader(key: &[u8]) -> Option<Cmd> {
     })
 }
 
-pub const LEADER_HINT: &str = " ctrl+] → space palette · t tab · w close tab · x close split · \\ split │ · - split ─ · o next split · z zoom · l layout · m menu · f files · s system · d flow · g agents · + new agent · a approvals · e agent board · E layout editor · , settings · j downloads · / find · k clear · S sessions · R reconnect · B broadcast · F remote files · M MCP servers · T tell all agents · Z pause agents · U resume · ; command bar · v table · b basic view · r rename · 1-9 tab · ? help · ctrl+] send ctrl+] ";
+pub const LEADER_HINT: &str = " ctrl+] → space palette · t tab · w close tab · x close split · \\ split │ · - split ─ · o next split · z zoom · l layout · m menu · f files · s system · d flow · g agents · + new agent · a approvals · e agent board · E layout editor · , settings · j downloads · / find · k clear · S sessions · R reconnect · B broadcast · F remote files · M MCP servers · T tell all agents · Z pause agents · U resume · Y sync scroll · ; command bar · v table · b basic view · r rename · 1-9 tab · ? help · ctrl+] send ctrl+] ";
 
 /// On macOS, Option+key types these characters unless the terminal is set to
 /// send Option as Alt/Meta. Seeing one alone means alt shortcuts can't work.

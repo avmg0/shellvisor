@@ -5,7 +5,7 @@ Checked 2026-11-07 against `main` after the board-matching pass on top of
 New agent form, Option-as-Alt dialog, basic-view hint). One row per thing a
 board shows. ✅ built · ◐ built differently or in part · ✗ not built.
 
-Totals: **21 boards · 140 items · 129 ✅ built · 7 ◐ partly or differently · 4 ✗ not built**.
+Totals: **21 boards · 140 items · 137 ✅ built · 3 ◐ partly or differently · 0 ✗ not built**.
 
 ## 1 · Default workspace (`sv layout dev`)
 
@@ -48,7 +48,7 @@ Totals: **21 boards · 140 items · 129 ✅ built · 7 ◐ partly or differently
 | Editor: palette, map, split, remove, resize, undo, esc cancels | ✅ | v1.0.1 |
 | Save as name / default / for this folder, YAML preview | ✅ | v1.0.1; saved in `layouts/`, not config.yaml |
 | Drag a pane from the palette onto a drop zone | ✅ | a dashed cyan zone says where it lands (split left / right / above / below, or replace) |
-| Preview / Agents / Activity as pane kinds | ✗ | not panes in Shellvisor |
+| Preview / Agents / Activity as pane kinds | ✅ | `sv pane preview|agents|activity`, the layout editor's palette, saved in layouts and sessions |
 
 ## 4b · Keymap & Mac setup
 
@@ -71,7 +71,7 @@ Totals: **21 boards · 140 items · 129 ✅ built · 7 ◐ partly or differently
 | Message bus / handoffs log | ✅ | agent board Log, `sv agent log` |
 | Pause all / resume / kill | ✅ | `ctrl+] Z` / `ctrl+] U` and the orchestrator column; `sv agent pause|resume|stop --all` |
 | Broadcast a message to all agents | ✅ | `ctrl+] T` |
-| `d` diff view, `s` sync scroll | ◐ | diff view is `ctrl+] D` (typing in a column goes to the agent); no sync scroll |
+| `d` diff view, `s` sync scroll | ✅ | `ctrl+] D` and `ctrl+] Y` (typing in a column goes to the agent, so not plain keys) |
 | `1-9` focus agent, `F5` zoom | ✅ | |
 
 ## 6 · Downloads & loading states
@@ -83,7 +83,7 @@ Totals: **21 boards · 140 items · 129 ✅ built · 7 ◐ partly or differently
 | ✔ / ✖ then a toast with duration | ✅ | |
 | Activity list with ETA and rate per download | ✅ | v1.0.1; `ctrl+] j`, `sv activity`, click the status bar |
 | Spinner style setting | ✅ | v1.0.1; circle, dots, arc, line, pulse, bounce; bar or percent |
-| Toast actions (`c` cd into it, `o` open in files) | ◐ | v1.0.1; `ctrl+] c` / `ctrl+] o` while the toast shows (plain `c` would go to your shell); plain `c` / `o` in the activity list |
+| Toast actions (`c` cd into it, `o` open in files) | ✅ | plain `c` / `o` at an empty prompt while the toast shows; `ctrl+] c` / `o` always |
 | Loading state in agent column / file tree node | ✅ | v1.0.1; agents' installs spotted on their screen |
 
 ## 7 · Agents, Auto-plan
@@ -96,7 +96,7 @@ Totals: **21 boards · 140 items · 129 ✅ built · 7 ◐ partly or differently
 | Estimate, overlap risk | ✅ | tokens, not dollars |
 | Dispatch all / step by step | ✅ | |
 | Review before merge | ✅ | review agent; you merge (Tree `m`) |
-| Approval policy per dispatch (auto / ask / never) | ✗ | uses `agents.approvals` from config |
+| Approval policy per dispatch (auto / ask / never) | ✅ | `p` in Plan: auto · ask · full auto, each with what it refuses (delete); `deny:` in team.yaml |
 
 ## 8 · Start an agent manually / attach
 
@@ -114,13 +114,13 @@ Totals: **21 boards · 140 items · 129 ✅ built · 7 ◐ partly or differently
 | Item | | Notes |
 |---|---|---|
 | Tree with git badges, filter, agent badges | ✅ | |
-| Indent guides | ✗ | |
+| Indent guides | ✅ | |
 | Columns (parent │ folder │ preview) | ✅ | v1.0 P6 |
-| Columns: type to jump | ✗ | `/` filters |
+| Columns: type to jump | ✅ | capitals are the commands there (I C E P) |
 | List with size and modified | ✅ | |
 | List: sortable columns, multi-select, copy / move | ✅ | `s` sorts, `space` marks, `y` copies paths, `m` types `mv -i` at the prompt |
 | Grid coloured by type | ✅ | icons by type |
-| Grid: image size and dimensions, `+/−` density | ◐ | cards with item count, PNG dimensions or size; no density keys |
+| Grid: image size and dimensions, `+/−` density | ✅ | three card sizes; PNG dimensions |
 | View numbers 1 Tree 2 Columns 3 List 4 Grid 5 Size 6 Git 7 Find 8 Recent | ✅ | |
 
 ## 10 · File views — size, git, find, recent
@@ -133,7 +133,7 @@ Totals: **21 boards · 140 items · 129 ✅ built · 7 ◐ partly or differently
 | Git: staged / changes / untracked groups, by agent | ✅ | |
 | Find: fuzzy names and text in files, open at line | ✅ | |
 | Recent: newest changes anywhere below | ✅ | |
-| Recent: who changed it (you / agents / downloads), `u` undo agent edit | ◐ | who (you or the agent) and what happened; no undo |
+| Recent: who changed it (you / agents / downloads), `u` undo agent edit | ✅ | undo asks first and keeps the edited copy in the Trash |
 
 ## 11 · Performance budget
 
@@ -264,8 +264,8 @@ install script / signed releases, `sv agent emit|usage|budget`.
 
 ## Suggested next (biggest gaps first)
 
-1. Agents tab: sync scroll across columns; Recent `u` to undo an agent's edit to one file.
-2. File views: indent guides in Tree, type-to-jump in Columns, `+/−` density in Grid.
+Every board item a terminal can show is built. What's left is ◐ for a reason
+listed below or in its row (fan speed, Keychain, plain keys in agent columns).
 
 ## What a terminal can't do (noted, not faked)
 

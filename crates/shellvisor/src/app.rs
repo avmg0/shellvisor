@@ -125,6 +125,8 @@ pub enum Tool {
     System(SysPane),
     Flow(FlowPane),
     Remote(crate::remote::RemotePane),
+    /// Preview, Agents or Activity (board 4's other pane kinds).
+    Info(crate::infopane::InfoPane),
 }
 
 impl Tool {
@@ -136,6 +138,7 @@ impl Tool {
             Tool::System(_) => "system",
             Tool::Flow(_) => "flow",
             Tool::Remote(_) => "remote",
+            Tool::Info(i) => i.kind.name(),
         }
     }
 
@@ -145,6 +148,7 @@ impl Tool {
             Tool::System(s) => s.title(),
             Tool::Flow(f) => f.title(),
             Tool::Remote(r) => r.title(),
+            Tool::Info(i) => i.title(),
         }
     }
 }
@@ -699,6 +703,9 @@ pub struct PaneState {
     pub agent: Option<Agent>,
     /// Typed once the shell shows its first prompt (so it isn't echoed twice).
     pending_input: Option<(String, Instant)>,
+    /// Something was typed since the last prompt (so plain `c` / `o` are the
+    /// user's, not the finish toast's).
+    pub typed_since_prompt: bool,
     /// Don't look for approval prompts before this (just answered one).
     agent_quiet_until: Instant,
     agent_check_at: Instant,
@@ -919,6 +926,8 @@ pub struct App {
     option_hint_shown: bool,
     /// When basic view was turned on (board 14's fading "basic · sv on").
     pub basic_since: Option<Instant>,
+    /// Board 5: scrolling one agent column scrolls them all.
+    pub sync_scroll: bool,
     quit: Option<i32>,
     dirty: bool,
     session_dirty: bool,
@@ -1031,6 +1040,7 @@ pub fn run(opts: Options) -> io::Result<i32> {
         tx: tx.clone(),
         option_hint_shown: false,
         basic_since: None,
+        sync_scroll: false,
         quit: None,
         dirty: true,
         session_dirty: false,
@@ -1239,7 +1249,9 @@ impl App {
             Some(t) => Leaf {
                 cwd: match t {
                     Tool::Files(f) => f.root.display().to_string(),
-                    Tool::System(_) | Tool::Flow(_) | Tool::Remote(_) => String::new(),
+                    Tool::System(_) | Tool::Flow(_) | Tool::Remote(_) | Tool::Info(_) => {
+                        String::new()
+                    }
                 },
                 tool: Some(t.kind().to_string()),
             },
@@ -1371,6 +1383,7 @@ impl App {
                 flow: None,
                 agent: None,
                 pending_input: None,
+                typed_since_prompt: false,
                 agent_quiet_until: Instant::now(),
                 agent_check_at: Instant::now(),
                 agent_check_due: false,
@@ -1386,7 +1399,10 @@ impl App {
     /// A saved leaf: a shell in its folder, or a tool pane.
     fn new_leaf(&mut self, l: &Leaf) -> io::Result<PaneId> {
         match l.tool.as_deref() {
-            Some(kind @ ("files" | "git" | "system" | "thermal" | "flow")) => {
+            Some(
+                kind @ ("files" | "git" | "system" | "thermal" | "flow" | "preview" | "agents"
+                | "activity"),
+            ) => {
                 let cwd = if l.cwd.is_empty() {
                     std::env::current_dir().unwrap_or_default()
                 } else {
@@ -1407,6 +1423,8 @@ impl App {
             Tool::System(sp)
         } else if kind == "flow" {
             Tool::Flow(FlowPane::new())
+        } else if let Some(k) = crate::infopane::InfoKind::parse(kind) {
+            Tool::Info(crate::infopane::InfoPane::new(k))
         } else {
             let (mut f, mut jobs) = FilesPane::new(cwd);
             f.folder_style = Self::folder_style(&self.ui);
@@ -2206,6 +2224,8 @@ impl App {
                     out.redraw = true;
                 }
                 Some(Tool::System(_)) | Some(Tool::Remote(_)) => {}
+                // agents and downloads change on their own: keep them drawn
+                Some(Tool::Info(_)) => out.redraw = true,
                 None => {}
             }
             self.apply(id, out);
@@ -2227,6 +2247,22 @@ impl App {
         let act = match act {
             Act::Notice(m) => return self.notice(m),
             Act::Copy(t) => return self.copy(&t),
+            Act::UndoAgentEdit(path, who) => {
+                let msg = match self.undo_agent_edit(&path, &who) {
+                    Ok(m) => m,
+                    Err(e) => format!("couldn't undo: {e}"),
+                };
+                self.notice(msg);
+                let ids: Vec<PaneId> = self.tools.keys().copied().collect();
+                for i in ids {
+                    if let Some(Tool::Files(f)) = self.tools.get_mut(&i) {
+                        let jobs = f.refresh();
+                        self.run_jobs(i, jobs);
+                    }
+                }
+                self.dirty = true;
+                return;
+            }
             a => a,
         };
         let Some(tab) = self.tab_of(id) else { return };
@@ -2267,7 +2303,7 @@ impl App {
                     .collect();
                 format!("\x05\x15mv -i {} ", list.join(" "))
             }
-            Act::Notice(_) | Act::Copy(_) => return,
+            Act::Notice(_) | Act::Copy(_) | Act::UndoAgentEdit(..) => return,
         };
         if let Some(p) = self.panes.get_mut(&shell) {
             let _ = p.pane.write(text.as_bytes());
@@ -2334,6 +2370,8 @@ impl App {
                 Tool::Flow(fp) => fp.due_in(self.low_power),
                 Tool::System(sp) => sp.due_in(self.low_power),
                 Tool::Remote(_) => continue,
+                Tool::Info(_) if self.low_power => Duration::from_secs(5),
+                Tool::Info(_) => Duration::from_secs(1),
                 Tool::Files(_) if self.low_power => continue,
                 Tool::Files(f) => f.poll_due_in(),
             };
@@ -2649,6 +2687,7 @@ impl App {
                 }
             }
             ShellEvent::PromptShown => {
+                p.typed_since_prompt = false;
                 // the line editor starts right after the prompt hook: type
                 // a moment later so the terminal doesn't echo it twice
                 if let Some((_, at)) = p.pending_input.as_mut() {
@@ -3260,6 +3299,32 @@ impl App {
                 self.flush_forward(&mut forward)?;
                 self.tool_key(target, key);
                 continue;
+            }
+            // the finish toast: plain c / o act on it while the shell sits at
+            // an empty prompt (anything typed first goes to the shell as usual)
+            if key == b"c" || key == b"o" {
+                let at_prompt = self
+                    .panes
+                    .get(&target)
+                    .is_some_and(|p| !p.running && !p.typed_since_prompt && p.agent.is_none())
+                    && forward.is_empty();
+                let offer = self
+                    .toast_act
+                    .as_ref()
+                    .filter(|(d, at)| at.elapsed() < TOAST_ACT && d.ok && d.target.is_some())
+                    .map(|(d, _)| d.clone());
+                if let (true, Some(d)) = (at_prompt, offer) {
+                    if key == b"c" && d.target.as_ref().is_some_and(|t| t.is_dir()) {
+                        self.done_cd(&d);
+                        self.toast_act = None;
+                        continue;
+                    }
+                    if key == b"o" {
+                        self.done_open(&d)?;
+                        self.toast_act = None;
+                        continue;
+                    }
+                }
             }
             if keys::is_option_char(key) && !self.option_hint_shown {
                 // board 4b: say what happened and how to fix it, once
@@ -4753,6 +4818,11 @@ impl App {
                     a.always.push(x);
                 }
             }
+            a.never = m
+                .deny
+                .iter()
+                .filter_map(|x| agents::Action::parse(x))
+                .collect();
         }
         if let Some(tr) = self.team.as_mut() {
             tr.started.push(name.clone());
@@ -5230,6 +5300,7 @@ impl App {
                 reviewer: who,
                 folder: folder.clone(),
                 step: false,
+                policy: 0,
                 run: 0,
             }
         });
@@ -5409,7 +5480,8 @@ impl App {
         } else {
             p.reviewer.clone()
         };
-        let team = crate::board::plan_to_team(&name, &p.tasks, &p.goal, &reviewer, p.budget);
+        let team =
+            crate::board::plan_to_team(&name, &p.tasks, &p.goal, &reviewer, p.budget, p.policy);
         let step = p.step.then_some(1);
         match self.begin_team(
             team,
@@ -6921,7 +6993,18 @@ impl App {
                     let for_now = a.approve_for.as_ref().is_some_and(|(until, kinds)| {
                         kinds.contains(&ap.action) && until.is_none_or(|u| Instant::now() < u)
                     });
-                    if a.always.contains(&ap.action) || auto.contains(&ap.action) || for_now {
+                    if a.never.contains(&ap.action) {
+                        // the dispatch's policy refuses it without asking
+                        let _ = p.pane.write(a.cli.keys().deny.as_bytes());
+                        p.agent_quiet_until = Instant::now() + Duration::from_millis(800);
+                        notice = Some(format!(
+                            "refused {} for {} (approval policy): {}",
+                            ap.action.name(),
+                            a.name,
+                            ap.what
+                        ));
+                    } else if a.always.contains(&ap.action) || auto.contains(&ap.action) || for_now
+                    {
                         let _ = p.pane.write(a.cli.keys().allow.as_bytes());
                         p.agent_quiet_until = Instant::now() + Duration::from_millis(800);
                         notice = Some(format!(
@@ -7214,9 +7297,156 @@ impl App {
                 self.dirty = true;
                 return;
             }
+            Some(Tool::Info(_)) => {
+                self.info_key(id, key);
+                return;
+            }
             None => return,
         };
         self.apply(id, out);
+    }
+
+    /// Recent `u`: put a file back the way it was before `who` changed it —
+    /// in that agent's worktree if it has one. The current file goes to the
+    /// Trash first, so nothing is lost.
+    fn undo_agent_edit(&mut self, path: &std::path::Path, who: &str) -> Result<String, String> {
+        let a = self
+            .agent_by_name(who)
+            .ok_or_else(|| format!("{who} isn't running any more"))?;
+        let repo = a
+            .repo
+            .clone()
+            .ok_or("the agent isn't in a git repository")?;
+        let dir = a.worktree.clone().unwrap_or_else(|| repo.clone());
+        let base = a.base.clone().unwrap_or_else(|| "HEAD".into());
+        let rel = path
+            .strip_prefix(&repo)
+            .map_err(|_| "that file is outside the agent's repository".to_string())?
+            .to_path_buf();
+        let real = dir.join(&rel);
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(args)
+                .stdin(std::process::Stdio::null())
+                .output()
+        };
+        let spec = format!("{base}:{}", rel.to_string_lossy());
+        let existed = git(&["cat-file", "-e", &spec]).is_ok_and(|o| o.status.success());
+        let name = rel.to_string_lossy().into_owned();
+        if !existed {
+            // the agent created it: undoing is taking it away (to the Trash)
+            if real.exists() {
+                crate::files::to_trash(&real).map_err(|e| e.to_string())?;
+            }
+            let _ = git(&["rm", "-q", "--cached", "--ignore-unmatch", "--", &name]);
+            self.bus_event(format!("you: undid {who}'s new file {name}"));
+            return Ok(format!("{name} (new from {who}) moved to the Trash"));
+        }
+        if real.exists() {
+            // keep what is there now, as "<name> before undo"
+            let keep = real.with_file_name(format!(
+                "{} before undo",
+                real.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            ));
+            std::fs::copy(&real, &keep).map_err(|e| e.to_string())?;
+            crate::files::to_trash(&keep).map_err(|e| e.to_string())?;
+        }
+        let out = git(&[
+            "restore",
+            "--source",
+            &base,
+            "--staged",
+            "--worktree",
+            "--",
+            &name,
+        ])
+        .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        }
+        self.bus_event(format!("you: undid {who}'s edit to {name}"));
+        Ok(format!(
+            "{name} is back as it was before {who} · the edited copy is in the Trash"
+        ))
+    }
+
+    /// The files pane in the same tab as `id`, and what it has selected.
+    pub fn tab_files_selection(&self, id: PaneId) -> Option<(PathBuf, bool, bool)> {
+        let tab = self.tab_of(id)?;
+        self.tabs[tab]
+            .root
+            .panes()
+            .into_iter()
+            .find_map(|p| match self.tools.get(&p) {
+                Some(Tool::Files(f)) => f.selected().map(|(path, dir, _)| (path, dir, f.hidden)),
+                _ => None,
+            })
+    }
+
+    /// Finished downloads and installs, newest first (Activity pane).
+    pub fn finished(&self) -> Vec<&Finished> {
+        self.done.iter().collect()
+    }
+
+    /// Keys in a Preview, Agents or Activity pane.
+    fn info_key(&mut self, id: PaneId, key: &[u8]) {
+        let Some(Tool::Info(p)) = self.tools.get(&id) else {
+            return;
+        };
+        let kind = p.kind;
+        let n = match kind {
+            crate::infopane::InfoKind::Preview => usize::MAX / 2,
+            crate::infopane::InfoKind::Agents => self.agent_ids().len(),
+            crate::infopane::InfoKind::Activity => self.activities().len() + self.done.len(),
+        };
+        if let Some(Tool::Info(p)) = self.tools.get_mut(&id) {
+            if p.nav(key, n) {
+                self.dirty = true;
+                return;
+            }
+        }
+        let sel = match self.tools.get(&id) {
+            Some(Tool::Info(p)) => p.sel,
+            _ => 0,
+        };
+        use crate::infopane::InfoKind as K;
+        match (kind, key) {
+            (K::Agents, b"\r") => {
+                if let Some(a) = self.agent_ids().get(sel).copied() {
+                    self.focus_pane(a);
+                }
+            }
+            (K::Agents, b"d") => {
+                let name = self
+                    .agent_ids()
+                    .get(sel)
+                    .and_then(|i| self.panes.get(i))
+                    .and_then(|p| p.agent.as_ref())
+                    .map(|a| a.name.clone());
+                if let Some(n) = name {
+                    self.open_review(&n);
+                }
+            }
+            (K::Activity, b"\r" | b"c" | b"o") => {
+                let running = self.activities().len();
+                if sel < running {
+                    let pane = self.activities()[sel].0;
+                    self.focus_pane(pane);
+                } else if let Some(d) = self.done.get(sel - running).cloned() {
+                    if key == b"o" {
+                        let _ = self.done_open(&d);
+                    } else {
+                        self.done_cd(&d);
+                    }
+                }
+            }
+            _ => return,
+        }
+        self.dirty = true;
     }
 
     fn flush_forward(&mut self, buf: &mut Vec<u8>) -> io::Result<()> {
@@ -7241,6 +7471,7 @@ impl App {
                     p.pane.scroll_by(isize::MIN / 2);
                     self.dirty = true;
                 }
+                p.typed_since_prompt = true;
                 p.pane.write(buf)?;
             }
         }
@@ -7562,11 +7793,29 @@ impl App {
                 };
                 p.pane.write(&key.repeat(3))?;
             } else {
-                p.pane.scroll_by(dir * 3);
+                self.scroll_with(id, dir * 3);
                 self.dirty = true;
             }
         }
         Ok(())
+    }
+
+    /// Scroll a pane's history; with sync scroll on, every agent column
+    /// moves with an agent column (board 5's `s`).
+    fn scroll_with(&mut self, id: PaneId, by: isize) {
+        let agent = self.panes.get(&id).is_some_and(|p| p.agent.is_some());
+        let ids: Vec<PaneId> = if self.sync_scroll && agent {
+            self.agent_ids()
+        } else {
+            vec![id]
+        };
+        for i in ids {
+            if let Some(p) = self.panes.get_mut(&i) {
+                if !p.pane.in_alternate_screen() {
+                    p.pane.scroll_by(by);
+                }
+            }
+        }
     }
 
     // ---------------------------------------------------------------- commands
@@ -7772,6 +8021,11 @@ impl App {
                 Ok(())
             }
             ["flow"] => self.show_tool("flow", false),
+            [
+                "pane",
+                kind @ ("files" | "git" | "system" | "thermal" | "flow" | "preview" | "agents"
+                | "activity"),
+            ] => self.show_tool(kind, false),
             ["layout", "agents"] => {
                 self.toggle_agents();
                 Ok(())
@@ -7866,11 +8120,25 @@ impl App {
                     .focused_cwd()
                     .or_else(|| std::env::current_dir().ok())
                     .unwrap_or_default();
+                // the first tool takes the right-hand third; later ones stack
+                // under the last tool in that column (like board 1)
+                let last_tool = self.tabs[tab]
+                    .root
+                    .panes()
+                    .into_iter()
+                    .rev()
+                    .find(|p| self.tools.contains_key(p));
                 let target = self.focused();
                 let id = self.new_tool(kind, cwd);
                 let t = &mut self.tabs[tab];
-                // the tool takes the right-hand third
-                t.root.split_at(target, Axis::Horizontal, id, 0.62);
+                match last_tool {
+                    Some(under) => {
+                        t.root.split_at(under, Axis::Vertical, id, 0.5);
+                    }
+                    None => {
+                        t.root.split_at(target, Axis::Horizontal, id, 0.62);
+                    }
+                }
                 t.focus = id;
                 t.zoomed = false;
             }
@@ -8621,6 +8889,9 @@ impl App {
             }
             Cmd::AttachAgent => self.attach_agent(),
             Cmd::ToggleFlow => self.show_tool("flow", true)?,
+            Cmd::PreviewPane => self.show_tool("preview", true)?,
+            Cmd::AgentsPane => self.show_tool("agents", true)?,
+            Cmd::ActivityPane => self.show_tool("activity", true)?,
             Cmd::CommandBar => {
                 self.table = None;
                 self.bar_pos = None;
@@ -8628,11 +8899,18 @@ impl App {
             }
             Cmd::ScrollUp | Cmd::ScrollDown => {
                 let id = self.input_target();
-                if let Some(p) = self.panes.get_mut(&id) {
+                if let Some(p) = self.panes.get(&id) {
                     let page = (p.size.0 as isize / 2).max(1);
-                    p.pane
-                        .scroll_by(if cmd == Cmd::ScrollUp { page } else { -page });
+                    self.scroll_with(id, if cmd == Cmd::ScrollUp { page } else { -page });
                 }
+            }
+            Cmd::SyncScroll => {
+                self.sync_scroll = !self.sync_scroll;
+                self.notice(if self.sync_scroll {
+                    "sync scroll on: agent columns scroll together · ctrl+] Y turns it off"
+                } else {
+                    "sync scroll off"
+                });
             }
         }
         Ok(())

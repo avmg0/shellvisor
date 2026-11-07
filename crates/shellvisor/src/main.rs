@@ -26,6 +26,7 @@ mod forwards;
 mod gitstat;
 mod highlight;
 mod history;
+mod infopane;
 mod keys;
 mod layouted;
 mod loading;

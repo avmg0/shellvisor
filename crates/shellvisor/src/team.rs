@@ -70,6 +70,8 @@ struct RawAgent {
     #[serde(default)]
     approve: Vec<String>,
     #[serde(default)]
+    deny: Vec<String>,
+    #[serde(default)]
     mcp: Vec<String>,
     start: Option<String>,
 }
@@ -104,6 +106,8 @@ pub struct Member {
     pub worktree: Option<bool>,
     pub max_children: Option<usize>,
     pub approve: Vec<String>,
+    /// Actions refused for it without asking.
+    pub deny: Vec<String>,
     pub mcp: Vec<String>,
     pub start: Start,
     /// Stage in an auto-plan (1, 2, …); 0 in team.yaml. Step-by-step
@@ -260,11 +264,13 @@ pub fn parse(text: &str) -> Result<Team, String> {
                 return Err(format!("{at}: an agent can't spawn itself"));
             }
         }
-        for x in &a.approve {
-            if Action::parse(x).is_none() {
-                return Err(format!(
-                    "{at}: approve `{x}` — one of read edit test lint install network push delete command"
-                ));
+        for (field, list) in [("approve", &a.approve), ("deny", &a.deny)] {
+            for x in list {
+                if Action::parse(x).is_none() {
+                    return Err(format!(
+                        "{at}: {field} `{x}` — one of read edit test lint install network push delete command"
+                    ));
+                }
             }
         }
         let start = match a.start.as_deref().map(str::trim) {
@@ -308,6 +314,7 @@ pub fn parse(text: &str) -> Result<Team, String> {
                 worktree: a.worktree,
                 max_children: a.max_children,
                 approve: a.approve.clone(),
+                deny: a.deny.clone(),
                 mcp: a.mcp.clone(),
                 start: Start::Now,
                 stage: 0,
@@ -465,6 +472,7 @@ agents:
     worktree: true
     max_children: 2        # may start sub-agents of its own
     approve: [test, lint]  # answered for it without asking
+    deny: [delete]         # refused for it without asking
   - id: tests
     cli: claude
     task: write and run tests for what api changed

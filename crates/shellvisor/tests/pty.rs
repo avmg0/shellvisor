@@ -882,9 +882,8 @@ fn activity_list_speed_files_mark_and_toast_actions() {
     });
     s.send("\x1b");
     s.wait_for("✔ git clone finished · 1.20 MiB in");
-    s.wait_for("ctrl+] c cd into repo");
-    // ctrl+] c: cd into the clone
-    s.send("\x1d");
+    s.wait_for("c cd into repo");
+    // plain c at an empty prompt: cd into the clone (ctrl+] c works too)
     s.send("c");
     s.pump(Duration::from_millis(500));
     s.run("pwd");
@@ -1619,6 +1618,41 @@ fn auto_plan_dispatches_stages_then_review_and_merges_from_the_tree() {
     s.pump(Duration::from_millis(300));
     s.send("clear; sv agent log | grep -c 'tests.done'\r");
     s.wait_for("1");
+}
+
+#[test]
+fn preview_agents_and_activity_panes() {
+    let mut s = Session::start_full("infopanes");
+    s.wait_for("PROMPT>");
+    std::fs::write(
+        s.dir.join("work/notes.txt"),
+        "first line of notes\nsecond\n",
+    )
+    .unwrap();
+    s.run("sv pane files");
+    s.wait_for("notes.txt");
+    s.send("\x1b\x1b[D"); // back to the shell
+    s.pump(Duration::from_millis(200));
+    s.run("sv pane preview");
+    s.wait_for("PREVIEW");
+    s.send("\x1bOQ"); // F2: the files pane; pick notes.txt
+    s.pump(Duration::from_millis(200));
+    s.send("j");
+    s.wait_until("preview of the selection", |t| {
+        t.contains("1 first line of") && t.contains("notes.txt 27B")
+    });
+    s.send("\x1b\x1b[D"); // back to the shell
+    s.pump(Duration::from_millis(200));
+    s.run("sv pane agents");
+    s.wait_for("no agents yet");
+    s.send("\x1b\x1b[D");
+    s.pump(Duration::from_millis(200));
+    s.run("sv pane activity");
+    s.wait_for("no downloads or installs yet");
+    // sync scroll is a toggle with a notice
+    s.send("\x1d");
+    s.send("Y");
+    s.wait_for("sync scroll on");
 }
 
 #[test]

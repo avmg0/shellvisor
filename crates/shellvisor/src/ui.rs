@@ -243,9 +243,12 @@ fn draw_all(f: &mut Frame, app: &App) {
                     Tool::System(_) => ("toggle_system", "SYSTEM"),
                     Tool::Flow(_) => ("toggle_flow", "FLOW"),
                     Tool::Remote(_) => ("", "REMOTE"),
+                    Tool::Info(i) => ("info", i.kind.title()),
                 };
                 let key = key_label(app, action);
-                let mut title = if key.is_empty() {
+                let mut title = if action == "info" {
+                    format!(" {name} ")
+                } else if key.is_empty() {
                     format!(" {name} · {} ", t.title())
                 } else {
                     format!(" {key} · {name} ")
@@ -266,6 +269,7 @@ fn draw_all(f: &mut Frame, app: &App) {
                     };
                     r.render(inner, f.buffer_mut(), folder, is_focus)
                 }
+                Tool::Info(i) => draw_info(f, app, id, i, inner, is_focus),
             }
             continue;
         }
@@ -1164,6 +1168,12 @@ fn draw_header(f: &mut Frame, app: &App, r: Rect) {
             format!("{session}  {n} agent{}", if n == 1 { "" } else { "s" }),
             Style::default().fg(DIM).bg(BAR),
         ));
+        if app.sync_scroll {
+            left.push(Span::styled(
+                "  ⇅ sync scroll",
+                Style::default().fg(CYAN).bg(BAR),
+            ));
+        }
     } else if app.tabs[app.active].focus_mode {
         left.push(Span::styled(
             "  layout: focus",
@@ -1385,6 +1395,24 @@ fn draw_keys(f: &mut Frame, app: &App, r: Rect) {
         }
     };
     let keys: Vec<(String, &str)> = match app.tools.get(&target) {
+        Some(Tool::Info(i)) => match i.kind {
+            crate::infopane::InfoKind::Preview => vec![
+                ("↑↓".into(), "Scroll"),
+                ("PgUp PgDn".into(), "Page"),
+                (k("toggle_files", "F2"), "Pick a file"),
+            ],
+            crate::infopane::InfoKind::Agents => vec![
+                ("↑↓".into(), "Agent"),
+                ("⏎".into(), "Go to its column"),
+                ("d".into(), "Review"),
+                (k("agents", "F9"), "Agents tab"),
+            ],
+            crate::infopane::InfoKind::Activity => vec![
+                ("↑↓".into(), "Download"),
+                ("⏎ c".into(), "cd into it"),
+                ("o".into(), "Open in files"),
+            ],
+        },
         Some(Tool::Files(_)) => vec![
             ("tab".into(), "Cycle views"),
             ("1-8".into(), "Views"),
@@ -1420,6 +1448,7 @@ fn draw_keys(f: &mut Frame, app: &App, r: Rect) {
             ("^] D".into(), "Diff view"),
             ("^] T".into(), "Tell all"),
             ("^] Z".into(), "Pause all"),
+            ("^] Y".into(), "Sync scroll"),
             (k("new_agent", "^] +"), "Spawn agent"),
             (k("agent_board", "alt+g"), "Plan · tree"),
             (k("quit", "^Q"), "Quit"),
@@ -2672,6 +2701,207 @@ fn draw_bus(f: &mut Frame, app: &App, r: Rect) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
+/// Board 4's Preview, Agents and Activity panes.
+fn draw_info(
+    f: &mut Frame,
+    app: &App,
+    id: crate::workspace::PaneId,
+    p: &crate::infopane::InfoPane,
+    r: Rect,
+    focus: bool,
+) {
+    use crate::infopane::InfoKind as K;
+    let buf = f.buffer_mut();
+    let w = r.width as usize;
+    let d = Style::default().fg(DIM);
+    let sel_bg = Style::default().bg(Color::Indexed(237));
+    let row = |buf: &mut ratatui::buffer::Buffer, y: u16, on: bool| {
+        if on && focus {
+            buf.set_style(Rect::new(r.x, y, r.width, 1), sel_bg);
+        }
+    };
+    match p.kind {
+        K::Preview => {
+            let Some((path, dir, hidden)) = app.tab_files_selection(id) else {
+                buf.set_stringn(r.x, r.y, "select a file in the files pane (F2)", w, d);
+                return;
+            };
+            let (lines, note) = p.preview(&path, dir, hidden);
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let (x, _) = buf.set_stringn(
+                r.x,
+                r.y,
+                &name,
+                w,
+                Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+            );
+            buf.set_stringn(
+                x + 1,
+                r.y,
+                note.trim_start_matches("· "),
+                w.saturating_sub(name.chars().count() + 1),
+                d,
+            );
+            let top = p.sel.min(lines.len().saturating_sub(1));
+            let gutter = if lines.len() >= 1000 { 5 } else { 4 };
+            for (k, line) in lines
+                .iter()
+                .enumerate()
+                .skip(top)
+                .take(r.height.saturating_sub(1) as usize)
+            {
+                let y = r.y + 1 + (k - top) as u16;
+                if !dir {
+                    buf.set_stringn(
+                        r.x,
+                        y,
+                        format!("{:>g$} ", k + 1, g = gutter - 1),
+                        gutter,
+                        Style::default().fg(FAINT),
+                    );
+                    buf.set_line(
+                        r.x + gutter as u16,
+                        y,
+                        line,
+                        r.width.saturating_sub(gutter as u16),
+                    );
+                } else {
+                    buf.set_line(r.x, y, line, r.width);
+                }
+            }
+        }
+        K::Agents => {
+            let ids = app.agent_ids();
+            if ids.is_empty() {
+                buf.set_stringn(r.x, r.y, "no agents yet · shift+F9 starts one", w, d);
+                return;
+            }
+            let head = format!(
+                "{:<14}{:<12}{:>8}  {}",
+                "AGENT", "STATE", "TOKENS", "CHANGES"
+            );
+            buf.set_stringn(r.x, r.y, &head, w, d);
+            for (k, aid) in ids
+                .iter()
+                .enumerate()
+                .take(r.height.saturating_sub(1) as usize)
+            {
+                let y = r.y + 1 + k as u16;
+                let Some(a) = app.panes.get(aid).and_then(|p| p.agent.as_ref()) else {
+                    continue;
+                };
+                row(buf, y, k == p.sel);
+                let base = if k == p.sel && focus {
+                    sel_bg
+                } else {
+                    Style::default()
+                };
+                let (state, c) = match &a.status {
+                    _ if a.paused => ("⏸ paused".to_string(), DIM),
+                    agents::Status::Working => (format!("{} working", spinner(app)), AMBER),
+                    agents::Status::NeedsApproval(_) => ("⚑ approval".to_string(), AMBER),
+                    agents::Status::Idle if a.worked => ("✔ finished".to_string(), GREEN),
+                    agents::Status::Idle => ("● idle".to_string(), DIM),
+                    agents::Status::Starting => ("starting".to_string(), DIM),
+                    agents::Status::Exited(Some(0)) | agents::Status::Exited(None) => {
+                        ("✔ done".to_string(), GREEN)
+                    }
+                    agents::Status::Exited(Some(code)) => (format!("✖ exit {code}"), RED),
+                };
+                let indent = "  ".repeat(a.depth.saturating_sub(1) as usize);
+                let name = format!("● {indent}{}", a.name);
+                let (x, _) = buf.set_stringn(
+                    r.x,
+                    y,
+                    format!("{name:<14}"),
+                    14,
+                    base.fg(Color::Indexed(a.color)),
+                );
+                let (x, _) = buf.set_stringn(x, y, format!("{state:<12}"), 12, base.fg(c));
+                let tok = a
+                    .tokens
+                    .map(agents::fmt_tokens)
+                    .unwrap_or_else(|| "—".into());
+                let tok = tok.trim_end_matches(" tok").to_string();
+                let (x, _) = buf.set_stringn(x, y, format!("{tok:>8}  "), 10, base.fg(TEXT));
+                let files = a.files_summary();
+                buf.set_stringn(
+                    x,
+                    y,
+                    if files.is_empty() {
+                        "—".to_string()
+                    } else {
+                        files
+                    },
+                    w.saturating_sub(34),
+                    base.fg(DIM),
+                );
+            }
+        }
+        K::Activity => {
+            let running = app.activities();
+            let done = app.finished();
+            if running.is_empty() && done.is_empty() {
+                buf.set_stringn(r.x, r.y, "no downloads or installs yet", w, d);
+                return;
+            }
+            let mut y = r.y;
+            let mut k = 0usize;
+            for (_, act, who) in &running {
+                if y >= r.bottom() {
+                    break;
+                }
+                row(buf, y, k == p.sel);
+                let base = if k == p.sel && focus {
+                    sel_bg
+                } else {
+                    Style::default()
+                };
+                let pct = act.progress.map(|p| format!(" {p}%")).unwrap_or_default();
+                let by = who.map(|w| format!(" · {w}")).unwrap_or_default();
+                let (x, _) =
+                    buf.set_stringn(r.x, y, format!("{} ", circle(app)), 2, base.fg(AMBER));
+                let (x, _) = buf.set_stringn(x, y, &act.label, w.saturating_sub(24), base.fg(TEXT));
+                buf.set_stringn(x, y, format!("{pct}{by}"), 20, base.fg(AMBER));
+                y += 1;
+                k += 1;
+            }
+            for dn in done {
+                if y >= r.bottom() {
+                    break;
+                }
+                row(buf, y, k == p.sel);
+                let base = if k == p.sel && focus {
+                    sel_bg
+                } else {
+                    Style::default()
+                };
+                let (icon, c) = if dn.ok {
+                    ("✔ ", GREEN)
+                } else {
+                    ("✖ ", RED)
+                };
+                let (x, _) = buf.set_stringn(r.x, y, icon, 2, base.fg(c));
+                let (x, _) = buf.set_stringn(x, y, &dn.label, w.saturating_sub(24), base.fg(TEXT));
+                let extra = format!(
+                    "  {}{}",
+                    dn.amount
+                        .clone()
+                        .map(|a| format!("{a} · "))
+                        .unwrap_or_default(),
+                    fmt_secs(dn.took)
+                );
+                buf.set_stringn(x, y, extra, 22, base.fg(DIM));
+                y += 1;
+                k += 1;
+            }
+        }
+    }
+}
+
 /// Board 12 "Restore last session?": a tick per saved tab and two buttons.
 fn draw_restore(
     f: &mut Frame,
@@ -2938,10 +3168,8 @@ fn draw_finish_toast(f: &mut Frame, app: &App, d: &crate::app::Finished) {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let line2 = match &d.target {
-        Some(t) if d.ok && t.is_dir() => {
-            Some(format!("ctrl+] c cd into {name} · o open in files pane"))
-        }
-        Some(_) if d.ok => Some(format!("ctrl+] o show {name} in the files pane")),
+        Some(t) if d.ok && t.is_dir() => Some(format!("c cd into {name} · o open in files pane")),
+        Some(_) if d.ok => Some(format!("o show {name} in the files pane")),
         _ => None,
     };
     let w = (line1.chars().count() + 1).max(line2.as_ref().map(|l| l.chars().count()).unwrap_or(0))

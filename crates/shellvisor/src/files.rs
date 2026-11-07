@@ -213,6 +213,8 @@ pub enum Act {
     Copy(String),
     /// Type `mv -i <paths> ` at the prompt for you to finish.
     Move(Vec<PathBuf>),
+    /// Recent `u`: put back what this agent changed in this file.
+    UndoAgentEdit(PathBuf, String),
 }
 
 #[derive(Debug, Default)]
@@ -355,6 +357,14 @@ pub struct FilesPane {
     grid_info: RefCell<HashMap<PathBuf, String>>,
     /// Rows above the list body drawn last frame (List's column header).
     header: Cell<u16>,
+    /// Grid: card size, 0 small · 1 normal · 2 large (`+` / `-`).
+    pub grid_size: u8,
+    /// Columns: letters typed to jump to a name, and when the last came.
+    jump: (String, Option<Instant>),
+    /// Columns: a capital passed on as its lower-case command.
+    as_command: Cell<bool>,
+    /// Recent: `u` asked to undo an agent's edit to this (waiting for y).
+    confirm_undo: Option<(PathBuf, String)>,
     /// Size view: `x` asked to delete this (waiting for y).
     confirm_delete: Option<PathBuf>,
 }
@@ -404,6 +414,10 @@ impl FilesPane {
             sort: ListSort::Name,
             marked: Vec::new(),
             header: Cell::new(0),
+            grid_size: 1,
+            jump: (String::new(), None),
+            as_command: Cell::new(false),
+            confirm_undo: None,
             grid_info: RefCell::new(HashMap::new()),
             confirm_delete: None,
         };
@@ -1093,6 +1107,87 @@ impl FilesPane {
                 }
             }
             return out;
+        }
+        if let Some((path, who)) = self.confirm_undo.take() {
+            let mut out = Outcome::redraw();
+            if key == b"y" || key == b"Y" {
+                out.acts.push(Act::UndoAgentEdit(path, who));
+            }
+            return out;
+        }
+        if self.view == View::Recent && key == b"u" {
+            let mut out = Outcome::redraw();
+            if let Some((p, _, _)) = self.selected() {
+                match self.agent_marks.get(&p) {
+                    Some((who, _)) => self.confirm_undo = Some((p, who.clone())),
+                    None => out.acts.push(Act::Notice(
+                        "u undoes an agent's edit — this file wasn't changed by an agent".into(),
+                    )),
+                }
+            }
+            return out;
+        }
+        if self.view == View::Grid && matches!(key, b"+" | b"=" | b"-" | b"_") {
+            let bigger = matches!(key, b"+" | b"=");
+            self.grid_size = if bigger {
+                (self.grid_size + 1).min(2)
+            } else {
+                self.grid_size.saturating_sub(1)
+            };
+            return Outcome::redraw();
+        }
+        // Columns: type a name to jump to it (Finder's type-select);
+        // capitals are the commands there (I insert · C cd · E edit · P preview)
+        if self.view == View::Columns && !self.as_command.get() {
+            if let [c] = key {
+                let c = *c as char;
+                if c.is_ascii_lowercase() || c == '_' || c == '0' || c == '9' {
+                    let fresh = self
+                        .jump
+                        .1
+                        .is_none_or(|t| t.elapsed() > Duration::from_millis(900));
+                    if fresh {
+                        self.jump.0.clear();
+                    }
+                    self.jump.0.push(c);
+                    self.jump.1 = Some(Instant::now());
+                    let find = |want: &str| {
+                        self.rows.iter().position(|r| match r {
+                            Row::Entry { idx, .. } => self
+                                .item(idx)
+                                .is_some_and(|it| it.name.to_lowercase().starts_with(want)),
+                            _ => false,
+                        })
+                    };
+                    // no name starts like that: start over from this letter
+                    let hit = find(&self.jump.0).or_else(|| {
+                        let one = c.to_string();
+                        find(&one)
+                    });
+                    if find(&self.jump.0).is_none() {
+                        self.jump.0 = c.to_string();
+                    }
+                    if let Some(i) = hit {
+                        self.sel = i;
+                    }
+                    let mut out = Outcome::redraw();
+                    out.jobs.extend(self.update_preview());
+                    return out;
+                }
+                let lower: &[u8] = match c {
+                    'I' => b"i",
+                    'C' => b"c",
+                    'E' => b"e",
+                    'P' => b"p",
+                    _ => b"",
+                };
+                if !lower.is_empty() {
+                    self.as_command.set(true);
+                    let out = self.key(lower);
+                    self.as_command.set(false);
+                    return out;
+                }
+            }
         }
         if self.view == View::Sizes && key == b"x" {
             if let Some((p, _, _)) = self
@@ -1974,6 +2069,22 @@ impl FilesPane {
     }
 
     fn render_hints(&self, area: Rect, buf: &mut Buffer) {
+        if let Some((p, who)) = &self.confirm_undo {
+            let t = format!(
+                "undo {who}'s edit to {}? y puts it back (the current file goes to the Trash) · any other key keeps it",
+                p.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            );
+            buf.set_stringn(
+                area.x,
+                area.bottom() - 1,
+                &t,
+                area.width as usize,
+                Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+            );
+            return;
+        }
         if let Some(p) = &self.confirm_delete {
             let size = self
                 .sizes
@@ -2034,10 +2145,13 @@ impl FilesPane {
                 View::List => {
                     "space select · s sort · y copy path · m move · ⏎ open · p preview · tab view"
                 }
-                View::Grid => "←↑↓→ move · ⏎ open · ⌫ up · i insert · p preview · tab view",
+                View::Grid => "←↑↓→ move · ⏎ open · ⌫ up · +/− card size · i insert · p preview",
+                View::Columns => {
+                    "type to jump · ←→ columns · ⏎ open · I insert · C cd · E edit · P preview"
+                }
                 View::Sizes => "⏎ drill in · x delete (asks first) · ⌫ up · r recount · tab view",
                 View::Recent => {
-                    "who changed what, newest first · ⏎ open · i insert · p preview · r refresh"
+                    "who changed what, newest first · u undo an agent's edit · ⏎ open · i insert"
                 }
                 _ => {
                     "⏎ open · i insert · c cd · e edit · p preview · / filter · . hidden · tab view"
@@ -2375,6 +2489,15 @@ impl FilesPane {
             let right_w = right.as_ref().map(|(r, _)| r.chars().count()).unwrap_or(0);
             let name_room = w.saturating_sub(right_w + 1);
             buf.set_stringn(area.x, y, truncate(&text, name_room), name_room, st);
+            // Tree: a faint guide under each open folder (board 9)
+            if let (View::Tree, Row::Entry { depth, .. }) = (self.view, row) {
+                for level in 0..*depth {
+                    let gx = area.x + level * 2;
+                    if (gx as usize) < area.x as usize + name_room {
+                        buf.set_string(gx, y, "│", base.fg(Color::Indexed(240)));
+                    }
+                }
+            }
             if let Some((r, rs)) = right {
                 if right_w < w {
                     buf.set_stringn(area.x + (w - right_w) as u16, y, r, right_w, rs);
@@ -2452,13 +2575,17 @@ impl FilesPane {
     /// Grid view: a card per entry (board 9), coloured by type, row by row.
     fn render_grid(&self, area: Rect, buf: &mut Buffer, focused: bool) {
         let gap = 1u16;
-        let card_w = 18u16.min(area.width.max(4));
+        let (base_w, card_h) = match self.grid_size {
+            0 => (14u16, 3u16),
+            2 => (26, 5),
+            _ => (18, 4),
+        };
+        let card_w = base_w.min(area.width.max(4));
         let cols = ((area.width + gap) / (card_w + gap)).max(1) as usize;
         // stretch the cards to use the width
         let card_w = ((area.width + gap) / cols as u16)
             .saturating_sub(gap)
             .max(4);
-        let card_h = 4u16;
         self.grid_cols.set(cols);
         let h = (area.height / card_h) as usize;
         if h == 0 {
@@ -2512,14 +2639,20 @@ impl FilesPane {
             };
             let w = card_w as usize;
             buf.set_stringn(gx, gy, format!("╭{}╮", "─".repeat(w - 2)), w, border);
-            buf.set_stringn(gx, gy + 3, format!("╰{}╯", "─".repeat(w - 2)), w, border);
-            for dy in 1..3 {
+            buf.set_stringn(
+                gx,
+                gy + card_h - 1,
+                format!("╰{}╯", "─".repeat(w - 2)),
+                w,
+                border,
+            );
+            for dy in 1..card_h - 1 {
                 buf.set_string(gx, gy + dy, "│", border);
                 buf.set_string(gx + card_w - 1, gy + dy, "│", border);
             }
             if sel {
                 buf.set_style(
-                    Rect::new(gx + 1, gy + 1, card_w - 2, 2),
+                    Rect::new(gx + 1, gy + 1, card_w - 2, card_h - 2),
                     Style::default().bg(SEL_BG),
                 );
             }
@@ -2529,13 +2662,29 @@ impl FilesPane {
                 st = st.add_modifier(Modifier::BOLD);
             }
             buf.set_stringn(gx + 2, gy + 1, truncate(&name, inner), inner, st);
-            buf.set_stringn(
-                gx + 2,
-                gy + 2,
-                truncate(&info, inner),
-                inner,
-                Style::default().fg(DIM),
-            );
+            if card_h >= 4 {
+                buf.set_stringn(
+                    gx + 2,
+                    gy + 2,
+                    truncate(&info, inner),
+                    inner,
+                    Style::default().fg(DIM),
+                );
+            }
+            // large cards: when it last changed
+            if card_h >= 5 {
+                if let Row::Entry { idx, .. } = row {
+                    if let Some(it) = self.item(idx) {
+                        buf.set_stringn(
+                            gx + 2,
+                            gy + 3,
+                            truncate(&ago_long(it.mtime), inner),
+                            inner,
+                            Style::default().fg(FAINT),
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -2699,7 +2848,7 @@ fn human_space(b: u64) -> String {
 
 /// Move a file or folder into the Trash (macOS ~/.Trash, else the
 /// freedesktop trash). A move, never a delete; fails across disks.
-fn to_trash(p: &Path) -> std::io::Result<PathBuf> {
+pub fn to_trash(p: &Path) -> std::io::Result<PathBuf> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_default();
@@ -2794,6 +2943,12 @@ fn diff_line(l: &str) -> Line<'static> {
         Color::Reset
     };
     Line::styled(l.replace('\t', "    "), Style::default().fg(c))
+}
+
+/// A file's (or folder's) preview as lines, and a note ("· 4.2 KB").
+pub fn preview_of(path: &Path, dir: bool, hidden: bool) -> (Vec<Line<'static>>, String) {
+    let p = load_preview(path, dir, hidden);
+    (p.lines, p.note)
 }
 
 fn load_preview(path: &Path, dir: bool, hidden: bool) -> Preview {
@@ -3163,7 +3318,7 @@ mod tests {
         p.key(b"\r"); // expand
         let s = screen(&p);
         assert!(
-            s.contains("▾ src/") && s.contains("    main.rs") && s.contains("  ▸ core/"),
+            s.contains("▾ src/") && s.contains("│   main.rs") && s.contains("│ ▸ core/"),
             "{s}"
         );
         p.key(b"j"); // core
@@ -3175,6 +3330,58 @@ mod tests {
         assert_eq!(p.selected().unwrap().0, d.join("src"));
         p.key(b".");
         assert!(screen(&p).contains(".env"));
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn columns_jump_grid_sizes_and_recent_undo_asks() {
+        let d = tmp("jump");
+        let (mut p, jobs) = FilesPane::new(d.clone());
+        settle(&mut p, jobs);
+        // Columns: typing jumps to a name; capitals are the commands
+        let out = p.key(b"2");
+        settle(&mut p, out.jobs);
+        p.key(b"r");
+        assert_eq!(p.selected().unwrap().0, d.join("README.md"));
+        p.key(b"s");
+        assert_eq!(
+            p.selected().unwrap().0,
+            d.join("src"),
+            "no \"rs\": starts over at s"
+        );
+        let out = p.key(b"I");
+        assert_eq!(out.acts, vec![Act::Insert(d.join("src"))]);
+        // Grid: + and - change the card size
+        let out = p.key(b"4");
+        settle(&mut p, out.jobs);
+        p.key(b"-");
+        assert_eq!(p.grid_size, 0);
+        p.key(b"+");
+        p.key(b"+");
+        assert_eq!(p.grid_size, 2);
+        // Recent: u on an agent's file asks first; n keeps it
+        let out = p.key(b"8");
+        settle(&mut p, out.jobs);
+        let file = d.join("src/main.rs");
+        p.agent_marks.insert(file.clone(), ("api".into(), 81));
+        p.sel = p
+            .rows
+            .iter()
+            .position(|r| {
+                matches!(r, Row::Recent(_)) && {
+                    let Row::Recent(i) = r else { unreachable!() };
+                    p.recent.as_ref().unwrap().1[*i].0 == "src/main.rs"
+                }
+            })
+            .unwrap();
+        p.key(b"u");
+        assert!(
+            screen(&p).contains("undo api's edit to main.rs"),
+            "{}",
+            screen(&p)
+        );
+        let out = p.key(b"y");
+        assert_eq!(out.acts, vec![Act::UndoAgentEdit(file, "api".into())]);
         let _ = std::fs::remove_dir_all(d);
     }
 

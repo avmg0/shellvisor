@@ -42,7 +42,7 @@ pub struct Kind {
 }
 
 /// The palette.
-pub const KINDS: [Kind; 6] = [
+pub const KINDS: [Kind; 9] = [
     Kind {
         name: "Shell",
         tool: None,
@@ -72,6 +72,21 @@ pub const KINDS: [Kind; 6] = [
         name: "Data flow",
         tool: Some("flow"),
         note: "jobs · sv flow",
+    },
+    Kind {
+        name: "Preview",
+        tool: Some("preview"),
+        note: "the file picked in files",
+    },
+    Kind {
+        name: "Agents",
+        tool: Some("agents"),
+        note: "state · tokens · changes",
+    },
+    Kind {
+        name: "Activity",
+        tool: Some("activity"),
+        note: "downloads · installs",
     },
 ];
 
