@@ -514,6 +514,9 @@ pub struct ContextMenu {
     pub sel: usize,
     /// Pane-local cell that was right-clicked (for Open link).
     pub cell: (u16, u16),
+    /// The pointer was dragged onto an item with the button held: letting
+    /// go there runs it (a native menu's press-drag-release).
+    pub dragged: bool,
 }
 
 pub const CONTEXT_ITEMS: [&str; 11] = [
@@ -2707,6 +2710,18 @@ impl App {
     // ---------------------------------------------------------------- input
 
     fn on_input(&mut self, bytes: &[u8]) -> io::Result<()> {
+        if std::env::var_os("SHELLVISOR_DEBUG_INPUT").is_some() {
+            // what the terminal sends, escaped, for bug reports
+            use std::io::Write as _;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(crate::paths::state_dir().join("input.log"))
+            {
+                let shown: String = bytes.escape_ascii().to_string();
+                let _ = writeln!(f, "{shown}");
+            }
+        }
         let mut forward: Vec<u8> = Vec::new();
         for key in keys::tokenize(bytes) {
             if self.fwd.is_some() && self.modal == Modal::None && key != [0x1d] {
@@ -2785,6 +2800,9 @@ impl App {
                         self.ctx = None;
                         self.context_act_menu(&m, m.sel)?;
                     }
+                    // a mouse report this parser doesn't know (old X10 form)
+                    // or focus in / out: leave the menu as it is
+                    k if k.starts_with(b"\x1b[M") || k == b"\x1b[I" || k == b"\x1b[O" => {}
                     _ => self.ctx = None,
                 }
                 continue;
@@ -7250,15 +7268,20 @@ impl App {
             // moving with the button held (or hovering) highlights an item
             if ev.is_motion() {
                 if let Some(i) = item(&ev) {
-                    self.ctx = Some(ContextMenu { sel: i, ..m });
+                    let moved = (ev.x, ev.y) != (m.x, m.y);
+                    self.ctx = Some(ContextMenu {
+                        sel: i,
+                        dragged: m.dragged || moved,
+                        ..m
+                    });
                     self.dirty = true;
                 }
                 return Ok(());
             }
-            // press, drag onto an item, let go: like a native menu. Letting
-            // go where it opened keeps it open for a click.
+            // press, drag onto an item, let go: like a native menu. A release
+            // without that drag (a plain right-click) keeps it open for a click.
             if ev.release {
-                if (ev.x, ev.y) != (m.x, m.y) {
+                if m.dragged && ev.code & 0b11 == 2 {
                     if let Some(i) = item(&ev) {
                         self.ctx = None;
                         self.dirty = true;
@@ -7501,6 +7524,7 @@ impl App {
                         x: ev.x,
                         y: ev.y,
                         cell: (row, col),
+                        dragged: false,
                         sel: if self.sel.is_some_and(|s| s.pane == id) {
                             0
                         } else {
