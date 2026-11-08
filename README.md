@@ -4,11 +4,11 @@
 
 ![Shellvisor: a bash tab with an `ls` table, then the files pane following the shell and previewing a file](docs/images/demo.gif)
 
-Shellvisor is a full-screen terminal app (like `tmux`, `htop` or `vim`) that runs your own zsh or bash in tabs and splits, and — as it grows — adds panes for files, live system stats, a data-flow view of your pipelines, and coding agents working side by side. Every command, alias and full-screen program you use today keeps working unchanged.
+Shellvisor is a full-screen terminal app (like `tmux`, `htop` or `vim`) that runs your own zsh or bash in tabs and splits, with panes around it for files, live system stats, a data-flow view of your pipelines, the services you run (ports, containers, logs, HTTP), and coding agents working side by side. Every command, alias and full-screen program you use today keeps working unchanged.
 
 ## Why
 
-- **One binary, tiny footprint.** Written in Rust. Budget: ≤ 8 MB binary, ≤ 15 MB memory, < 0.5 % CPU when idle. The current build is ~1.8 MB and uses ~5.6 MB of memory with three tabs plus the files and system panes open.
+- **One binary, tiny footprint.** Written in Rust. Budget: ≤ 8 MB binary, ≤ 15 MB memory, < 0.5 % CPU when idle. The current build is ~3.7 MB and uses ~6.5 MB of memory with three tabs plus the files and system panes open.
 - **Nothing to relearn.** Your `.zshrc` / `.bash_profile` load as usual; vim, less, fzf, ssh and git all behave as before.
 - **Off is one command away.** `sv off` hides the panels, `sv exit` leaves completely.
 
