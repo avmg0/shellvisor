@@ -6,9 +6,6 @@
 
 Shellvisor is a full-screen terminal app (like `tmux`, `htop` or `vim`) that runs your own zsh or bash in tabs and splits, and — as it grows — adds panes for files, live system stats, a data-flow view of your pipelines, and coding agents working side by side. Every command, alias and full-screen program you use today keeps working unchanged.
 
-> **Status: early development (P0–P4 of 7 done).**
-> Working today: tabs and splits of real zsh/bash shells, a tab bar that shows what each tab is doing (running ⠋, downloading ◴ with a progress bar, failed ✖, new output •), a status bar, split layouts, your tabs restored after a restart, custom keys, and a one-key switch to *basic view*, which looks exactly like a plain terminal. Plus a **files pane** (tree, list, columns, grid, git changes, find, sizes, recent, preview) that follows your shell, a **system pane** (CPU, memory, disk, network, I/O, temperatures, processes), download/install progress for git, npm, pip, uv, brew, docker, cargo, curl and friends, **`sv` data commands** (nushell-style tables in bash/zsh) with an interactive table viewer, a **Flow pane** that shows the running job and meters pipelines stage by stage, and **coding agents side by side** (Claude Code, Codex, Gemini CLI, Aider or any command), each in its own git worktree, with one place to answer their approval prompts. Agents can start sub-agents, run as a team from `team.yaml`, or be planned from a goal on the agent board (`alt+g`). See [docs/ROADMAP.md](docs/ROADMAP.md).
-
 ## Why
 
 - **One binary, tiny footprint.** Written in Rust. Budget: ≤ 8 MB binary, ≤ 15 MB memory, < 0.5 % CPU when idle. The current build is ~1.8 MB and uses ~5.6 MB of memory with three tabs plus the files and system panes open.
