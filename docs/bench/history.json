@@ -1,1 +1,14 @@
-[]
+[
+ {
+  "version": "1.0.10",
+  "os": "linux-x86_64",
+  "tabs": 3,
+  "layout": "dev",
+  "binary_mb": 3.7,
+  "first_frame_ms": 2,
+  "prompt_ms": 153,
+  "rss_mb": 6.41,
+  "idle_cpu_pct": 0.2,
+  "date": "2026-11-08"
+ }
+]
