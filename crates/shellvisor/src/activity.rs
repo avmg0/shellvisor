@@ -113,7 +113,7 @@ pub struct Reading {
 
 /// (program, sub-commands that count — empty means any)
 const TABLE: &[(&str, &[&str])] = &[
-    ("git", &["clone", "fetch", "pull", "lfs"]),
+    ("git", &["clone", "fetch", "pull", "push", "lfs"]),
     ("npm", &["install", "i", "ci", "update", "add"]),
     ("pnpm", &["install", "i", "add", "update"]),
     ("yarn", &["install", "add", ""]),
@@ -723,6 +723,10 @@ mod tests {
         );
         assert_eq!(label("npm i -D vite").as_deref(), Some("npm i"));
         assert_eq!(
+            label("git push -u origin feature/alerts").as_deref(),
+            Some("git push")
+        );
+        assert_eq!(
             label("sudo apt-get install -y jq").as_deref(),
             Some("apt-get install")
         );
@@ -759,6 +763,8 @@ mod tests {
             "",
         ];
         assert_eq!(read_screen(rows.iter().copied()).progress, Some(45));
+        let rows = ["Writing objects:  62% (31/50), 12.40 MiB | 4.10 MiB/s"];
+        assert_eq!(read_screen(rows.iter().copied()).progress, Some(62));
         let rows = ["  42.7% ━━━━━━━ 12/30 MB", "Resolving deltas: 100% (3/3)"];
         assert_eq!(read_screen(rows.iter().copied()).progress, Some(100));
         assert_eq!(

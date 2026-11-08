@@ -1212,7 +1212,19 @@ fn draw_header(f: &mut Frame, app: &App, r: Rect) {
             .iter()
             .filter_map(|(_, a, _)| a.progress.map(u32::from))
             .collect();
-        let mut t = format!("{n} download{}", if n == 1 { "" } else { "s" });
+        // pushes go up: "1 upload"; a mix of both: "2 transfers"
+        let ups = acts
+            .iter()
+            .filter(|(_, a, _)| a.label.ends_with(" push"))
+            .count();
+        let word = if ups == n {
+            "upload"
+        } else if ups > 0 {
+            "transfer"
+        } else {
+            "download"
+        };
+        let mut t = format!("{n} {word}{}", if n == 1 { "" } else { "s" });
         if !pcts.is_empty() {
             t.push_str(&format!(
                 " · {}%",

@@ -100,6 +100,10 @@ In **find**, type part of a name; `tab` switches to searching inside files (`⏎
 
 ### System pane
 
+![The system pane next to a shell: a git push with its progress bar in the tab and the header, then sv flow metering a pipeline stage by stage while CPU climbs and python3 tops the process list](docs/images/panels.gif)
+
+<sub>A `git push` (progress, speed and time left in the tab, the pane title and the header), then the Flow pane (`F8`) metering `sv flow 'cat data/trades.csv | python3 tools/notional.py | grep ACME | sort … | head -3'` stage by stage while the system pane (`F3`) shows the load.</sub>
+
 CPU (a history chart and a cell per core), memory, swap, disk and temperature gauges, a Therm row with the temperature history, network, disk I/O, load, Shellvisor's own usage, and the busiest processes with CPU% and MEM% (`c` / `m` sort by CPU / memory). It reads nothing while it's hidden, and refreshes every 2 s (5 s in low-power mode).
 
 `t` switches to the **thermal view**: every sensor with its critical temperature, a temperature history per group (cpu, gpu, battery, disk), and whether the CPU is being slowed by heat — the clock against its top speed on Linux, macOS's CPU speed limit on a Mac. When the machine gets hot enough to slow down, Shellvisor tells you once (at most every 10 minutes).

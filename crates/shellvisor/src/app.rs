@@ -667,6 +667,8 @@ pub const PAST_SHOWN: usize = 30;
 
 /// How long a finished download's actions stay on offer.
 pub const TOAST_ACT: Duration = Duration::from_secs(12);
+/// How long a lone c / o waits for a next key before acting on the toast.
+const TOAST_HOLD: Duration = Duration::from_millis(350);
 
 /// How long a finish toast shows: longer when it offers c / o.
 pub fn toast_life(d: &Finished) -> Duration {
@@ -874,6 +876,10 @@ pub struct App {
     replays: HashMap<String, crate::replay::Recorder>,
     /// Files / URL for the next Logs or HTTP pane (`sv pane logs a.log`).
     svc_args: Vec<String>,
+    /// A plain `c` / `o` pressed while the finish toast offers it: it acts
+    /// only if no other key follows within TOAST_HOLD (else it was the
+    /// start of a command like `clear` or `open`, and goes to the shell).
+    toast_hold: Option<(PaneId, u8, Instant)>,
     /// Dragging a split's divider with the mouse: its path in the tree.
     drag: Option<Vec<bool>>,
     /// The layout editor (alt+e).
@@ -1021,6 +1027,7 @@ pub fn run(opts: Options) -> io::Result<i32> {
         board: None,
         replays: HashMap::new(),
         svc_args: Vec::new(),
+        toast_hold: None,
         plan_kept: None,
         drag: None,
         editor: None,
@@ -2567,6 +2574,9 @@ impl App {
         if self.panes.values().any(|p| p.pending_input.is_some()) {
             t = t.min(Duration::from_millis(50));
         }
+        if let Some((_, _, at)) = &self.toast_hold {
+            t = t.min(TOAST_HOLD.saturating_sub(at.elapsed()) + Duration::from_millis(5));
+        }
         t
     }
 
@@ -2962,6 +2972,14 @@ impl App {
             if key == b"\x1b[I" || key == b"\x1b[O" {
                 self.term_focused = key == b"\x1b[I";
                 continue;
+            }
+            // a held c / o followed by another key: it was typing, not the toast
+            if let Some((pid, b, _)) = self.toast_hold.take() {
+                self.flush_forward(&mut forward)?;
+                if let Some(p) = self.panes.get_mut(&pid) {
+                    let _ = p.pane.write(&[b]);
+                    p.typed_since_prompt = true;
+                }
             }
             if self.fwd.is_some() && self.modal == Modal::None && key != [0x1d] {
                 self.flush_forward(&mut forward)?;
@@ -3514,14 +3532,11 @@ impl App {
                     .filter(|(d, at)| at.elapsed() < TOAST_ACT && d.ok && d.target.is_some())
                     .map(|(d, _)| d.clone());
                 if let (true, Some(d)) = (at_prompt, offer) {
-                    if key == b"c" && d.target.as_ref().is_some_and(|t| t.is_dir()) {
-                        self.done_cd(&d);
-                        self.toast_act = None;
-                        continue;
-                    }
-                    if key == b"o" {
-                        self.done_open(&d)?;
-                        self.toast_act = None;
+                    let acts = key == b"o" || d.target.as_ref().is_some_and(|t| t.is_dir());
+                    if acts {
+                        // wait a moment: `clear`, `cat`, `open` start with these too
+                        self.flush_forward(&mut forward)?;
+                        self.toast_hold = Some((target, key[0], Instant::now()));
                         continue;
                     }
                 }
@@ -7432,6 +7447,41 @@ impl App {
         }
     }
 
+    /// A held c / o with nothing after it: act on the finish toast.
+    fn fire_toast_hold(&mut self) -> io::Result<()> {
+        let Some((pid, b, at)) = self.toast_hold else {
+            return Ok(());
+        };
+        if at.elapsed() < TOAST_HOLD {
+            return Ok(());
+        }
+        self.toast_hold = None;
+        let offer = self
+            .toast_act
+            .as_ref()
+            .filter(|(d, at)| at.elapsed() < TOAST_ACT && d.ok && d.target.is_some())
+            .map(|(d, _)| d.clone());
+        match (offer, b) {
+            (Some(d), b'c') => {
+                self.done_cd(&d);
+                self.toast_act = None;
+            }
+            (Some(d), b'o') => {
+                self.done_open(&d)?;
+                self.toast_act = None;
+            }
+            _ => {
+                // the toast went away meanwhile: it was a key for the shell
+                if let Some(p) = self.panes.get_mut(&pid) {
+                    let _ = p.pane.write(&[b]);
+                    p.typed_since_prompt = true;
+                }
+            }
+        }
+        self.dirty = true;
+        Ok(())
+    }
+
     /// What a Ports, Docker, Logs or HTTP pane asked for.
     fn svc_acts(&mut self, id: PaneId, acts: Vec<crate::svc::Act>) {
         use crate::svc::Act;
@@ -7610,6 +7660,7 @@ impl App {
         if self.fwd.is_some() {
             self.dirty = true;
         }
+        let _ = self.fire_toast_hold();
         // typed at a new shell's first prompt (sessions, duplicates, agents);
         // a shell without our hooks never says "prompt": type it anyway
         for p in self.panes.values_mut() {

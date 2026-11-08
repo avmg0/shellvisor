@@ -1211,6 +1211,14 @@ fn activity_list_speed_files_mark_and_toast_actions() {
     s.send("\x1b");
     s.wait_for("✔ git clone finished · 1.20 MiB in");
     s.wait_for("c cd into repo");
+    // a command that starts with c goes to the shell whole (typed key by key)
+    for ch in "cat /dev/null; echo typed-ok\r".chars() {
+        s.send(&ch.to_string());
+        s.pump(Duration::from_millis(30));
+    }
+    s.wait_for("typed-ok");
+    s.run("pwd");
+    s.wait_until("still here", |t| !t.contains("work/repo\n"));
     // plain c at an empty prompt: cd into the clone (ctrl+] c works too)
     s.send("c");
     s.pump(Duration::from_millis(500));

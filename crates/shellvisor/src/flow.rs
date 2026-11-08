@@ -449,6 +449,7 @@ impl FlowPane {
             };
             let state = match st.exit {
                 _ if slow == Some(i) => "◀ slowest".to_string(),
+                _ if st.closed => "✔ had enough".to_string(),
                 Some(0) => "✔ exit 0".to_string(),
                 Some(c) => format!("✖ exit {c}"),
                 None if s.done => "✔ done".to_string(),
@@ -576,6 +577,7 @@ impl FlowPane {
             let buffering =
                 !s.done && i > 0 && st.bytes_in > 0 && st.bytes_out == 0 && st.exit.is_none();
             let (status, stc) = match st.exit {
+                _ if st.closed => ("✔ stopped early".to_string(), DIM),
                 Some(0) => ("✔ exit 0".to_string(), CYAN),
                 Some(c) => (format!("✖ exit {c}"), RED),
                 None if s.done => ("✔ done".to_string(), CYAN),

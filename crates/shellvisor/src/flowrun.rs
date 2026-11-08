@@ -31,6 +31,10 @@ pub struct StageStats {
     /// The latest whole line it wrote (shown on its card).
     #[serde(default)]
     pub sample: String,
+    /// It stopped because a later stage had read enough and closed the
+    /// pipe (`… | head`): SIGPIPE, exit 141. Not a failure.
+    #[serde(default)]
+    pub closed: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -233,6 +237,12 @@ fn lines(n: u64) -> String {
 
 /// One line per stage for the end-of-run summary (and tests).
 pub fn summary(s: &FlowStats) -> String {
+    summary_width(s, crate::data::term_width())
+}
+
+/// The summary for a terminal `width` columns wide: the command column and
+/// the extras shrink so no row wraps.
+pub fn summary_width(s: &FlowStats, width: usize) -> String {
     let slow = s.bottleneck();
     let secs = (s.elapsed_ms as f64 / 1000.0).max(0.001);
     let mut out = format!(
@@ -241,15 +251,28 @@ pub fn summary(s: &FlowStats) -> String {
         if s.stages.len() == 1 { "" } else { "s" },
         s.elapsed_ms as f64 / 1000.0
     );
+    // "  1  " + cmd + "  700.0k lines  19.6 MB  19.5 MB/s" = 37 + cmd
+    let narrow = width < 90;
+    let fixed = if narrow { 31 } else { 49 };
     let w = s
         .stages
         .iter()
         .map(|x| x.cmd.chars().count())
         .max()
         .unwrap_or(0)
-        .min(36);
+        .min(36)
+        .min(width.saturating_sub(fixed + 2).max(8));
     for (i, st) in s.stages.iter().enumerate() {
-        let cmd: String = st.cmd.chars().take(w).collect();
+        let full = st.cmd.chars().count();
+        let cmd: String = if full > w {
+            st.cmd
+                .chars()
+                .take(w.saturating_sub(1))
+                .chain(['…'])
+                .collect()
+        } else {
+            st.cmd.clone()
+        };
         let kept = if i > 0 && st.lines_in > 0 {
             format!(
                 "  {:.0}% kept",
@@ -259,17 +282,36 @@ pub fn summary(s: &FlowStats) -> String {
             String::new()
         };
         let exit = match st.exit {
+            _ if st.closed => "  · stopped early".to_string(),
             Some(0) | None => String::new(),
             Some(c) => format!("  ✖ exit {c}"),
         };
-        out.push_str(&format!(
-            "  {}  {cmd:<w$}  {:>6} lines  {:>9}  {:>9}/s{kept}{}{exit}\n",
-            i + 1,
-            lines(st.lines_out),
-            human(st.bytes_out),
-            human((st.bytes_out as f64 / secs) as u64),
-            if slow == Some(i) { "  ◀ slowest" } else { "" },
-        ));
+        let mark = if slow == Some(i) { "  ◀ slowest" } else { "" };
+        let row = if narrow {
+            // no rate column; the extras only as far as they fit
+            format!(
+                "  {}  {cmd:<w$}  {:>6} lines  {:>9}",
+                i + 1,
+                lines(st.lines_out),
+                human(st.bytes_out),
+            )
+        } else {
+            format!(
+                "  {}  {cmd:<w$}  {:>6} lines  {:>9}  {:>9}/s",
+                i + 1,
+                lines(st.lines_out),
+                human(st.bytes_out),
+                human((st.bytes_out as f64 / secs) as u64),
+            )
+        };
+        let mut row = row;
+        for extra in [kept.as_str(), mark, exit.as_str()] {
+            if row.chars().count() + extra.chars().count() <= width.saturating_sub(1) || !narrow {
+                row.push_str(extra);
+            }
+        }
+        out.push_str(&row);
+        out.push('\n');
     }
     out
 }
@@ -457,9 +499,16 @@ pub fn run(args: &[String]) -> i32 {
         })
     });
 
-    let mut codes = Vec::new();
+    // (exit code, ended by SIGPIPE — the next stage stopped reading)
+    let mut codes: Vec<(i32, bool)> = Vec::new();
     for mut c in children {
-        codes.push(c.wait().ok().and_then(|s| s.code()).unwrap_or(1));
+        use std::os::unix::process::ExitStatusExt;
+        let st = c.wait().ok();
+        let pipe = st.is_some_and(|s| s.signal() == Some(libc::SIGPIPE) || s.code() == Some(141));
+        let code = st
+            .and_then(|s| s.code().or(s.signal().map(|g| 128 + g)))
+            .unwrap_or(1);
+        codes.push((code, pipe));
     }
     for t in threads {
         let _ = t.join();
@@ -472,8 +521,15 @@ pub fn run(args: &[String]) -> i32 {
         let mut s = stats.lock().unwrap();
         s.elapsed_ms = started.elapsed().as_millis() as u64;
         s.done = true;
-        for (i, c) in codes.iter().enumerate() {
-            s.stages[i].exit = Some(*c);
+        let last = codes.len().saturating_sub(1);
+        for (i, (c, pipe)) in codes.iter().enumerate() {
+            // an earlier stage cut off by a later one is fine
+            if *pipe && i < last {
+                s.stages[i].exit = Some(0);
+                s.stages[i].closed = true;
+            } else {
+                s.stages[i].exit = Some(*c);
+            }
         }
         s.clone()
     };
@@ -489,7 +545,7 @@ pub fn run(args: &[String]) -> i32 {
         }
         Err(_) => eprint!("{text}"),
     }
-    *codes.last().unwrap_or(&0)
+    codes.last().map(|c| c.0).unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -524,8 +580,20 @@ mod tests {
             });
         }
         assert_eq!(s.bottleneck(), Some(1));
-        let text = summary(&s);
+        let text = summary_width(&s, 120);
         assert!(text.contains("flow · 3 stages · 10.0s"), "{text}");
+        // a 60-column pane: no row wraps
+        s.stages[2].cmd = "sort -t, -k6 -nr --buffer-size=1G --parallel=4".into();
+        s.stages[2].closed = true;
+        s.stages[2].exit = Some(0);
+        let narrow = summary_width(&s, 60);
+        assert!(narrow.lines().all(|l| l.chars().count() < 60), "{narrow}");
+        assert!(
+            summary_width(&s, 120).contains("· stopped early"),
+            "{narrow}"
+        );
+        s.stages[2].cmd = "c".into();
+        s.stages[2].closed = false;
         assert!(
             text.lines().nth(2).unwrap().contains("10% kept  ◀ slowest"),
             "{text}"
