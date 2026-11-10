@@ -21,3 +21,12 @@ Upstream: https://github.com/doy/vt100-rust (MIT, see LICENSE).
    cell invariants; a row made narrower clears a wide character cut in half;
    wrapping after a resize with a stale scroll region saturates instead of
    underflowing.
+
+4. **Reflow on resize** (`src/grid.rs` `reflow`, `src/screen.rs` `set_size`,
+   `src/row.rs` `from_cells` / `into_cells`): like iTerm2 and Terminal.app,
+   the main screen joins soft-wrapped rows into logical lines and wraps them
+   again at the new width, so making a pane narrower and wider again loses
+   nothing. The cursor stays on the same character, lines pushed off the top
+   go to the scrollback, and wide characters never split across rows. The
+   alternate screen (full-screen programs) keeps the plain resize; those
+   programs redraw on SIGWINCH.

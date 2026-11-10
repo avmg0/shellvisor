@@ -99,6 +99,153 @@ impl Grid {
         }
     }
 
+    /// Shellvisor: resize like iTerm2 or Terminal.app — every logical line
+    /// (rows joined by soft wraps) is wrapped again at the new width, so
+    /// making a pane narrower and wider again loses nothing, and text
+    /// printed while it was narrow fills the width once it's wider. The
+    /// cursor stays on the same character; lines pushed off the top go to
+    /// the scrollback. For the main screen only: full-screen programs on
+    /// the alternate screen redraw themselves at the new size.
+    pub fn reflow(&mut self, size: Size) {
+        if size == self.size || self.rows.is_empty() {
+            self.set_size(size);
+            return;
+        }
+        let blank = crate::Cell::new();
+        let cols = usize::from(size.cols.max(1));
+        let old_cols = usize::from(self.size.cols);
+        // everything, oldest first; where the cursor is in it
+        let sb_len = self.scrollback.len();
+        let cursor_row = sb_len + usize::from(self.pos.row);
+        let cursor_col = usize::from(self.pos.col);
+        let mut all: Vec<crate::row::Row> = self.scrollback.drain(..).collect();
+        all.extend(self.rows.drain(..));
+        // blank rows below the cursor are just unused screen
+        while all.len() > cursor_row + 1 {
+            let last = all.last().unwrap();
+            if last.wrapped() || (0..u16::MAX).map_while(|i| last.get(i)).any(|c| c != &blank) {
+                break;
+            }
+            all.pop();
+        }
+        // logical lines: (cells, cursor offset in it)
+        let mut lines: Vec<(Vec<crate::Cell>, Option<usize>)> = Vec::new();
+        let mut cur: Vec<crate::Cell> = Vec::new();
+        let mut cur_cursor = None;
+        for (i, row) in all.into_iter().enumerate() {
+            let wrapped = row.wrapped();
+            let mut cells = row.into_cells();
+            // a blank left at the end of the previous row because this
+            // row's wide character didn't fit there: not part of the text
+            if cells.first().is_some_and(|c| c.is_wide()) && cur.last() == Some(&blank) {
+                cur.pop();
+            }
+            if i == cursor_row {
+                cur_cursor = Some(cur.len() + cursor_col);
+            }
+            if wrapped {
+                // a soft-wrapped row is full: pad a compacted one back out
+                cells.resize(old_cols.max(cells.len()), crate::Cell::new());
+                cur.extend(cells);
+            } else {
+                cur.extend(cells);
+                lines.push((std::mem::take(&mut cur), cur_cursor.take()));
+            }
+        }
+        if !cur.is_empty() || cur_cursor.is_some() {
+            lines.push((cur, cur_cursor));
+        }
+        // wrap each line again at the new width
+        let mut out: Vec<crate::row::Row> = Vec::new();
+        let mut new_cursor = (0usize, 0usize);
+        for (mut cells, cursor) in lines {
+            // trailing blanks don't need room (but the cursor may sit there)
+            let used = cells.iter().rposition(|c| c != &blank).map_or(0, |i| i + 1);
+            cells.truncate(used);
+            let first = out.len();
+            let mut row: Vec<crate::Cell> = Vec::with_capacity(cols);
+            // where each original cell landed: (row, col)
+            let mut at: Vec<(usize, usize)> = Vec::with_capacity(cells.len());
+            let mut k = 0;
+            while k < cells.len() {
+                let c = &cells[k];
+                let w = if c.is_wide() { 2 } else { 1 };
+                if c.is_wide_continuation() {
+                    // placed together with its first half
+                    k += 1;
+                    continue;
+                }
+                if row.len() + w > cols {
+                    // a wide character never splits across rows
+                    row.resize(cols, crate::Cell::new());
+                    out.push(crate::row::Row::from_cells(std::mem::take(&mut row), true));
+                }
+                if w == 2 && cols < 2 {
+                    k += 2;
+                    continue;
+                }
+                at.push((out.len(), row.len()));
+                row.push(c.clone());
+                if w == 2 {
+                    at.push((out.len(), row.len()));
+                    row.push(cells.get(k + 1).cloned().unwrap_or_else(crate::Cell::new));
+                    k += 1;
+                }
+                k += 1;
+            }
+            row.resize(cols, crate::Cell::new());
+            out.push(crate::row::Row::from_cells(row, false));
+            if let Some(off) = cursor {
+                new_cursor = match at.get(off) {
+                    Some(&p) => p,
+                    None => {
+                        // past the text: as many columns after its end
+                        let (er, ec) = at.last().map_or((first, 0), |&(r, c)| (r, c + 1));
+                        let extra = off - at.len();
+                        let col = ec + extra;
+                        (er + col / cols, col % cols)
+                    }
+                };
+                while out.len() <= new_cursor.0 {
+                    if let Some(last) = out.last_mut() {
+                        last.wrap(true);
+                    }
+                    out.push(crate::row::Row::new(size.cols));
+                }
+            }
+        }
+        // the screen shows the last rows; the cursor's row must be on it
+        let rows = usize::from(size.rows.max(1));
+        let end = out.len().max(new_cursor.0 + 1);
+        let start = end.saturating_sub(rows).min(new_cursor.0);
+        let mut screen: Vec<crate::row::Row> = out.drain(start..).collect();
+        screen.truncate(rows);
+        while screen.len() < rows {
+            screen.push(crate::row::Row::new(size.cols));
+        }
+        for mut r in out {
+            r.trim_trailing_blanks();
+            self.scrollback.push_back(r);
+        }
+        while self.scrollback.len() > self.scrollback_len {
+            self.scrollback.pop_front();
+        }
+        self.rows = screen;
+        self.size = size;
+        self.pos = Pos {
+            row: u16::try_from(new_cursor.0 - start).unwrap_or(0),
+            col: u16::try_from(new_cursor.1).unwrap_or(0),
+        };
+        self.scroll_top = 0;
+        self.scroll_bottom = size.rows - 1;
+        self.scrollback_offset = self.scrollback_offset.min(self.scrollback.len());
+        self.row_clamp_top(false);
+        self.row_clamp_bottom(false);
+        self.col_clamp();
+        self.saved_pos.row = self.saved_pos.row.min(size.rows - 1);
+        self.saved_pos.col = self.saved_pos.col.min(size.cols - 1);
+    }
+
     pub fn pos(&self) -> Pos {
         self.pos
     }

@@ -12,6 +12,7 @@ repository.workspace = true
 crossterm = "0.29"
 libc = "0.2"
 regex-lite = "0.1"
+unicode-width = "0.2"
 portable-pty = "0.9"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 serde = { version = "1", features = ["derive"] }

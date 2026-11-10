@@ -673,6 +673,96 @@ mod tests {
         }
     }
 
+    fn rows_of(p: &vt100::Parser<Hooks>) -> Vec<String> {
+        let (_, cols) = p.screen().size();
+        p.screen()
+            .rows(0, cols)
+            .map(|r| r.trim_end().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn resizing_reflows_lines_like_iterm() {
+        let mut p = vt100::Parser::new_with_callbacks(5, 20, 100, Hooks::default());
+        // one long line (soft-wrapped at 20), one short one, then a prompt
+        p.process(b"abcdefghijklmnopqrstuvwxyz0123\r\nshort line\r\n$ ");
+        assert_eq!(
+            rows_of(&p)[..4],
+            ["abcdefghijklmnopqrst", "uvwxyz0123", "short line", "$"]
+        );
+        // wider: the long line is one row again; the cursor stays after "$ "
+        p.screen_mut().set_size(5, 40);
+        assert_eq!(
+            rows_of(&p)[..3],
+            ["abcdefghijklmnopqrstuvwxyz0123", "short line", "$"]
+        );
+        assert_eq!(p.screen().cursor_position(), (2, 2));
+        // much narrower: nothing is cut, it wraps
+        p.screen_mut().set_size(5, 8);
+        let all = p.screen().contents();
+        assert!(all.contains("short li") && all.contains("ne"), "{all:?}");
+        let (r, c) = p.screen().cursor_position();
+        assert_eq!(rows_of(&p)[usize::from(r)], "$");
+        assert_eq!(c, 2);
+        // and back: exactly as it was
+        p.screen_mut().set_size(5, 20);
+        assert_eq!(
+            rows_of(&p)[..4],
+            ["abcdefghijklmnopqrst", "uvwxyz0123", "short line", "$"]
+        );
+        // typing continues at the right place
+        p.process(b"ls");
+        assert_eq!(rows_of(&p)[3], "$ ls");
+    }
+
+    #[test]
+    fn a_full_width_line_survives_narrow_and_back() {
+        // printed wide, then the split is dragged narrow and wide again
+        let mut p = vt100::Parser::new_with_callbacks(4, 40, 100, Hooks::default());
+        p.process(b"==> Installing at-spi2-core dependency: gtk+3\r\n$ ");
+        p.screen_mut().set_size(4, 12);
+        p.screen_mut().set_size(4, 40);
+        assert_eq!(rows_of(&p)[0], "==> Installing at-spi2-core dependency:");
+        assert_eq!(rows_of(&p)[1], "gtk+3");
+        p.screen_mut().set_size(4, 60);
+        assert_eq!(
+            rows_of(&p)[0],
+            "==> Installing at-spi2-core dependency: gtk+3"
+        );
+    }
+
+    #[test]
+    fn fewer_rows_keep_the_cursor_and_push_lines_to_scrollback() {
+        let mut p = vt100::Parser::new_with_callbacks(8, 20, 100, Hooks::default());
+        for i in 1..=6 {
+            p.process(format!("line {i}\r\n").as_bytes());
+        }
+        p.process(b"$ ");
+        p.screen_mut().set_size(3, 20);
+        assert_eq!(rows_of(&p), ["line 5", "line 6", "$"]);
+        assert_eq!(p.screen().cursor_position(), (2, 2));
+        // the rest is in the scrollback
+        p.screen_mut().set_scrollback(4);
+        assert_eq!(rows_of(&p)[0], "line 1");
+        p.screen_mut().set_scrollback(0);
+        // taller again: the scrollback stays where it is, the prompt too
+        p.screen_mut().set_size(8, 20);
+        assert_eq!(p.screen().cursor_position().1, 2);
+        assert!(rows_of(&p).iter().any(|r| r == "$"));
+    }
+
+    #[test]
+    fn wide_characters_reflow_whole() {
+        let mut p = vt100::Parser::new_with_callbacks(4, 10, 100, Hooks::default());
+        p.process("ab世界cd世界ef\r\n$ ".as_bytes());
+        p.screen_mut().set_size(4, 5);
+        for r in rows_of(&p) {
+            assert!(!r.contains('\u{fffd}'), "{r:?}");
+        }
+        p.screen_mut().set_size(4, 20);
+        assert_eq!(rows_of(&p)[0], "ab世界cd世界ef");
+    }
+
     #[test]
     fn shellvisor_osc_becomes_event_and_is_not_drawn() {
         let mut p = parser();

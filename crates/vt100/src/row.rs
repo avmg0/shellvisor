@@ -33,6 +33,16 @@ impl Row {
         self.cells.iter()
     }
 
+    /// Shellvisor (reflow): a row from its cells.
+    pub fn from_cells(cells: Vec<crate::Cell>, wrapped: bool) -> Self {
+        Self { cells, wrapped }
+    }
+
+    /// Shellvisor (reflow): the row's cells, taken out.
+    pub fn into_cells(self) -> Vec<crate::Cell> {
+        self.cells
+    }
+
     /// Drop trailing blank cells (keeping at least one) and free the
     /// spare capacity. Only for rows that will no longer be drawn into
     /// (scrollback) — see SHELLVISOR.md.

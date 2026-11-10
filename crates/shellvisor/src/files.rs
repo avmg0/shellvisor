@@ -11,7 +11,7 @@ use crate::highlight;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -225,7 +225,7 @@ pub struct Outcome {
 }
 
 impl Outcome {
-    fn redraw() -> Self {
+    pub fn redraw() -> Self {
         Outcome {
             redraw: true,
             ..Default::default()
@@ -288,6 +288,8 @@ struct Preview {
     note: String,
     /// First line shown.
     top: usize,
+    /// First column shown (long lines scroll sideways).
+    left: usize,
 }
 
 #[derive(Default)]
@@ -323,6 +325,10 @@ pub struct FilesPane {
     scroll: Cell<usize>,
     /// Rows shown last frame (for paging).
     page: Cell<usize>,
+    /// Where the preview's text was drawn, and (rows, columns, widest
+    /// line) of it: for the wheel, the scrollbars and paging.
+    prev_area: Cell<Rect>,
+    prev_view: Cell<(usize, usize, usize)>,
     filter: String,
     editing: Option<Editing>,
     pub git: Option<GitStatus>,
@@ -394,6 +400,8 @@ impl FilesPane {
             sel: 0,
             scroll: Cell::new(0),
             page: Cell::new(10),
+            prev_area: Cell::new(Rect::default()),
+            prev_view: Cell::new((0, 0, 0)),
             filter: String::new(),
             editing: None,
             git: None,
@@ -956,6 +964,7 @@ impl FilesPane {
                         lines,
                         note,
                         top: 0,
+                        left: 0,
                     });
                 }
                 return Outcome::redraw();
@@ -1126,6 +1135,47 @@ impl FilesPane {
                 }
             }
             return out;
+        }
+        // the preview scrolls with shift+arrows (and [ ] by the page), in every view
+        if self.prev.is_some() && self.preview {
+            let page = self.prev_view.get().0.max(2) as isize - 1;
+            let done = match key {
+                b"\x1b[1;2A" => {
+                    self.scroll_preview(-1);
+                    Some(())
+                }
+                b"\x1b[1;2B" => {
+                    self.scroll_preview(1);
+                    Some(())
+                }
+                b"\x1b[5;2~" | b"[" => {
+                    self.scroll_preview(-page);
+                    Some(())
+                }
+                b"\x1b[6;2~" | b"]" => {
+                    self.scroll_preview(page);
+                    Some(())
+                }
+                b"\x1b[1;2D" => {
+                    self.scroll_preview_x(-8);
+                    Some(())
+                }
+                b"\x1b[1;2C" => {
+                    self.scroll_preview_x(8);
+                    Some(())
+                }
+                b"\x1b[1;2H" => {
+                    if let Some(p) = &mut self.prev {
+                        p.top = 0;
+                        p.left = 0;
+                    }
+                    Some(())
+                }
+                _ => None,
+            };
+            if done.is_some() {
+                return Outcome::redraw();
+            }
         }
         if self.view == View::Grid && matches!(key, b"+" | b"=" | b"-" | b"_") {
             let bigger = matches!(key, b"+" | b"=");
@@ -1566,10 +1616,72 @@ impl FilesPane {
     }
 
     fn scroll_preview(&mut self, by: isize) {
+        let (h, _, _) = self.prev_view.get();
         if let Some(p) = &mut self.prev {
-            p.top =
-                (p.top as isize + by).clamp(0, p.lines.len().saturating_sub(1) as isize) as usize;
+            let max = p.lines.len().saturating_sub(h.max(1));
+            p.top = (p.top as isize + by).clamp(0, max as isize) as usize;
         }
+    }
+
+    fn scroll_preview_x(&mut self, by: isize) {
+        let (_, w, widest) = self.prev_view.get();
+        if let Some(p) = &mut self.prev {
+            let max = widest.saturating_sub(w.max(1));
+            p.left = (p.left as isize + by).clamp(0, max as isize) as usize;
+        }
+    }
+
+    /// The wheel over the preview scrolls it (shift or a sideways wheel:
+    /// left and right); anywhere else it moves the selection.
+    pub fn wheel_at(&mut self, dir: isize, x: u16, y: u16, sideways: bool) -> Outcome {
+        let a = self.prev_area.get();
+        if self.prev.is_some() && a.contains((x, y).into()) {
+            if sideways {
+                self.scroll_preview_x(-dir * 8);
+            } else {
+                self.scroll_preview(-dir * 3);
+            }
+            return Outcome::redraw();
+        }
+        if sideways {
+            return Outcome::default();
+        }
+        self.wheel(dir)
+    }
+
+    /// Is (x, y) on one of the preview's scrollbars?
+    pub fn on_preview_bar(&self, x: u16, y: u16) -> bool {
+        let a = self.prev_area.get();
+        let (h, w, widest) = self.prev_view.get();
+        let Some(p) = self.prev.as_ref() else {
+            return false;
+        };
+        (p.lines.len() > h && x == a.right().saturating_sub(1) && y >= a.y && y < a.y + h as u16)
+            || (widest > w && y == a.bottom().saturating_sub(1) && x >= a.x && x < a.right())
+    }
+
+    /// A click or drag on the preview's scrollbars (absolute screen
+    /// position): jump there. True if it was on one.
+    pub fn preview_bar_at(&mut self, x: u16, y: u16) -> bool {
+        let a = self.prev_area.get();
+        let (h, w, widest) = self.prev_view.get();
+        let Some(p) = self.prev.as_mut() else {
+            return false;
+        };
+        let total = p.lines.len();
+        let vbar = total > h;
+        let hbar = widest > w;
+        if vbar && x == a.right().saturating_sub(1) && y >= a.y && y < a.y + h as u16 {
+            let f = (y - a.y) as f64 / (h.max(2) - 1) as f64;
+            p.top = (f * total.saturating_sub(h) as f64).round() as usize;
+            return true;
+        }
+        if hbar && y == a.bottom().saturating_sub(1) && x >= a.x && x < a.right() {
+            let f = (x - a.x) as f64 / (a.width.max(2) - 1) as f64;
+            p.left = (f * widest.saturating_sub(w) as f64).round() as usize;
+            return true;
+        }
+        false
     }
 
     /// Load the preview for the selected row if preview is on.
@@ -1593,6 +1705,7 @@ impl FilesPane {
                 lines: Vec::new(),
                 note: "diff…".into(),
                 top: 0,
+                left: 0,
             });
             return vec![Job::Diff {
                 root: self.root.clone(),
@@ -2158,6 +2271,12 @@ impl FilesPane {
                 }
             }
         };
+        // the preview scrolls on its own: say how, first, when it's shown
+        let hints = if self.preview && self.prev.is_some() && self.editing.is_none() {
+            format!("⇧↑↓←→ [ ] wheel scroll preview · {hints}")
+        } else {
+            hints.to_string()
+        };
         buf.set_stringn(
             area.x,
             area.bottom() - 1,
@@ -2690,6 +2809,7 @@ impl FilesPane {
 
     fn render_preview(&self, area: Rect, buf: &mut Buffer) {
         let Some(p) = &self.prev else {
+            self.prev_area.set(Rect::default());
             buf.set_stringn(
                 area.x,
                 area.y,
@@ -2699,7 +2819,9 @@ impl FilesPane {
             );
             return;
         };
-        let mut y = area.y;
+        if area.height < 2 {
+            return;
+        }
         let name = p
             .path
             .file_name()
@@ -2707,17 +2829,121 @@ impl FilesPane {
             .unwrap_or_default();
         buf.set_stringn(
             area.x,
-            y,
+            area.y,
             format!("{name} {}", p.note),
             area.width as usize,
             Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
         );
-        y += 1;
-        let gutter = if p.lines.len() >= 1000 { 5 } else { 4 };
-        for (i, line) in p.lines.iter().enumerate().skip(p.top) {
-            if y >= area.bottom() {
+        let text = Rect::new(area.x, area.y + 1, area.width, area.height - 1);
+        let numbers = !p.lines.is_empty() && !p.note.contains("folder");
+        let v = draw_text_view(buf, text, &p.lines, p.top, p.left, numbers);
+        self.prev_area.set(text);
+        self.prev_view.set((v.rows, v.cols, v.widest));
+        // where we are, when there's more than fits
+        if p.lines.len() > v.rows {
+            let pos = format!(
+                " {}–{}/{} ",
+                v.top + 1,
+                (v.top + v.rows).min(p.lines.len()),
+                p.lines.len()
+            );
+            let pw = pos.chars().count() as u16;
+            if area.width > pw + name.chars().count() as u16 + 4 {
+                buf.set_string(area.right() - pw, area.y, &pos, Style::default().fg(FAINT));
+            }
+        }
+    }
+}
+
+/// What a text view showed: the first line and column, how many rows and
+/// columns of text fit, and the widest line.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct TextView {
+    pub top: usize,
+    pub left: usize,
+    pub rows: usize,
+    pub cols: usize,
+    pub widest: usize,
+}
+
+fn line_width(l: &Line) -> usize {
+    use unicode_width::UnicodeWidthStr;
+    l.spans.iter().map(|s| s.content.width()).sum()
+}
+
+/// `l` from display column `left`, at most `w` columns.
+fn slice_line(l: &Line<'static>, left: usize, w: usize) -> Line<'static> {
+    use unicode_width::UnicodeWidthChar;
+    let mut col = 0usize;
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut used = 0usize;
+    for sp in &l.spans {
+        let mut text = String::new();
+        for ch in sp.content.chars() {
+            let cw = ch.width().unwrap_or(0);
+            if col + cw <= left {
+                col += cw;
+                continue;
+            }
+            if col < left {
+                // a wide character cut by the left edge
+                text.push(' ');
+                used += 1;
+                col += cw;
+                continue;
+            }
+            if used + cw > w {
                 break;
             }
+            text.push(ch);
+            used += cw;
+            col += cw;
+        }
+        if !text.is_empty() {
+            out.push(Span::styled(text, sp.style));
+        }
+        if used >= w {
+            break;
+        }
+    }
+    Line::from(out)
+}
+
+/// Draw `lines` from (`top`, `left`) in `area`, with line numbers when
+/// asked, a vertical scrollbar when there are more lines than rows and a
+/// horizontal one when a line is wider than the area. `top` and `left`
+/// are kept in range; what was used comes back.
+pub fn draw_text_view(
+    buf: &mut Buffer,
+    area: Rect,
+    lines: &[Line<'static>],
+    top: usize,
+    left: usize,
+    numbers: bool,
+) -> TextView {
+    let gutter = if !numbers {
+        0
+    } else if lines.len() >= 1000 {
+        5
+    } else {
+        4
+    };
+    let widest = lines.iter().map(line_width).max().unwrap_or(0);
+    let full_w = (area.width as usize).saturating_sub(gutter);
+    let vbar = lines.len() > area.height as usize;
+    let mut text_w = full_w.saturating_sub(usize::from(vbar));
+    let hbar = widest > text_w && area.height >= 3;
+    let rows = (area.height as usize).saturating_sub(usize::from(hbar));
+    // the vertical bar may be needed once the horizontal one takes a row
+    let vbar = vbar || lines.len() > rows;
+    if vbar {
+        text_w = full_w.saturating_sub(1);
+    }
+    let top = top.min(lines.len().saturating_sub(rows.max(1)));
+    let left = left.min(widest.saturating_sub(text_w));
+    for (i, line) in lines.iter().enumerate().skip(top).take(rows) {
+        let y = area.y + (i - top) as u16;
+        if gutter > 0 {
             buf.set_stringn(
                 area.x,
                 y,
@@ -2725,14 +2951,61 @@ impl FilesPane {
                 gutter,
                 Style::default().fg(FAINT),
             );
-            buf.set_line(
-                area.x + gutter as u16,
-                y,
-                line,
-                area.width.saturating_sub(gutter as u16),
-            );
-            y += 1;
         }
+        let shown = if left == 0 {
+            line.clone()
+        } else {
+            slice_line(line, left, text_w)
+        };
+        buf.set_line(area.x + gutter as u16, y, &shown, text_w as u16);
+    }
+    let track = Style::default().fg(Color::Indexed(238));
+    let thumb = Style::default().fg(Color::Indexed(246));
+    if vbar && rows > 0 {
+        let x = area.right() - 1;
+        let total = lines.len().max(1);
+        let size = (rows * rows / total).clamp(1, rows);
+        let pos = if total > rows {
+            top * (rows - size) / (total - rows)
+        } else {
+            0
+        };
+        for k in 0..rows {
+            let on = k >= pos && k < pos + size;
+            buf.set_string(
+                x,
+                area.y + k as u16,
+                if on { "┃" } else { "│" },
+                if on { thumb } else { track },
+            );
+        }
+    }
+    if hbar && text_w > 0 {
+        let y = area.y + rows as u16;
+        let x0 = area.x + gutter as u16;
+        let span = text_w;
+        let size = (span * text_w / widest.max(1)).clamp(1, span);
+        let pos = if widest > text_w {
+            left * (span - size) / (widest - text_w)
+        } else {
+            0
+        };
+        for k in 0..span {
+            let on = k >= pos && k < pos + size;
+            buf.set_string(
+                x0 + k as u16,
+                y,
+                if on { "━" } else { "─" },
+                if on { thumb } else { track },
+            );
+        }
+    }
+    TextView {
+        top,
+        left,
+        rows,
+        cols: text_w,
+        widest,
     }
 }
 
@@ -2957,6 +3230,7 @@ fn load_preview(path: &Path, dir: bool, hidden: bool) -> Preview {
         lines: Vec::new(),
         note: String::new(),
         top: 0,
+        left: 0,
     };
     if dir {
         match std::fs::read_dir(path) {
@@ -3266,6 +3540,59 @@ pub fn grep(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_view_scrolls_both_ways_with_scrollbars() {
+        let lines: Vec<Line<'static>> = (0..30)
+            .map(|i| Line::from(format!("{i:02} {}", "abcdefghij".repeat(10))))
+            .collect();
+        let area = Rect::new(0, 0, 40, 10);
+        let row = |buf: &Buffer, y: u16| -> String {
+            (0..40).map(|x| buf[(x, y)].symbol().to_string()).collect()
+        };
+        let mut buf = Buffer::empty(area);
+        let v = draw_text_view(&mut buf, area, &lines, 0, 0, true);
+        // 9 rows of text (the last row is the sideways bar), 35 columns
+        assert_eq!((v.rows, v.cols, v.widest), (9, 35, 103));
+        assert!(
+            row(&buf, 0).starts_with("  1 00 abcdefghij"),
+            "{}",
+            row(&buf, 0)
+        );
+        assert!(
+            row(&buf, 0).ends_with('┃'),
+            "thumb at the top: {}",
+            row(&buf, 0)
+        );
+        assert!(row(&buf, 8).ends_with('│'), "track below it");
+        assert!(
+            row(&buf, 9).contains('━') && row(&buf, 9).contains('─'),
+            "{}",
+            row(&buf, 9)
+        );
+        // down to the end and right: kept in range, the end of the lines shows
+        let mut buf = Buffer::empty(area);
+        let v = draw_text_view(&mut buf, area, &lines, 999, 999, true);
+        assert_eq!((v.top, v.left), (21, 103 - 35));
+        assert!(row(&buf, 8).starts_with(" 30 "), "{}", row(&buf, 8));
+        assert!(row(&buf, 8).contains("efghij"), "{}", row(&buf, 8));
+        assert!(row(&buf, 8).ends_with('┃'), "thumb at the bottom");
+        // short text: no bars at all
+        let mut buf = Buffer::empty(area);
+        let v = draw_text_view(&mut buf, area, &lines[..3], 0, 0, false);
+        assert_eq!(v.rows, 9);
+        assert!(!row(&buf, 0).contains('│') || v.widest > 40);
+        // wide characters cut by the left edge become a blank, never half
+        let wide = [Line::from("ab世界cd")];
+        let cut = slice_line(&wide[0], 3, 10);
+        assert_eq!(
+            cut.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>(),
+            " 界cd"
+        );
+    }
 
     fn tmp(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("sv-files-{tag}-{}", std::process::id()));

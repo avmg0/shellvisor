@@ -47,6 +47,10 @@ pub struct InfoPane {
     pub kind: InfoKind,
     /// The highlighted row (Agents, Activity) or first line shown (Preview).
     pub sel: usize,
+    /// Preview: the first column shown (long lines scroll sideways).
+    pub left: usize,
+    /// Preview: (lines, rows shown, columns shown, widest line) last drawn.
+    pub view: std::cell::Cell<(usize, usize, usize, usize)>,
     cache: RefCell<Option<Cached>>,
 }
 
@@ -55,6 +59,8 @@ impl InfoPane {
         InfoPane {
             kind,
             sel: 0,
+            left: 0,
+            view: std::cell::Cell::new((0, 0, 0, 0)),
             cache: RefCell::new(None),
         }
     }
@@ -79,6 +85,20 @@ impl InfoPane {
         let (lines, note) = crate::files::preview_of(path, dir, hidden);
         *self.cache.borrow_mut() = Some((path.to_path_buf(), mtime, lines.clone(), note.clone()));
         (lines, note)
+    }
+
+    /// Preview: scroll by lines, kept in range.
+    pub fn scroll_y(&mut self, by: isize) {
+        let (n, rows, _, _) = self.view.get();
+        let max = n.saturating_sub(rows.max(1));
+        self.sel = (self.sel as isize + by).clamp(0, max as isize) as usize;
+    }
+
+    /// Preview: scroll sideways by columns, kept in range.
+    pub fn scroll_x(&mut self, by: isize) {
+        let (_, _, cols, widest) = self.view.get();
+        let max = widest.saturating_sub(cols.max(1));
+        self.left = (self.left as isize + by).clamp(0, max as isize) as usize;
     }
 
     /// ↑↓ / j k / page keys; `n` rows. True if it moved.

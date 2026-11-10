@@ -49,8 +49,30 @@ impl MouseEv {
         }
     }
 
+    /// Sideways wheel (trackpads, tilt wheels): -1 left, +1 right.
+    pub fn hwheel(&self) -> Option<isize> {
+        match self.code & !0b11100 {
+            66 => Some(-1),
+            67 => Some(1),
+            _ => None,
+        }
+    }
+
+    /// Shift was held.
+    pub fn shift(&self) -> bool {
+        self.code & 4 != 0
+    }
+
+    /// Moving with the left button held.
+    pub fn is_left_drag(&self) -> bool {
+        self.code & 32 != 0
+            && self.code & 0b11 == 0
+            && self.wheel().is_none()
+            && self.hwheel().is_none()
+    }
+
     pub fn is_motion(&self) -> bool {
-        self.code & 32 != 0 && self.wheel().is_none()
+        self.code & 32 != 0 && self.wheel().is_none() && self.hwheel().is_none()
     }
 
     /// A plain left-button press.

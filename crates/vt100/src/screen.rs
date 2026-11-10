@@ -86,7 +86,8 @@ impl Screen {
 
     /// Resizes the terminal.
     pub fn set_size(&mut self, rows: u16, cols: u16) {
-        self.grid.set_size(crate::grid::Size { rows, cols });
+        // Shellvisor: the main screen reflows its lines (see Grid::reflow)
+        self.grid.reflow(crate::grid::Size { rows, cols });
         self.alternate_grid
             .set_size(crate::grid::Size { rows, cols });
     }

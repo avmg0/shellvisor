@@ -93,7 +93,7 @@ Eight views, numbered as in the header — `1` Tree (with indent guides) · `2` 
 | `↑↓` `j k` · `⏎` | move · open folder / open file in `$EDITOR` |
 | `→ ←` `l h` · `⌫` | expand · collapse · go up a folder |
 | `i` · `c` · `e` | type the path at your prompt · `cd` there · edit |
-| `p` / `space` · `J K` | preview (with colours; diffs in the git view) · scroll it |
+| `p` / `space` · `⇧↑↓←→` `[ ]` `J K` | preview (with colours; diffs in the git view) · scroll it up, down and sideways — or the wheel over it (shift or a sideways wheel: left and right); click or drag its scrollbars |
 | `/` · `.` · `r` · `f` | filter · hidden files · refresh · stop/start following the shell |
 
 In **find**, type part of a name; `tab` switches to searching inside files (`⏎` runs it). Inside git repos, `.gitignore` is respected.

@@ -1424,8 +1424,9 @@ fn draw_keys(f: &mut Frame, app: &App, r: Rect) {
             .collect(),
         Some(Tool::Info(i)) => match i.kind {
             crate::infopane::InfoKind::Preview => vec![
-                ("↑↓".into(), "Scroll"),
+                ("↑↓ ←→".into(), "Scroll"),
                 ("PgUp PgDn".into(), "Page"),
+                ("wheel".into(), "Scroll (shift: sideways)"),
                 (k("toggle_files", "F2"), "Pick a file"),
             ],
             crate::infopane::InfoKind::Agents => vec![
@@ -2815,31 +2816,19 @@ fn draw_info(
                 w.saturating_sub(name.chars().count() + 1),
                 d,
             );
-            let top = p.sel.min(lines.len().saturating_sub(1));
-            let gutter = if lines.len() >= 1000 { 5 } else { 4 };
-            for (k, line) in lines
-                .iter()
-                .enumerate()
-                .skip(top)
-                .take(r.height.saturating_sub(1) as usize)
-            {
-                let y = r.y + 1 + (k - top) as u16;
-                if !dir {
-                    buf.set_stringn(
-                        r.x,
-                        y,
-                        format!("{:>g$} ", k + 1, g = gutter - 1),
-                        gutter,
-                        Style::default().fg(FAINT),
-                    );
-                    buf.set_line(
-                        r.x + gutter as u16,
-                        y,
-                        line,
-                        r.width.saturating_sub(gutter as u16),
-                    );
-                } else {
-                    buf.set_line(r.x, y, line, r.width);
+            let text = Rect::new(r.x, r.y + 1, r.width, r.height.saturating_sub(1));
+            let v = crate::files::draw_text_view(buf, text, &lines, p.sel, p.left, !dir);
+            p.view.set((lines.len(), v.rows, v.cols, v.widest));
+            if lines.len() > v.rows {
+                let pos = format!(
+                    " {}–{}/{} ",
+                    v.top + 1,
+                    (v.top + v.rows).min(lines.len()),
+                    lines.len()
+                );
+                let pw = pos.chars().count() as u16;
+                if r.width > pw + name.chars().count() as u16 + 12 {
+                    buf.set_string(r.right() - pw, r.y, &pos, Style::default().fg(FAINT));
                 }
             }
         }

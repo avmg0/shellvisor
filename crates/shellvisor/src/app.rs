@@ -7917,6 +7917,28 @@ impl App {
             return;
         };
         let kind = p.kind;
+        // the preview: ↑↓ PgUp PgDn by lines, ←→ sideways, scrollbars when drawn
+        if kind == crate::infopane::InfoKind::Preview {
+            if let Some(Tool::Info(p)) = self.tools.get_mut(&id) {
+                let page = p.view.get().1.max(2) as isize - 1;
+                match key {
+                    b"\x1b[A" | b"\x1bOA" | b"k" | b"K" => p.scroll_y(-1),
+                    b"\x1b[B" | b"\x1bOB" | b"j" | b"J" => p.scroll_y(1),
+                    b"\x1b[5~" | b"[" => p.scroll_y(-page),
+                    b"\x1b[6~" | b"]" | b" " => p.scroll_y(page),
+                    b"\x1b[D" | b"\x1bOD" | b"h" => p.scroll_x(-8),
+                    b"\x1b[C" | b"\x1bOC" | b"l" => p.scroll_x(8),
+                    b"g" | b"\x1b[H" => {
+                        p.sel = 0;
+                        p.left = 0;
+                    }
+                    b"G" | b"\x1b[F" => p.scroll_y(isize::MAX / 2),
+                    _ => return,
+                }
+                self.dirty = true;
+            }
+            return;
+        }
         let n = match kind {
             crate::infopane::InfoKind::Preview => usize::MAX / 2,
             crate::infopane::InfoKind::Agents => self.agent_ids().len(),
@@ -8162,7 +8184,32 @@ impl App {
         if let Some(tool) = self.tools.get_mut(&id) {
             let inside = inner.contains((ev.x, ev.y).into());
             let out = match (tool, ev.wheel()) {
-                (Tool::Files(f), Some(dir)) => f.wheel(dir),
+                (Tool::Files(f), Some(dir)) => f.wheel_at(dir, ev.x, ev.y, ev.shift()),
+                (Tool::Files(f), None) if ev.hwheel().is_some() => {
+                    f.wheel_at(-ev.hwheel().unwrap_or(0), ev.x, ev.y, true)
+                }
+                // the preview's scrollbars: click or drag to move
+                (Tool::Files(f), None)
+                    if (ev.is_left_press() || ev.is_left_drag())
+                        && f.on_preview_bar(ev.x, ev.y) =>
+                {
+                    f.preview_bar_at(ev.x, ev.y);
+                    Outcome::redraw()
+                }
+                (Tool::Info(i), Some(dir)) if i.kind == crate::infopane::InfoKind::Preview => {
+                    if ev.shift() {
+                        i.scroll_x(-dir * 8);
+                    } else {
+                        i.scroll_y(-dir * 3);
+                    }
+                    Outcome::redraw()
+                }
+                (Tool::Info(i), None)
+                    if ev.hwheel().is_some() && i.kind == crate::infopane::InfoKind::Preview =>
+                {
+                    i.scroll_x(ev.hwheel().unwrap_or(0) * 8);
+                    Outcome::redraw()
+                }
                 (Tool::System(sp), Some(dir)) => {
                     sp.wheel(dir);
                     Outcome {
