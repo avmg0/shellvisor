@@ -10,5 +10,17 @@
   "rss_mb": 6.41,
   "idle_cpu_pct": 0.2,
   "date": "2026-11-08"
+ },
+ {
+  "version": "1.0.11",
+  "os": "linux-x86_64",
+  "tabs": 3,
+  "layout": "dev",
+  "binary_mb": 3.72,
+  "first_frame_ms": 3,
+  "prompt_ms": 99,
+  "rss_mb": 6.43,
+  "idle_cpu_pct": 0.3,
+  "date": "2026-11-10"
  }
 ]
